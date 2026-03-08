@@ -169,6 +169,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         )
                         .await;
 
+                        // Publish temperature sensors
+                        let pack_temps: Vec<(usize, u32)> = report
+                            .pack_data
+                            .as_ref()
+                            .map(|packs| {
+                                packs
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(i, p)| p.max_temp.map(|t| (i, t)))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        mqtt::publish_temperatures(
+                            &publisher_client,
+                            &ha_prefix,
+                            report.properties.hyper_tmp,
+                            &pack_temps,
+                        )
+                        .await;
+
                         // Persist RTE state periodically (every poll)
                         rte_tracker.save();
 
