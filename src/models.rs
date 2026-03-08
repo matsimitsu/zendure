@@ -240,6 +240,16 @@ pub struct ZendureWriteRequest {
 
 // --- Control decision ---
 
+/// Battery storage mode: Flash saves ~19W idle power but requires a 5s wake delay.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StorageMode {
+    /// smartMode: 1 — active, ready for charge/discharge commands
+    Ram,
+    /// smartMode: 0 — low-power standby
+    Flash,
+}
+
 /// What the controller wants the battery to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ControlMode {
