@@ -1,3 +1,4 @@
+mod battery;
 mod config;
 mod controller;
 mod grid_power;
@@ -5,6 +6,7 @@ mod models;
 mod mqtt;
 mod zendure;
 
+use battery::Battery;
 use config::Config;
 use grid_power::{GridPowerEstimator, KwhDeltaEstimator};
 use mqtt::MqttEvent;
@@ -25,14 +27,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.zendure_sn
     );
 
-    // Poll battery on startup to get actual device limits
+    // Poll battery on startup to get actual device state
     let zendure_client = zendure::ZendureClient::new(&config.zendure_ip, config.zendure_sn.clone());
-    let report = zendure_client.get_properties().await?;
-    let limits = controller::BatteryLimits::from_properties(&report.properties);
+    let battery_state = zendure_client
+        .get_state()
+        .await
+        .map_err(|e| e.to_string())?;
     tracing::info!(
-        "Battery limits: max_discharge={}W, SOC={}%",
-        limits.max_discharge_power,
-        report.properties.electric_level.unwrap_or(0),
+        "Battery: SOC={}%, max_discharge={}W, max_charge={}W",
+        battery_state.soc,
+        battery_state.max_discharge_power,
+        battery_state.max_charge_power,
     );
 
     let (mqtt_client, eventloop) = mqtt::create_mqtt_client(&config);
@@ -60,6 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut latest_meter: Option<models::MeterReading> = None;
     let mut latest_solar_power: f64 = 0.0;
     let mut grid_estimator = KwhDeltaEstimator::new();
+    let mut ctrl = controller::Controller::new();
 
     tracing::info!("Coordinator running, waiting for MQTT data...");
 
@@ -87,7 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let net_grid_power = grid_estimator.update(meter, latest_solar_power);
 
-        let decision = controller::decide(net_grid_power, latest_solar_power, &limits);
+        let decision = ctrl.decide(net_grid_power, latest_solar_power, &battery_state);
         tracing::info!(
             "Decision: {} at {}W — {} (net_grid={:.0}W)",
             decision.mode,
