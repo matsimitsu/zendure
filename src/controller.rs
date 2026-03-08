@@ -27,6 +27,8 @@ pub struct Controller {
     daily_cooldown_suppressions: u32,
     cycle_warn_threshold: u32,
     last_cycle_reset_day: u32,
+    min_soc: u32,
+    max_soc: u32,
 }
 
 impl Controller {
@@ -49,6 +51,8 @@ impl Controller {
             daily_cooldown_suppressions: 0,
             cycle_warn_threshold: config.cycle_warn_threshold,
             last_cycle_reset_day: Local::now().ordinal(),
+            min_soc: config.min_soc,
+            max_soc: config.max_soc,
         }
     }
 
@@ -114,13 +118,16 @@ impl Controller {
     fn target_mode(&self, grid_power: f64, battery: &BatteryState, hour: u32) -> ControlMode {
         let is_discharge_period = !(DISCHARGE_END_HOUR..DISCHARGE_START_HOUR).contains(&hour);
 
-        // Exporting to grid and battery not full → charge
-        if battery.soc < 100 && grid_power < self.charge_start_threshold {
+        // Exporting to grid and battery below max SOC → charge
+        if battery.soc < self.max_soc && grid_power < self.charge_start_threshold {
             return ControlMode::Charge;
         }
 
-        // Importing from grid during discharge hours → discharge
-        if is_discharge_period && grid_power > self.discharge_start_threshold {
+        // Importing from grid during discharge hours and battery above min SOC → discharge
+        if is_discharge_period
+            && battery.soc > self.min_soc
+            && grid_power > self.discharge_start_threshold
+        {
             return ControlMode::Discharge;
         }
 
@@ -348,6 +355,8 @@ mod tests {
             daily_cooldown_suppressions: 0,
             cycle_warn_threshold: 200,
             last_cycle_reset_day: Local::now().ordinal(),
+            min_soc: 10,
+            max_soc: 100,
         }
     }
 
@@ -376,17 +385,69 @@ mod tests {
     // --- Mode selection tests ---
 
     #[test]
-    fn soc_100_never_charges() {
+    fn soc_at_max_never_charges() {
         let mut ctrl = controller_no_cooldown();
         let decision = ctrl.decide_at_hour(-500.0, 600.0, &battery(100), 20);
         assert_ne!(decision.mode, ControlMode::Charge);
     }
 
     #[test]
-    fn soc_100_can_still_discharge() {
+    fn soc_below_max_can_charge() {
+        let mut ctrl = controller_no_cooldown();
+        let decision = ctrl.decide_at_hour(-500.0, 600.0, &battery(99), 12);
+        assert_eq!(decision.mode, ControlMode::Charge);
+    }
+
+    #[test]
+    fn soc_at_max_can_still_discharge() {
         let mut ctrl = controller_no_cooldown();
         let decision = ctrl.decide_at_hour(400.0, 0.0, &battery(100), 20);
         assert_eq!(decision.mode, ControlMode::Discharge);
+    }
+
+    #[test]
+    fn soc_at_min_never_discharges() {
+        let mut ctrl = controller_no_cooldown();
+        let decision = ctrl.decide_at_hour(400.0, 0.0, &battery(10), 20);
+        assert_ne!(decision.mode, ControlMode::Discharge);
+    }
+
+    #[test]
+    fn soc_above_min_can_discharge() {
+        let mut ctrl = controller_no_cooldown();
+        let decision = ctrl.decide_at_hour(400.0, 0.0, &battery(11), 20);
+        assert_eq!(decision.mode, ControlMode::Discharge);
+    }
+
+    #[test]
+    fn charging_transitions_to_idle_when_soc_reaches_max() {
+        let mut ctrl = controller_no_cooldown();
+        // Start charging at 99%
+        let d1 = ctrl.decide_at_hour(-500.0, 600.0, &battery(99), 12);
+        assert_eq!(d1.mode, ControlMode::Charge);
+
+        // SOC reaches 100% → should stop charging and go idle
+        let d2 = ctrl.decide_at_hour(-500.0, 600.0, &battery(100), 12);
+        assert_eq!(d2.mode, ControlMode::Idle);
+    }
+
+    #[test]
+    fn discharging_transitions_to_idle_when_soc_reaches_min() {
+        let mut ctrl = controller_no_cooldown();
+        // Start discharging at 11%
+        let d1 = ctrl.decide_at_hour(400.0, 0.0, &battery(11), 20);
+        assert_eq!(d1.mode, ControlMode::Discharge);
+
+        // SOC drops to 10% → should stop discharging and go idle
+        let d2 = ctrl.decide_at_hour(400.0, 0.0, &battery(10), 20);
+        assert_eq!(d2.mode, ControlMode::Idle);
+    }
+
+    #[test]
+    fn soc_at_min_can_still_charge() {
+        let mut ctrl = controller_no_cooldown();
+        let decision = ctrl.decide_at_hour(-500.0, 600.0, &battery(10), 12);
+        assert_eq!(decision.mode, ControlMode::Charge);
     }
 
     #[test]
