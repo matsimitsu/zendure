@@ -15,8 +15,6 @@ pub struct Controller {
     last_mode_change: Instant,
     last_decision_time: Instant,
     last_idle_start: Option<Instant>,
-    /// Whether the current decision is the first after a mode change (for 75% ramp).
-    first_in_mode: bool,
     min_mode_duration: Duration,
     min_decision_interval: Duration,
     charge_margin: i32,
@@ -35,7 +33,6 @@ impl Controller {
             last_decision_time: Instant::now()
                 - Duration::from_secs(config.min_decision_interval_secs),
             last_idle_start: Some(Instant::now()),
-            first_in_mode: false,
             min_mode_duration,
             min_decision_interval: Duration::from_secs(config.min_decision_interval_secs),
             charge_margin: config.charge_margin,
@@ -99,8 +96,14 @@ impl Controller {
             return idle;
         }
 
+        let mut decision = decision;
+
         if decision.mode != self.last_mode {
-            self.first_in_mode = true;
+            // Mode change: apply 75% ramp factor to ease in
+            if decision.power_watts > 0 {
+                decision.power_watts = (decision.power_watts as f64 * 0.75) as i32;
+                decision.reason = decision.reason.replace("factor: 1.00", "factor: 0.75");
+            }
             self.last_mode = decision.mode;
             self.last_mode_change = Instant::now();
 
@@ -110,8 +113,6 @@ impl Controller {
             } else {
                 self.last_idle_start = None;
             }
-        } else {
-            self.first_in_mode = false;
         }
 
         // Check idle timeout → standby
@@ -135,6 +136,8 @@ impl Controller {
     }
 
     /// Stateless decision logic with battery feedback and margins.
+    /// Power is calculated at full (1.0) factor; the 0.75 ramp is applied
+    /// in `apply_cooldown` on the first decision after a mode change.
     fn raw_decide(
         &self,
         grid_power: f64,
@@ -142,8 +145,6 @@ impl Controller {
         battery: &BatteryState,
         hour: u32,
     ) -> ControlDecision {
-        let factor = if self.first_in_mode { 0.75 } else { 1.0 };
-
         // Battery full — don't charge
         if battery.soc >= 100 {
             return self.discharge_or_idle(
@@ -151,7 +152,6 @@ impl Controller {
                 solar_power,
                 battery,
                 hour,
-                factor,
                 "Battery full (100%)",
             );
         }
@@ -161,17 +161,17 @@ impl Controller {
             // Calculate how much to charge, accounting for what the battery is already doing.
             // grid_power is negative when exporting. battery.current_power is negative when charging.
             // adjustment = how much MORE we should charge beyond current level.
-            let adjustment = ((-grid_power) as i32 - self.charge_margin) as f64 * factor;
+            let adjustment = (-grid_power) as i32 - self.charge_margin;
             let current_charge = (-battery.current_power).max(0); // current charge rate (positive)
             let max_charge = MAX_CHARGE_POWER.min(battery.max_charge_power);
-            let charge_power = (current_charge + adjustment as i32).clamp(0, max_charge);
+            let charge_power = (current_charge + adjustment).clamp(0, max_charge);
 
             let excess = (-grid_power) as i32;
             return ControlDecision {
                 mode: ControlMode::Charge,
                 power_watts: charge_power,
                 reason: format!(
-                    "Solar excess: exporting {excess}W to grid (margin: {}W, factor: {factor:.2})",
+                    "Solar excess: exporting {excess}W to grid (margin: {}W, factor: 1.00)",
                     self.charge_margin,
                 ),
                 grid_power,
@@ -179,7 +179,7 @@ impl Controller {
             };
         }
 
-        self.discharge_or_idle(grid_power, solar_power, battery, hour, factor, "")
+        self.discharge_or_idle(grid_power, solar_power, battery, hour, "")
     }
 
     fn discharge_or_idle(
@@ -188,7 +188,6 @@ impl Controller {
         solar_power: f64,
         battery: &BatteryState,
         hour: u32,
-        factor: f64,
         extra_reason: &str,
     ) -> ControlDecision {
         let is_discharge_period = !(DISCHARGE_END_HOUR..DISCHARGE_START_HOUR).contains(&hour);
@@ -197,14 +196,14 @@ impl Controller {
             // Calculate how much to discharge, accounting for what the battery is already doing.
             // grid_power is positive when importing. battery.current_power is positive when discharging.
             // adjustment = how much MORE we should discharge beyond current level.
-            let adjustment = (grid_power as i32 - self.discharge_margin) as f64 * factor;
+            let adjustment = grid_power as i32 - self.discharge_margin;
             let current_discharge = battery.current_power.max(0); // current discharge rate
             let discharge_power =
-                (current_discharge + adjustment as i32).clamp(0, battery.max_discharge_power);
+                (current_discharge + adjustment).clamp(0, battery.max_discharge_power);
 
             let demand = grid_power as i32;
             let mut reason = format!(
-                "Discharge period (hour {hour}): grid demand {demand}W (margin: {}W, factor: {factor:.2})",
+                "Discharge period (hour {hour}): grid demand {demand}W (margin: {}W, factor: 1.00)",
                 self.discharge_margin,
             );
             if !extra_reason.is_empty() {
@@ -285,7 +284,6 @@ mod tests {
             last_mode_change: Instant::now() - Duration::from_secs(60),
             last_decision_time: Instant::now() - Duration::from_secs(60),
             last_idle_start: None,
-            first_in_mode: false,
             min_mode_duration: Duration::from_secs(10),
             min_decision_interval: Duration::ZERO,
             charge_margin: 50,
@@ -338,7 +336,8 @@ mod tests {
 
     #[test]
     fn charges_on_solar_excess() {
-        let mut ctrl = controller_no_cooldown();
+        // Already in charge mode so no ramp factor
+        let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(60));
         // Grid at -300W, margin=50W → charge at (300-50)*1.0 = 250W
         let decision = ctrl.decide_at_hour(-300.0, 400.0, &battery(50), 12);
         assert_eq!(decision.mode, ControlMode::Charge);
@@ -353,7 +352,8 @@ mod tests {
             max_charge_power: 1000,
             current_power: 0,
         };
-        let mut ctrl = controller_no_cooldown();
+        // Already in charge mode so no ramp factor
+        let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(60));
         let decision = ctrl.decide_at_hour(-1500.0, 2000.0, &state, 12);
         assert_eq!(decision.mode, ControlMode::Charge);
         assert_eq!(decision.power_watts, 1000);
@@ -375,7 +375,8 @@ mod tests {
             max_charge_power: 2400,
             current_power: 0,
         };
-        let mut ctrl = controller_no_cooldown();
+        // Already in discharge mode so no ramp factor
+        let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(60));
         let decision = ctrl.decide_at_hour(1000.0, 0.0, &state, 20);
         assert_eq!(decision.mode, ControlMode::Discharge);
         assert_eq!(decision.power_watts, 500);
@@ -392,7 +393,7 @@ mod tests {
 
     #[test]
     fn charge_margin_reduces_power() {
-        let mut ctrl = controller_no_cooldown();
+        let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(60));
         ctrl.charge_margin = 100;
         // Grid at -400W, margin=100W → charge at (400-100)*1.0 = 300W
         let decision = ctrl.decide_at_hour(-400.0, 500.0, &battery(50), 12);
@@ -402,7 +403,7 @@ mod tests {
 
     #[test]
     fn discharge_margin_reduces_power() {
-        let mut ctrl = controller_no_cooldown();
+        let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(60));
         ctrl.discharge_margin = 20;
         // Grid at +300W, margin=20W → discharge at (300-20)*1.0 = 280W
         let decision = ctrl.decide_at_hour(300.0, 0.0, &battery(50), 20);
@@ -414,9 +415,9 @@ mod tests {
 
     #[test]
     fn discharge_accounts_for_current_output() {
-        let mut ctrl = controller_no_cooldown();
+        let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(60));
         // Battery already discharging 200W, grid still shows +100W import
-        // Need: 200 (current) + (100 - 5) * 1.0 = 295W total
+        // Need: 200 (current) + (100 - 5) = 295W total
         let bat = battery_discharging(50, 200);
         let decision = ctrl.decide_at_hour(100.0, 0.0, &bat, 20);
         assert_eq!(decision.mode, ControlMode::Discharge);
@@ -425,9 +426,9 @@ mod tests {
 
     #[test]
     fn charge_accounts_for_current_input() {
-        let mut ctrl = controller_no_cooldown();
+        let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(60));
         // Battery already charging 200W, grid still shows -150W export
-        // Need: 200 (current) + (150 - 50) * 1.0 = 300W total
+        // Need: 200 (current) + (150 - 50) = 300W total
         let bat = battery_charging(50, 200);
         let decision = ctrl.decide_at_hour(-150.0, 500.0, &bat, 12);
         assert_eq!(decision.mode, ControlMode::Charge);
@@ -448,47 +449,38 @@ mod tests {
     // --- Two-stage ramp tests ---
 
     #[test]
-    fn first_decision_uses_75_percent_factor() {
+    fn first_decision_after_mode_change_uses_75_percent() {
         let mut ctrl = controller_no_cooldown();
-        ctrl.first_in_mode = true;
-        // Grid at -400W, margin=50W → adjustment = (400-50)*0.75 = 262W
-        let decision = ctrl.decide_at_hour(-400.0, 500.0, &battery(50), 12);
-        assert_eq!(decision.mode, ControlMode::Charge);
-        assert_eq!(decision.power_watts, 262);
+        // Idle → Charge: apply_cooldown detects mode change, applies 0.75 factor
+        // raw_decide calculates (400-50) = 350W, then apply_cooldown → 350*0.75 = 262W
+        let d1 = ctrl.decide_at_hour(-400.0, 500.0, &battery(50), 12);
+        assert_eq!(d1.mode, ControlMode::Charge);
+        assert_eq!(d1.power_watts, 262);
     }
 
     #[test]
-    fn third_decision_uses_full_factor() {
+    fn second_decision_in_same_mode_uses_full_factor() {
         let mut ctrl = controller_no_cooldown();
-        // 1st: mode change idle→charge, raw_decide uses factor=1.0 (first_in_mode starts false)
-        //      apply_cooldown detects mode change → sets first_in_mode=true
+        // 1st: mode change → 0.75 factor
         let _d1 = ctrl.decide_at_hour(-400.0, 500.0, &battery(50), 12);
-        // 2nd: raw_decide sees first_in_mode=true → uses 0.75
-        //      apply_cooldown sees same mode → sets first_in_mode=false
+        // 2nd: same mode → no ramp, full 1.0 factor
         let d2 = ctrl.decide_at_hour(-400.0, 500.0, &battery(50), 12);
-        assert_eq!(d2.power_watts, 262); // (400-50)*0.75 = 262
-        // 3rd: raw_decide sees first_in_mode=false → uses 1.0
-        let d3 = ctrl.decide_at_hour(-400.0, 500.0, &battery(50), 12);
-        assert_eq!(d3.mode, ControlMode::Charge);
-        assert_eq!(d3.power_watts, 350); // (400-50)*1.0 = 350
+        assert_eq!(d2.mode, ControlMode::Charge);
+        assert_eq!(d2.power_watts, 350); // (400-50)*1.0 = 350
     }
 
     #[test]
-    fn ramp_on_mode_change() {
+    fn ramp_on_discharge_mode_change() {
         let mut ctrl = controller_no_cooldown();
-        // Start idle, then switch to discharge at hour 20
-        // Mode change → first_in_mode becomes true
+        // Idle → Discharge: mode change applies 0.75 factor
+        // raw_decide: (400-5) = 395W, apply_cooldown: 395*0.75 = 296W
         let d1 = ctrl.decide_at_hour(400.0, 0.0, &battery(50), 20);
         assert_eq!(d1.mode, ControlMode::Discharge);
-        // first_in_mode was set true by apply_cooldown, but raw_decide ran before that.
-        // The first call in a new mode gets factor=1.0 because first_in_mode starts false,
-        // then apply_cooldown sets first_in_mode=true. The SECOND call gets 0.75.
-        // Actually let me re-check: apply_cooldown detects mode change → sets first_in_mode=true.
-        // Next call: raw_decide sees first_in_mode=true → uses 0.75, then apply_cooldown
-        // sees same mode → sets first_in_mode=false.
+        assert_eq!(d1.power_watts, 296);
+
+        // Second call: same mode, full factor
         let d2 = ctrl.decide_at_hour(400.0, 0.0, &battery(50), 20);
-        assert_eq!(d2.mode, ControlMode::Discharge);
-        assert_eq!(d2.power_watts, 296); // (400-5)*0.75 = 296.25 → 296
+        assert_eq!(d2.power_watts, 395); // (400-5)*1.0 = 395
     }
 
     // --- Hysteresis / deadband tests ---
