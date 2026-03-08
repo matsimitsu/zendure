@@ -165,6 +165,34 @@ pub async fn publish_ha_discovery(client: &AsyncClient, prefix: &str) {
         }
     }
 
+    // Binary sensors
+    let binary_config = serde_json::json!({
+        "name": "Battery SOC Calibrating",
+        "state_topic": format!("{prefix}/soc_calibrating"),
+        "unique_id": "zendure_soc_calibrating",
+        "payload_on": "ON",
+        "payload_off": "OFF",
+        "device": {
+            "identifiers": ["zendure_controller"],
+            "name": "Zendure Controller",
+            "manufacturer": "Zendure",
+            "model": "AC 2400+"
+        }
+    });
+
+    let config_topic = "homeassistant/binary_sensor/zendure_soc_calibrating/config";
+    if let Err(e) = client
+        .publish(
+            config_topic,
+            QoS::AtLeastOnce,
+            true,
+            binary_config.to_string().as_bytes(),
+        )
+        .await
+    {
+        tracing::error!("Failed to publish HA discovery for soc_calibrating: {e}");
+    }
+
     tracing::info!("Published HomeAssistant MQTT discovery config");
 }
 
@@ -235,6 +263,17 @@ pub async fn publish_rte(
         {
             tracing::warn!("Failed to publish {topic}: {e}");
         }
+    }
+}
+
+pub async fn publish_soc_calibrating(client: &AsyncClient, prefix: &str, calibrating: bool) {
+    let topic = format!("{prefix}/soc_calibrating");
+    let value = if calibrating { "ON" } else { "OFF" };
+    if let Err(e) = client
+        .publish(&topic, QoS::AtMostOnce, false, value.as_bytes())
+        .await
+    {
+        tracing::warn!("Failed to publish {topic}: {e}");
     }
 }
 

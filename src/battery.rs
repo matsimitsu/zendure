@@ -12,6 +12,8 @@ pub struct BatteryState {
     pub max_charge_power: i32,
     /// Current battery output power (W). Positive = discharging, negative = charging.
     pub current_power: i32,
+    /// True when the battery is recalibrating its SOC reading.
+    pub soc_calibrating: bool,
 }
 
 impl BatteryState {
@@ -23,6 +25,7 @@ impl BatteryState {
             max_discharge_power: props.inverse_max_power.unwrap_or(800) as i32,
             max_charge_power: props.charge_max_limit.unwrap_or(2400) as i32,
             current_power: discharge - charge,
+            soc_calibrating: props.soc_status == Some(1),
         }
     }
 }

@@ -83,6 +83,23 @@ impl Controller {
     ) -> ControlDecision {
         self.last_decision_time = Instant::now();
 
+        // 0. SOC calibration — reported SOC is unreliable, stay idle
+        if battery.soc_calibrating {
+            tracing::info!("SOC calibration in progress, idling");
+            if self.last_mode != ControlMode::Idle {
+                self.last_mode = ControlMode::Idle;
+                self.last_mode_change = Instant::now();
+                self.last_idle_start = Some(Instant::now());
+            }
+            return ControlDecision {
+                mode: ControlMode::Idle,
+                power_watts: 0,
+                reason: "SOC calibration in progress, idling".to_string(),
+                grid_power,
+                solar_power,
+            };
+        }
+
         // 1. What mode should we be in?
         let mode = self.target_mode(grid_power, battery, hour);
 
@@ -290,6 +307,7 @@ mod tests {
             max_discharge_power: 800,
             max_charge_power: 2400,
             current_power: 0,
+            soc_calibrating: false,
         }
     }
 
@@ -299,6 +317,7 @@ mod tests {
             max_discharge_power: 800,
             max_charge_power: 2400,
             current_power: power,
+            soc_calibrating: false,
         }
     }
 
@@ -308,6 +327,7 @@ mod tests {
             max_discharge_power: 800,
             max_charge_power: 2400,
             current_power: -power,
+            soc_calibrating: false,
         }
     }
 
@@ -416,6 +436,7 @@ mod tests {
             max_discharge_power: 800,
             max_charge_power: 1000,
             current_power: 0,
+            soc_calibrating: false,
         };
         let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(60));
         let decision = ctrl.decide_at_hour(-1500.0, 2000.0, &state, 12);
@@ -429,6 +450,7 @@ mod tests {
             max_discharge_power: 500,
             max_charge_power: 2400,
             current_power: 0,
+            soc_calibrating: false,
         };
         let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(60));
         let decision = ctrl.decide_at_hour(1000.0, 0.0, &state, 20);
@@ -709,6 +731,38 @@ mod tests {
 
         let d2 = ctrl.decide_at_hour(-500.0, 600.0, &battery(50), 12);
         assert_eq!(d2.mode, ControlMode::Standby);
+    }
+
+    // --- SOC calibration tests ---
+
+    #[test]
+    fn calibrating_forces_idle() {
+        let mut ctrl = controller_no_cooldown();
+        let mut bat = battery(50);
+        bat.soc_calibrating = true;
+        // Would normally charge, but calibration overrides
+        let decision = ctrl.decide_at_hour(-500.0, 600.0, &bat, 12);
+        assert_eq!(decision.mode, ControlMode::Idle);
+        assert_eq!(decision.power_watts, 0);
+        assert!(decision.reason.contains("calibration"));
+    }
+
+    #[test]
+    fn calibrating_prevents_discharge() {
+        let mut ctrl = controller_no_cooldown();
+        let mut bat = battery(80);
+        bat.soc_calibrating = true;
+        let decision = ctrl.decide_at_hour(400.0, 0.0, &bat, 20);
+        assert_eq!(decision.mode, ControlMode::Idle);
+        assert!(decision.reason.contains("calibration"));
+    }
+
+    #[test]
+    fn normal_soc_status_allows_decisions() {
+        let mut ctrl = controller_no_cooldown();
+        let bat = battery(50); // soc_calibrating: false
+        let decision = ctrl.decide_at_hour(-500.0, 600.0, &bat, 12);
+        assert_eq!(decision.mode, ControlMode::Charge);
     }
 
     #[test]
