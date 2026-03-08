@@ -4,7 +4,7 @@ use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS};
 use tokio::sync::mpsc;
 
 use crate::config::Config;
-use crate::models::{ControlDecision, MeterReading};
+use crate::models::{ControlDecision, CycleCounts, MeterReading};
 
 #[derive(Debug, Clone)]
 pub enum MqttEvent {
@@ -121,6 +121,13 @@ pub async fn publish_ha_discovery(client: &AsyncClient, prefix: &str) {
             "°C",
             Some("temperature"),
         ),
+        ("daily_cycles", "Battery Daily Mode Transitions", "", None),
+        (
+            "daily_cooldown_suppressions",
+            "Battery Daily Cooldown Suppressions",
+            "",
+            None,
+        ),
     ];
 
     for (id, name, unit, device_class) in &sensors {
@@ -170,6 +177,26 @@ pub async fn publish_decision(client: &AsyncClient, prefix: &str, decision: &Con
         (
             "decision_solar_power",
             format!("{:.0}", decision.solar_power),
+        ),
+    ];
+
+    for (id, value) in values {
+        let topic = format!("{prefix}/{id}");
+        if let Err(e) = client
+            .publish(&topic, QoS::AtMostOnce, false, value.as_bytes())
+            .await
+        {
+            tracing::warn!("Failed to publish {topic}: {e}");
+        }
+    }
+}
+
+pub async fn publish_cycle_counts(client: &AsyncClient, prefix: &str, counts: &CycleCounts) {
+    let values: &[(&str, String)] = &[
+        ("daily_cycles", counts.daily_transitions.to_string()),
+        (
+            "daily_cooldown_suppressions",
+            counts.daily_cooldown_suppressions.to_string(),
         ),
     ];
 

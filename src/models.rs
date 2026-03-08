@@ -270,6 +270,15 @@ impl fmt::Display for ControlMode {
     }
 }
 
+/// Daily cycle counters, published to HA for monitoring relay toggling.
+#[derive(Debug, Clone)]
+pub struct CycleCounts {
+    /// Total mode transitions today
+    pub daily_transitions: u32,
+    /// Times cooldown suppressed a charge↔discharge toggle today
+    pub daily_cooldown_suppressions: u32,
+}
+
 /// Output of the controller, published to MQTT for HA graphing.
 #[derive(Debug, Clone, Serialize)]
 pub struct ControlDecision {

@@ -1,10 +1,10 @@
 use std::time::{Duration, Instant};
 
-use chrono::{Local, Timelike};
+use chrono::{Datelike, Local, Timelike};
 
 use crate::battery::BatteryState;
 use crate::config::Config;
-use crate::models::{ControlDecision, ControlMode};
+use crate::models::{ControlDecision, ControlMode, CycleCounts};
 
 const MAX_CHARGE_POWER: i32 = 2400;
 const DISCHARGE_START_HOUR: u32 = 17;
@@ -23,6 +23,10 @@ pub struct Controller {
     charge_start_threshold: f64,
     discharge_start_threshold: f64,
     idle_timeout: Duration,
+    daily_transitions: u32,
+    daily_cooldown_suppressions: u32,
+    cycle_warn_threshold: u32,
+    last_cycle_reset_day: u32,
 }
 
 impl Controller {
@@ -41,6 +45,17 @@ impl Controller {
             charge_start_threshold: config.charge_start_threshold,
             discharge_start_threshold: config.discharge_start_threshold,
             idle_timeout: Duration::from_secs(config.idle_timeout_minutes * 60),
+            daily_transitions: 0,
+            daily_cooldown_suppressions: 0,
+            cycle_warn_threshold: config.cycle_warn_threshold,
+            last_cycle_reset_day: Local::now().ordinal(),
+        }
+    }
+
+    pub fn cycle_counts(&self) -> CycleCounts {
+        CycleCounts {
+            daily_transitions: self.daily_transitions,
+            daily_cooldown_suppressions: self.daily_cooldown_suppressions,
         }
     }
 
@@ -123,10 +138,42 @@ impl Controller {
         solar_power: f64,
         hour: u32,
     ) -> ControlDecision {
+        // Reset daily counters at midnight
+        let today = Local::now().ordinal();
+        if today != self.last_cycle_reset_day {
+            self.daily_transitions = 0;
+            self.daily_cooldown_suppressions = 0;
+            self.last_cycle_reset_day = today;
+        }
+
+        // Cycle limit: force standby when daily transitions exceed threshold
+        if self.cycle_warn_threshold > 0 && self.daily_transitions >= self.cycle_warn_threshold {
+            if self.last_mode != ControlMode::Standby {
+                tracing::warn!(
+                    "Daily cycle limit reached ({} transitions) — entering standby until midnight",
+                    self.daily_transitions,
+                );
+                self.last_mode = ControlMode::Standby;
+                self.last_mode_change = Instant::now();
+                self.last_idle_start = None;
+            }
+            return ControlDecision {
+                mode: ControlMode::Standby,
+                power_watts: 0,
+                reason: format!(
+                    "Cycle limit: {} transitions today (max {}), standby until midnight",
+                    self.daily_transitions, self.cycle_warn_threshold,
+                ),
+                grid_power,
+                solar_power,
+            };
+        }
+
         // Cooldown: suppress charge↔discharge toggles that happen too fast
         if is_opposing_switch(self.last_mode, mode)
             && self.last_mode_change.elapsed() < self.min_mode_duration
         {
+            self.daily_cooldown_suppressions += 1;
             if self.last_mode != ControlMode::Idle {
                 self.last_idle_start = Some(Instant::now());
             }
@@ -147,6 +194,7 @@ impl Controller {
 
         // Track mode changes and apply ramp
         let (final_power, ramped) = if mode != self.last_mode {
+            self.daily_transitions += 1;
             self.last_mode = mode;
             self.last_mode_change = Instant::now();
             self.last_idle_start = if mode == ControlMode::Idle {
@@ -276,6 +324,10 @@ mod tests {
             charge_start_threshold: -100.0,
             discharge_start_threshold: 50.0,
             idle_timeout: Duration::from_secs(5 * 60),
+            daily_transitions: 0,
+            daily_cooldown_suppressions: 0,
+            cycle_warn_threshold: 200,
+            last_cycle_reset_day: Local::now().ordinal(),
         }
     }
 
@@ -579,5 +631,95 @@ mod tests {
         ctrl.idle_timeout = Duration::from_secs(15 * 60);
         let decision = ctrl.decide_at_hour(300.0, 0.0, &battery(50), 20);
         assert_eq!(decision.mode, ControlMode::Discharge);
+    }
+
+    // --- Cycle counting tests ---
+
+    #[test]
+    fn transition_increments_daily_cycles() {
+        let mut ctrl = controller_no_cooldown();
+        assert_eq!(ctrl.daily_transitions, 0);
+
+        // Idle → Charge
+        ctrl.decide_at_hour(-200.0, 300.0, &battery(50), 12);
+        assert_eq!(ctrl.daily_transitions, 1);
+
+        // Charge → Idle (within deadband)
+        ctrl.decide_at_hour(20.0, 100.0, &battery(50), 12);
+        assert_eq!(ctrl.daily_transitions, 2);
+    }
+
+    #[test]
+    fn same_mode_does_not_increment() {
+        let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(60));
+        ctrl.decide_at_hour(-300.0, 400.0, &battery(50), 12);
+        assert_eq!(ctrl.daily_transitions, 0);
+    }
+
+    #[test]
+    fn cooldown_suppression_increments_counter() {
+        let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(5));
+        assert_eq!(ctrl.daily_cooldown_suppressions, 0);
+
+        ctrl.decide_at_hour(300.0, 50.0, &battery(50), 20);
+        assert_eq!(ctrl.daily_cooldown_suppressions, 1);
+        // Suppression doesn't count as a transition
+        assert_eq!(ctrl.daily_transitions, 0);
+    }
+
+    #[test]
+    fn cycle_counts_returns_current_state() {
+        let mut ctrl = controller_no_cooldown();
+        ctrl.decide_at_hour(-200.0, 300.0, &battery(50), 12);
+
+        let counts = ctrl.cycle_counts();
+        assert_eq!(counts.daily_transitions, 1);
+        assert_eq!(counts.daily_cooldown_suppressions, 0);
+    }
+
+    #[test]
+    fn cycle_limit_forces_standby() {
+        let mut ctrl = controller_no_cooldown();
+        ctrl.cycle_warn_threshold = 3;
+
+        // 3 transitions: Idle→Charge, Charge→Idle, Idle→Charge
+        ctrl.decide_at_hour(-200.0, 300.0, &battery(50), 12);
+        ctrl.decide_at_hour(20.0, 100.0, &battery(50), 12);
+        ctrl.decide_at_hour(-200.0, 300.0, &battery(50), 12);
+        assert_eq!(ctrl.daily_transitions, 3);
+
+        // Next decision should be forced to Standby
+        let decision = ctrl.decide_at_hour(-200.0, 300.0, &battery(50), 12);
+        assert_eq!(decision.mode, ControlMode::Standby);
+        assert!(decision.reason.contains("Cycle limit"));
+    }
+
+    #[test]
+    fn cycle_limit_standby_persists() {
+        let mut ctrl = controller_no_cooldown();
+        ctrl.cycle_warn_threshold = 1;
+
+        // 1 transition hits the limit
+        ctrl.decide_at_hour(-200.0, 300.0, &battery(50), 12);
+        assert_eq!(ctrl.daily_transitions, 1);
+
+        // All subsequent decisions stay in standby
+        let d1 = ctrl.decide_at_hour(300.0, 0.0, &battery(50), 20);
+        assert_eq!(d1.mode, ControlMode::Standby);
+
+        let d2 = ctrl.decide_at_hour(-500.0, 600.0, &battery(50), 12);
+        assert_eq!(d2.mode, ControlMode::Standby);
+    }
+
+    #[test]
+    fn cycle_limit_zero_disables() {
+        let mut ctrl = controller_no_cooldown();
+        ctrl.cycle_warn_threshold = 0;
+
+        // Many transitions should still work
+        ctrl.decide_at_hour(-200.0, 300.0, &battery(50), 12);
+        ctrl.decide_at_hour(20.0, 100.0, &battery(50), 12);
+        let decision = ctrl.decide_at_hour(-200.0, 300.0, &battery(50), 12);
+        assert_eq!(decision.mode, ControlMode::Charge);
     }
 }
