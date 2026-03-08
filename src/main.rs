@@ -1,10 +1,12 @@
 mod config;
 mod controller;
+mod grid_power;
 mod models;
 mod mqtt;
 mod zendure;
 
 use config::Config;
+use grid_power::{GridPowerEstimator, KwhDeltaEstimator};
 use mqtt::MqttEvent;
 use tokio::sync::mpsc;
 
@@ -57,6 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let mut latest_meter: Option<models::MeterReading> = None;
     let mut latest_solar_power: f64 = 0.0;
+    let mut grid_estimator = KwhDeltaEstimator::new();
 
     tracing::info!("Coordinator running, waiting for MQTT data...");
 
@@ -82,17 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         };
 
-        // The meter can't distinguish import/export per phase (V × |I| × PF is always positive).
-        // Solar inverter is on phase 1. When solar >= meter_p1, the meter reading IS the
-        // export power (solar flowing through meter to grid). Self-consumption = solar - meter_p1.
-        // When solar < meter_p1, it's net import from grid.
-        // Phase 2 & 3 have no solar, so they're always grid import.
-        let net_p1 = if latest_solar_power >= meter.phase1_power {
-            -meter.phase1_power // exporting: meter shows export amount
-        } else {
-            meter.phase1_power // importing: meter shows import amount
-        };
-        let net_grid_power = net_p1 + meter.phase2_power + meter.phase3_power;
+        let net_grid_power = grid_estimator.update(meter, latest_solar_power);
 
         let decision = controller::decide(net_grid_power, latest_solar_power, &limits);
         tracing::info!(
