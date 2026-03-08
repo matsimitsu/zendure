@@ -11,8 +11,8 @@ Assess git state, create properly named branches if needed, stage changes, and c
 
 - Analyze changes to determine: `feat` or `fix`
 - Identify subject area: mcp, k8s, api, frontend, backend, monitoring
-- Format: `/{feat|fix}/subject/kebab-case-title`
-- Examples: `/feat/mcp/add-incident-tools`, `/fix/frontend/chart-rendering`
+- Format: `{feat|fix}/subject/kebab-case-title`
+- Examples: `feat/mcp/add-incident-tools`, `/fix/frontend/chart-rendering`
 
 ## Commit format
 
@@ -34,7 +34,7 @@ Optional context line 2
 ## Process
 
 1. Run `git status` to assess current state
-2. Create branch if on main/develop: `git checkout -b /{feat|fix}/subject/title`
+2. Create branch if on main/develop: `git checkout -b {feat|fix}/subject/title`
 3. Stage relevant files: `git add`
 4. Commit with formatted message
 5. Never auto-push (allow for amends)
