@@ -203,6 +203,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         )
                         .await;
 
+                        mqtt::publish_battery_soc(
+                            &publisher_client,
+                            &ha_prefix,
+                            state.soc,
+                        )
+                        .await;
+
                         // Persist RTE state periodically (every poll)
                         rte_tracker.save();
 

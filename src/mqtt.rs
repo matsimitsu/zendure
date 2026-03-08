@@ -121,6 +121,12 @@ pub async fn publish_ha_discovery(client: &AsyncClient, prefix: &str) {
             "°C",
             Some("temperature"),
         ),
+        (
+            "battery_soc",
+            "Battery State of Charge",
+            "%",
+            Some("battery"),
+        ),
         ("daily_cycles", "Battery Daily Mode Transitions", "", None),
         (
             "daily_cooldown_suppressions",
@@ -271,6 +277,16 @@ pub async fn publish_soc_calibrating(client: &AsyncClient, prefix: &str, calibra
     let value = if calibrating { "ON" } else { "OFF" };
     if let Err(e) = client
         .publish(&topic, QoS::AtMostOnce, false, value.as_bytes())
+        .await
+    {
+        tracing::warn!("Failed to publish {topic}: {e}");
+    }
+}
+
+pub async fn publish_battery_soc(client: &AsyncClient, prefix: &str, soc: u32) {
+    let topic = format!("{prefix}/battery_soc");
+    if let Err(e) = client
+        .publish(&topic, QoS::AtMostOnce, false, soc.to_string().as_bytes())
         .await
     {
         tracing::warn!("Failed to publish {topic}: {e}");
