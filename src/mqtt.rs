@@ -115,6 +115,12 @@ pub async fn publish_ha_discovery(client: &AsyncClient, prefix: &str) {
             "kWh",
             Some("energy"),
         ),
+        (
+            "enclosure_temp",
+            "Battery Enclosure Temperature",
+            "°C",
+            Some("temperature"),
+        ),
     ];
 
     for (id, name, unit, device_class) in &sensors {
@@ -202,5 +208,97 @@ pub async fn publish_rte(
         {
             tracing::warn!("Failed to publish {topic}: {e}");
         }
+    }
+}
+
+/// Convert a Zendure temperature (tenths of Kelvin) to degrees Celsius.
+fn tenths_kelvin_to_celsius(value: u32) -> f64 {
+    (value as f64 / 10.0) - 273.15
+}
+
+pub async fn publish_temperatures(
+    client: &AsyncClient,
+    prefix: &str,
+    enclosure_temp: Option<u32>,
+    pack_temps: &[(usize, u32)],
+) {
+    // Publish per-pack discovery + state (dynamic number of packs)
+    for &(idx, raw_temp) in pack_temps {
+        let id = format!("pack{idx}_temp");
+        let name = format!("Battery Pack {idx} Temperature");
+        publish_sensor_discovery(client, prefix, &id, &name, "°C", Some("temperature")).await;
+
+        let celsius = tenths_kelvin_to_celsius(raw_temp);
+        let topic = format!("{prefix}/{id}");
+        if let Err(e) = client
+            .publish(
+                &topic,
+                QoS::AtMostOnce,
+                false,
+                format!("{celsius:.1}").as_bytes(),
+            )
+            .await
+        {
+            tracing::warn!("Failed to publish {topic}: {e}");
+        }
+    }
+
+    // Publish enclosure temperature state
+    if let Some(raw_temp) = enclosure_temp {
+        let celsius = tenths_kelvin_to_celsius(raw_temp);
+        let topic = format!("{prefix}/enclosure_temp");
+        if let Err(e) = client
+            .publish(
+                &topic,
+                QoS::AtMostOnce,
+                false,
+                format!("{celsius:.1}").as_bytes(),
+            )
+            .await
+        {
+            tracing::warn!("Failed to publish {topic}: {e}");
+        }
+    }
+}
+
+async fn publish_sensor_discovery(
+    client: &AsyncClient,
+    prefix: &str,
+    id: &str,
+    name: &str,
+    unit: &str,
+    device_class: Option<&str>,
+) {
+    let mut config = serde_json::json!({
+        "name": name,
+        "state_topic": format!("{prefix}/{id}"),
+        "unique_id": format!("zendure_{id}"),
+        "device": {
+            "identifiers": ["zendure_controller"],
+            "name": "Zendure Controller",
+            "manufacturer": "Zendure",
+            "model": "AC 2400+"
+        }
+    });
+
+    if !unit.is_empty() {
+        config["unit_of_measurement"] = serde_json::json!(unit);
+    }
+    if let Some(dc) = device_class {
+        config["device_class"] = serde_json::json!(dc);
+        config["state_class"] = serde_json::json!("measurement");
+    }
+
+    let config_topic = format!("homeassistant/sensor/zendure_{id}/config");
+    if let Err(e) = client
+        .publish(
+            &config_topic,
+            QoS::AtLeastOnce,
+            true,
+            config.to_string().as_bytes(),
+        )
+        .await
+    {
+        tracing::error!("Failed to publish HA discovery for {id}: {e}");
     }
 }
