@@ -74,6 +74,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::select! {
             event = rx.recv() => {
                 let Some(event) = event else { break };
+
+                let is_meter_update = matches!(&event, MqttEvent::MeterReading(_));
+
                 match event {
                     MqttEvent::MeterReading(reading) => {
                         tracing::info!(
@@ -89,6 +92,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         latest_solar_power = watts;
                         tracing::info!("Solar: {:.0}W", watts);
                     }
+                }
+
+                // Only make decisions on meter updates — solar just stores the
+                // latest value for the next meter-triggered decision.
+                if !is_meter_update {
+                    continue;
                 }
 
                 let Some(meter) = &latest_meter else {
