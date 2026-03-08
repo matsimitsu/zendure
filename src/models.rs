@@ -246,6 +246,7 @@ pub enum ControlMode {
     Charge,
     Discharge,
     Idle,
+    Standby,
 }
 
 impl fmt::Display for ControlMode {
@@ -254,6 +255,7 @@ impl fmt::Display for ControlMode {
             ControlMode::Charge => write!(f, "charge"),
             ControlMode::Discharge => write!(f, "discharge"),
             ControlMode::Idle => write!(f, "idle"),
+            ControlMode::Standby => write!(f, "standby"),
         }
     }
 }

@@ -22,35 +22,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let config = Config::from_env()?;
-    tracing::info!(
-        "Starting Zendure controller (simulation mode) for {}",
-        config.zendure_sn
-    );
+    tracing::info!("Starting Zendure controller for {}", config.zendure_sn);
 
-    // Poll battery on startup to get actual device state
     let zendure_client = zendure::ZendureClient::new(&config.zendure_ip, config.zendure_sn.clone());
-    let battery_state = zendure_client
+    let mut battery_state = zendure_client
         .get_state()
         .await
         .map_err(|e| e.to_string())?;
     tracing::info!(
-        "Battery: SOC={}%, max_discharge={}W, max_charge={}W",
+        "Battery: SOC={}%, max_discharge={}W, max_charge={}W, current_power={}W",
         battery_state.soc,
         battery_state.max_discharge_power,
         battery_state.max_charge_power,
+        battery_state.current_power,
     );
 
     let (mqtt_client, eventloop) = mqtt::create_mqtt_client(&config);
     let publisher_client = mqtt_client.clone();
 
-    // Channel for MQTT events from subscriber to coordinator
     let (tx, mut rx) = mpsc::channel::<MqttEvent>(64);
 
-    // Spawn MQTT event loop + subscriber (single connection handles both pub and sub)
-    let meter_topic = config.meter_topic;
-    let solar_topic = config.solar_topic;
+    let meter_topic = config.meter_topic.clone();
+    let solar_topic = config.solar_topic.clone();
     let ha_prefix = config.ha_publish_prefix.clone();
-    let subscriber_prefix = config.ha_publish_prefix;
+    let subscriber_prefix = config.ha_publish_prefix.clone();
     tokio::spawn(async move {
         mqtt::run_subscriber(
             mqtt_client,
@@ -62,47 +57,74 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await;
     });
+
     let mut latest_meter: Option<models::MeterReading> = None;
     let mut latest_solar_power: f64 = 0.0;
     let mut grid_estimator = KwhDeltaEstimator::new();
-    let mut ctrl = controller::Controller::new();
+    let mut ctrl = controller::Controller::from_config(&config);
+
+    let poll_interval = std::time::Duration::from_secs(config.zendure_poll_interval_secs);
+    let mut poll_timer = tokio::time::interval(poll_interval);
+    // Don't fire immediately — we just polled above
+    poll_timer.tick().await;
 
     tracing::info!("Coordinator running, waiting for MQTT data...");
 
-    while let Some(event) = rx.recv().await {
-        match event {
-            MqttEvent::MeterReading(reading) => {
-                tracing::info!(
-                    "Meter: total={:.0}W (P1={:.0} P2={:.0} P3={:.0})",
-                    reading.total_power,
-                    reading.phase1_power,
-                    reading.phase2_power,
-                    reading.phase3_power,
-                );
-                latest_meter = Some(reading);
+    loop {
+        tokio::select! {
+            event = rx.recv() => {
+                let Some(event) = event else { break };
+                match event {
+                    MqttEvent::MeterReading(reading) => {
+                        tracing::info!(
+                            "Meter: total={:.0}W (P1={:.0} P2={:.0} P3={:.0})",
+                            reading.total_power,
+                            reading.phase1_power,
+                            reading.phase2_power,
+                            reading.phase3_power,
+                        );
+                        latest_meter = Some(reading);
+                    }
+                    MqttEvent::SolarReading(watts) => {
+                        latest_solar_power = watts;
+                        tracing::info!("Solar: {:.0}W", watts);
+                    }
+                }
+
+                let Some(meter) = &latest_meter else {
+                    continue;
+                };
+
+                let net_grid_power = grid_estimator.update(meter, latest_solar_power);
+
+                if let Some(decision) = ctrl.decide(net_grid_power, latest_solar_power, &battery_state) {
+                    tracing::info!(
+                        "Decision: {} at {}W — {} (net_grid={:.0}W)",
+                        decision.mode,
+                        decision.power_watts,
+                        decision.reason,
+                        net_grid_power,
+                    );
+
+                    mqtt::publish_decision(&publisher_client, &ha_prefix, &decision).await;
+                }
             }
-            MqttEvent::SolarReading(watts) => {
-                latest_solar_power = watts;
-                tracing::info!("Solar: {:.0}W", watts);
+            _ = poll_timer.tick() => {
+                match zendure_client.get_state().await {
+                    Ok(state) => {
+                        tracing::debug!(
+                            "Battery poll: SOC={}%, current_power={}W",
+                            state.soc,
+                            state.current_power,
+                        );
+                        battery_state = state;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to poll battery state: {e}");
+                    }
+                }
             }
         }
-
-        let Some(meter) = &latest_meter else {
-            continue;
-        };
-
-        let net_grid_power = grid_estimator.update(meter, latest_solar_power);
-
-        let decision = ctrl.decide(net_grid_power, latest_solar_power, &battery_state);
-        tracing::info!(
-            "Decision: {} at {}W — {} (net_grid={:.0}W)",
-            decision.mode,
-            decision.power_watts,
-            decision.reason,
-            net_grid_power,
-        );
-
-        mqtt::publish_decision(&publisher_client, &ha_prefix, &decision).await;
     }
 
     Ok(())
