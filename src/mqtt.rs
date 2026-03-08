@@ -102,6 +102,19 @@ pub async fn publish_ha_discovery(client: &AsyncClient, prefix: &str) {
             "W",
             Some("power"),
         ),
+        ("rte_percent", "Battery Round-Trip Efficiency", "%", None),
+        (
+            "rte_usable_kwh",
+            "Battery Usable Energy",
+            "kWh",
+            Some("energy"),
+        ),
+        (
+            "rte_total_capacity_kwh",
+            "Battery Total Capacity",
+            "kWh",
+            Some("energy"),
+        ),
     ];
 
     for (id, name, unit, device_class) in &sensors {
@@ -152,6 +165,33 @@ pub async fn publish_decision(client: &AsyncClient, prefix: &str, decision: &Con
             "decision_solar_power",
             format!("{:.0}", decision.solar_power),
         ),
+    ];
+
+    for (id, value) in values {
+        let topic = format!("{prefix}/{id}");
+        if let Err(e) = client
+            .publish(&topic, QoS::AtMostOnce, false, value.as_bytes())
+            .await
+        {
+            tracing::warn!("Failed to publish {topic}: {e}");
+        }
+    }
+}
+
+pub async fn publish_rte(
+    client: &AsyncClient,
+    prefix: &str,
+    rte_percent: Option<f64>,
+    usable_kwh: f64,
+    total_capacity_kwh: f64,
+) {
+    let values: &[(&str, String)] = &[
+        (
+            "rte_percent",
+            rte_percent.map_or("unknown".to_string(), |v| format!("{v:.1}")),
+        ),
+        ("rte_usable_kwh", format!("{usable_kwh:.2}")),
+        ("rte_total_capacity_kwh", format!("{total_capacity_kwh:.2}")),
     ];
 
     for (id, value) in values {

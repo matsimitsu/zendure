@@ -4,9 +4,9 @@ mod controller;
 mod grid_power;
 mod models;
 mod mqtt;
+mod rte;
 mod zendure;
 
-use battery::Battery;
 use config::Config;
 use grid_power::{GridPowerEstimator, KwhDeltaEstimator};
 use mqtt::MqttEvent;
@@ -25,16 +25,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Starting Zendure controller for {}", config.zendure_sn);
 
     let zendure_client = zendure::ZendureClient::new(&config.zendure_ip, config.zendure_sn.clone());
-    let mut battery_state = zendure_client
-        .get_state()
+    let initial_report = zendure_client
+        .get_properties()
         .await
         .map_err(|e| e.to_string())?;
+    let mut battery_state = battery::BatteryState::from_properties(&initial_report.properties);
+    let mut pack_capacities = rte::pack_capacities(&initial_report.pack_data);
+    let mut min_soc_percent: u32 = initial_report
+        .properties
+        .min_soc
+        .map(|v| v / 10)
+        .unwrap_or(0);
     tracing::info!(
-        "Battery: SOC={}%, max_discharge={}W, max_charge={}W, current_power={}W",
+        "Battery: SOC={}%, max_discharge={}W, max_charge={}W, current_power={}W, packs={}",
         battery_state.soc,
         battery_state.max_discharge_power,
         battery_state.max_charge_power,
         battery_state.current_power,
+        pack_capacities.len(),
     );
 
     let (mqtt_client, eventloop) = mqtt::create_mqtt_client(&config);
@@ -62,6 +70,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut latest_solar_power: f64 = 0.0;
     let mut grid_estimator = KwhDeltaEstimator::new();
     let mut ctrl = controller::Controller::from_config(&config);
+
+    let rte_state_path = std::path::PathBuf::from(
+        std::env::var("RTE_STATE_PATH")
+            .unwrap_or_else(|_| "/tmp/zendure_rte_state.json".to_string()),
+    );
+    let mut rte_tracker = rte::RteTracker::new(rte_state_path);
 
     let poll_interval = std::time::Duration::from_secs(config.zendure_poll_interval_secs);
     let mut poll_timer = tokio::time::interval(poll_interval);
@@ -119,13 +133,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             _ = poll_timer.tick() => {
-                match zendure_client.get_state().await {
-                    Ok(state) => {
+                match zendure_client.get_properties().await {
+                    Ok(report) => {
+                        let state = battery::BatteryState::from_properties(&report.properties);
                         tracing::debug!(
                             "Battery poll: SOC={}%, current_power={}W",
                             state.soc,
                             state.current_power,
                         );
+
+                        // Feed RTE tracker with charge/discharge power
+                        let charge_w = report.properties.output_pack_power.unwrap_or(0) as f64;
+                        let discharge_w = report.properties.pack_input_power.unwrap_or(0) as f64;
+                        rte_tracker.record(charge_w, discharge_w);
+
+                        // Update pack data and SOC limits if available
+                        if report.pack_data.is_some() {
+                            pack_capacities = rte::pack_capacities(&report.pack_data);
+                        }
+                        if let Some(ms) = report.properties.min_soc {
+                            min_soc_percent = ms / 10;
+                        }
+
+                        // Publish RTE sensors
+                        let total_capacity_kwh: f64 =
+                            pack_capacities.iter().sum::<f64>() / 1000.0;
+                        let usable_kwh =
+                            rte_tracker.usable_kwh(state.soc, min_soc_percent, &pack_capacities);
+                        mqtt::publish_rte(
+                            &publisher_client,
+                            &ha_prefix,
+                            rte_tracker.rte_percent(),
+                            usable_kwh,
+                            total_capacity_kwh,
+                        )
+                        .await;
+
+                        // Persist RTE state periodically (every poll)
+                        rte_tracker.save();
+
                         battery_state = state;
                     }
                     Err(e) => {

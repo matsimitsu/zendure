@@ -55,6 +55,7 @@ impl From<reqwest::Error> for BatteryError {
 }
 
 /// Abstraction over a battery system (real Zendure device or mock).
+#[allow(dead_code)]
 pub trait Battery {
     /// Read current battery state (SoC, limits).
     fn get_state(
