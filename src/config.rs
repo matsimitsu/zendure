@@ -13,6 +13,20 @@ pub struct Config {
     pub solar_topic: String,
     pub ha_publish_prefix: String,
     pub zendure_poll_interval_secs: u64,
+    /// Safety margin subtracted from charge power to avoid grid import (W)
+    pub charge_margin: i32,
+    /// Safety margin subtracted from discharge power (W)
+    pub discharge_margin: i32,
+    /// Grid power below this triggers charging (W, negative = exporting)
+    pub charge_start_threshold: f64,
+    /// Grid power above this triggers discharging (W, positive = importing)
+    pub discharge_start_threshold: f64,
+    /// Minimum seconds before charge↔discharge toggle
+    pub min_mode_duration_secs: u64,
+    /// Minimum seconds between decisions (API protection)
+    pub min_decision_interval_secs: u64,
+    /// Minutes of idle before entering standby
+    pub idle_timeout_minutes: u64,
 }
 
 impl Config {
@@ -44,6 +58,34 @@ impl Config {
                 .unwrap_or_else(|_| "10".to_string())
                 .parse::<u64>()
                 .map_err(|_| "ZENDURE_POLL_INTERVAL must be a number")?,
+            charge_margin: env::var("CHARGE_MARGIN")
+                .unwrap_or_else(|_| "50".to_string())
+                .parse::<i32>()
+                .map_err(|_| "CHARGE_MARGIN must be a number")?,
+            discharge_margin: env::var("DISCHARGE_MARGIN")
+                .unwrap_or_else(|_| "5".to_string())
+                .parse::<i32>()
+                .map_err(|_| "DISCHARGE_MARGIN must be a number")?,
+            charge_start_threshold: env::var("CHARGE_START_THRESHOLD")
+                .unwrap_or_else(|_| "-100.0".to_string())
+                .parse::<f64>()
+                .map_err(|_| "CHARGE_START_THRESHOLD must be a number")?,
+            discharge_start_threshold: env::var("DISCHARGE_START_THRESHOLD")
+                .unwrap_or_else(|_| "50.0".to_string())
+                .parse::<f64>()
+                .map_err(|_| "DISCHARGE_START_THRESHOLD must be a number")?,
+            min_mode_duration_secs: env::var("MIN_MODE_DURATION")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse::<u64>()
+                .map_err(|_| "MIN_MODE_DURATION must be a number")?,
+            min_decision_interval_secs: env::var("MIN_DECISION_INTERVAL")
+                .unwrap_or_else(|_| "5".to_string())
+                .parse::<u64>()
+                .map_err(|_| "MIN_DECISION_INTERVAL must be a number")?,
+            idle_timeout_minutes: env::var("IDLE_TIMEOUT_MINUTES")
+                .unwrap_or_else(|_| "5".to_string())
+                .parse::<u64>()
+                .map_err(|_| "IDLE_TIMEOUT_MINUTES must be a number")?,
         })
     }
 }

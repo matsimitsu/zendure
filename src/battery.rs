@@ -10,14 +10,19 @@ pub struct BatteryState {
     pub max_discharge_power: i32,
     /// Maximum charge power (W).
     pub max_charge_power: i32,
+    /// Current battery output power (W). Positive = discharging, negative = charging.
+    pub current_power: i32,
 }
 
 impl BatteryState {
     pub fn from_properties(props: &ZendureProperties) -> Self {
+        let discharge = props.pack_input_power.unwrap_or(0) as i32;
+        let charge = props.output_pack_power.unwrap_or(0) as i32;
         Self {
             soc: props.electric_level.unwrap_or(0),
             max_discharge_power: props.inverse_max_power.unwrap_or(800) as i32,
             max_charge_power: props.charge_max_limit.unwrap_or(2400) as i32,
+            current_power: discharge - charge,
         }
     }
 }
@@ -83,6 +88,11 @@ impl Battery for ZendureClient {
             ControlMode::Idle => serde_json::json!({
                 "acMode": 1,
                 "inputLimit": 0,
+            }),
+            ControlMode::Standby => serde_json::json!({
+                "acMode": 1,
+                "inputLimit": 0,
+                "smartMode": 0,
             }),
         };
         self.write_properties(props).await?;
