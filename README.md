@@ -13,6 +13,7 @@ Smart controller for the Zendure AC 2400+ home battery. Reads grid power and sol
    - **Idle** otherwise
    - **Standby** after prolonged idle or when daily cycle limit is reached
 5. **Safety guards**:
+   - **SOC limits** — stops charging at max SOC (default 100%) and discharging at min SOC (default 10%)
    - **Cooldown** — prevents rapid charge/discharge toggling
    - **Ramp** — starts at 75% power on mode changes to avoid overshooting
    - **SOC calibration** — idles when the battery reports SOC calibration in progress
@@ -58,6 +59,8 @@ All configuration is via environment variables:
 | `DISCHARGE_START_THRESHOLD` | No | `50.0` | Grid power (W) above which discharging starts during discharge hours |
 | `CHARGE_MARGIN` | No | `50` | Safety margin (W) subtracted from charge power to avoid grid import |
 | `DISCHARGE_MARGIN` | No | `5` | Safety margin (W) subtracted from discharge power |
+| `MIN_SOC` | No | `10` | Minimum SOC (%) — discharge is blocked at or below this level |
+| `MAX_SOC` | No | `100` | Maximum SOC (%) — charging is blocked at or above this level |
 
 ### Timing and safety
 

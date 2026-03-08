@@ -20,6 +20,10 @@ cargo build
 - `src/mqtt.rs` — MQTT subscriber, HA discovery, publishing
 - `src/zendure.rs` — Zendure REST API client
 
+## Documentation
+
+When behavior changes or environment variables are added/removed, update `README.md` to reflect the changes.
+
 ## Releasing
 
 Run `scripts/release.sh` to bump the patch version, tag, and push. The GitHub Actions release workflow builds a static musl binary and creates a GitHub release.

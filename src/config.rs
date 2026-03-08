@@ -29,6 +29,10 @@ pub struct Config {
     pub idle_timeout_minutes: u64,
     /// Warn when daily cycle count reaches this threshold
     pub cycle_warn_threshold: u32,
+    /// Minimum SOC percentage before discharge is blocked (default 10)
+    pub min_soc: u32,
+    /// Maximum SOC percentage before charging is blocked (default 100)
+    pub max_soc: u32,
 }
 
 impl Config {
@@ -92,6 +96,14 @@ impl Config {
                 .unwrap_or_else(|_| "200".to_string())
                 .parse::<u32>()
                 .map_err(|_| "CYCLE_WARN_THRESHOLD must be a number")?,
+            min_soc: env::var("MIN_SOC")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse::<u32>()
+                .map_err(|_| "MIN_SOC must be a number")?,
+            max_soc: env::var("MAX_SOC")
+                .unwrap_or_else(|_| "100".to_string())
+                .parse::<u32>()
+                .map_err(|_| "MAX_SOC must be a number")?,
         })
     }
 }
