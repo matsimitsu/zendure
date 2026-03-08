@@ -195,6 +195,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         )
                         .await;
 
+                        // Publish SOC calibration state
+                        mqtt::publish_soc_calibrating(
+                            &publisher_client,
+                            &ha_prefix,
+                            state.soc_calibrating,
+                        )
+                        .await;
+
                         // Persist RTE state periodically (every poll)
                         rte_tracker.save();
 
