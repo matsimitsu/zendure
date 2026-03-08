@@ -27,6 +27,8 @@ pub struct Config {
     pub min_decision_interval_secs: u64,
     /// Minutes of idle before entering standby
     pub idle_timeout_minutes: u64,
+    /// Warn when daily cycle count reaches this threshold
+    pub cycle_warn_threshold: u32,
 }
 
 impl Config {
@@ -86,6 +88,10 @@ impl Config {
                 .unwrap_or_else(|_| "5".to_string())
                 .parse::<u64>()
                 .map_err(|_| "IDLE_TIMEOUT_MINUTES must be a number")?,
+            cycle_warn_threshold: env::var("CYCLE_WARN_THRESHOLD")
+                .unwrap_or_else(|_| "200".to_string())
+                .parse::<u32>()
+                .map_err(|_| "CYCLE_WARN_THRESHOLD must be a number")?,
         })
     }
 }

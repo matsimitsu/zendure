@@ -130,6 +130,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
 
                     mqtt::publish_decision(&publisher_client, &ha_prefix, &decision).await;
+                    mqtt::publish_cycle_counts(
+                        &publisher_client,
+                        &ha_prefix,
+                        &ctrl.cycle_counts(),
+                    )
+                    .await;
                 }
             }
             _ = poll_timer.tick() => {
