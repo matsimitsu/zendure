@@ -127,6 +127,18 @@ pub async fn publish_ha_discovery(client: &AsyncClient, prefix: &str) {
             "%",
             Some("battery"),
         ),
+        (
+            "battery_charge_power",
+            "Battery Actual Charge Power",
+            "W",
+            Some("power"),
+        ),
+        (
+            "battery_discharge_power",
+            "Battery Actual Discharge Power",
+            "W",
+            Some("power"),
+        ),
         ("daily_cycles", "Battery Daily Mode Transitions", "", None),
         (
             "daily_cooldown_suppressions",
@@ -280,6 +292,28 @@ pub async fn publish_soc_calibrating(client: &AsyncClient, prefix: &str, calibra
         .await
     {
         tracing::warn!("Failed to publish {topic}: {e}");
+    }
+}
+
+pub async fn publish_battery_power(
+    client: &AsyncClient,
+    prefix: &str,
+    charge_w: u32,
+    discharge_w: u32,
+) {
+    let values: &[(&str, String)] = &[
+        ("battery_charge_power", charge_w.to_string()),
+        ("battery_discharge_power", discharge_w.to_string()),
+    ];
+
+    for (id, value) in values {
+        let topic = format!("{prefix}/{id}");
+        if let Err(e) = client
+            .publish(&topic, QoS::AtMostOnce, false, value.as_bytes())
+            .await
+        {
+            tracing::warn!("Failed to publish {topic}: {e}");
+        }
     }
 }
 
