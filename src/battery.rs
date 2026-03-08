@@ -1,4 +1,4 @@
-use crate::models::{ControlDecision, ControlMode, ZendureProperties};
+use crate::models::{ControlDecision, ControlMode, StorageMode, ZendureProperties};
 use crate::zendure::ZendureClient;
 
 /// Current battery state, used by the controller to make decisions.
@@ -77,26 +77,40 @@ impl Battery for ZendureClient {
     }
 
     async fn apply(&self, decision: &ControlDecision) -> Result<(), BatteryError> {
-        let props = match decision.mode {
-            ControlMode::Charge => serde_json::json!({
-                "acMode": 1,
-                "inputLimit": decision.power_watts,
-            }),
-            ControlMode::Discharge => serde_json::json!({
-                "acMode": 2,
-                "outputLimit": decision.power_watts,
-            }),
-            ControlMode::Idle => serde_json::json!({
-                "acMode": 1,
-                "inputLimit": 0,
-            }),
-            ControlMode::Standby => serde_json::json!({
-                "acMode": 1,
-                "inputLimit": 0,
-                "smartMode": 0,
-            }),
-        };
-        self.write_properties(props).await?;
+        match decision.mode {
+            ControlMode::Charge => {
+                self.ensure_ram_mode().await?;
+                self.write_properties(serde_json::json!({
+                    "acMode": 1,
+                    "inputLimit": decision.power_watts,
+                }))
+                .await?;
+            }
+            ControlMode::Discharge => {
+                self.ensure_ram_mode().await?;
+                self.write_properties(serde_json::json!({
+                    "acMode": 2,
+                    "outputLimit": decision.power_watts,
+                }))
+                .await?;
+            }
+            ControlMode::Idle => {
+                self.write_properties(serde_json::json!({
+                    "acMode": 1,
+                    "inputLimit": 0,
+                }))
+                .await?;
+            }
+            ControlMode::Standby => {
+                self.write_properties(serde_json::json!({
+                    "acMode": 1,
+                    "inputLimit": 0,
+                    "smartMode": 0,
+                }))
+                .await?;
+                self.set_storage_mode(StorageMode::Flash);
+            }
+        }
         Ok(())
     }
 }
