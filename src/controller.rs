@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
-use chrono::{Datelike, Local, Timelike};
+use chrono::{Datelike, Timelike, Utc};
+use chrono_tz::Tz;
 
 use crate::battery::BatteryState;
 use crate::config::Config;
@@ -29,6 +30,7 @@ pub struct Controller {
     last_cycle_reset_day: u32,
     min_soc: u32,
     max_soc: u32,
+    timezone: Tz,
 }
 
 impl Controller {
@@ -50,9 +52,10 @@ impl Controller {
             daily_transitions: 0,
             daily_cooldown_suppressions: 0,
             cycle_warn_threshold: config.cycle_warn_threshold,
-            last_cycle_reset_day: Local::now().ordinal(),
+            last_cycle_reset_day: Utc::now().with_timezone(&config.timezone).ordinal(),
             min_soc: config.min_soc,
             max_soc: config.max_soc,
+            timezone: config.timezone,
         }
     }
 
@@ -74,7 +77,7 @@ impl Controller {
             return None;
         }
 
-        let hour = Local::now().hour();
+        let hour = Utc::now().with_timezone(&self.timezone).hour();
         Some(self.decide_at_hour(grid_power, solar_power, battery, hour))
     }
 
@@ -163,7 +166,7 @@ impl Controller {
         hour: u32,
     ) -> ControlDecision {
         // Reset daily counters at midnight
-        let today = Local::now().ordinal();
+        let today = Utc::now().with_timezone(&self.timezone).ordinal();
         if today != self.last_cycle_reset_day {
             self.daily_transitions = 0;
             self.daily_cooldown_suppressions = 0;
@@ -354,9 +357,10 @@ mod tests {
             daily_transitions: 0,
             daily_cooldown_suppressions: 0,
             cycle_warn_threshold: 200,
-            last_cycle_reset_day: Local::now().ordinal(),
+            last_cycle_reset_day: Utc::now().ordinal(),
             min_soc: 10,
             max_soc: 100,
+            timezone: Tz::UTC,
         }
     }
 

@@ -1,5 +1,7 @@
 use std::env;
 
+use chrono_tz::Tz;
+
 #[allow(dead_code)]
 pub struct Config {
     pub mqtt_host: String,
@@ -33,6 +35,8 @@ pub struct Config {
     pub min_soc: u32,
     /// Maximum SOC percentage before charging is blocked (default 100)
     pub max_soc: u32,
+    /// IANA timezone for discharge window evaluation (e.g. Europe/Amsterdam)
+    pub timezone: Tz,
 }
 
 impl Config {
@@ -104,6 +108,10 @@ impl Config {
                 .unwrap_or_else(|_| "100".to_string())
                 .parse::<u32>()
                 .map_err(|_| "MAX_SOC must be a number")?,
+            timezone: env::var("TIMEZONE")
+                .unwrap_or_else(|_| "UTC".to_string())
+                .parse::<Tz>()
+                .map_err(|_| "TIMEZONE must be a valid IANA timezone (e.g. Europe/Amsterdam)")?,
         })
     }
 }
