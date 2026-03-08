@@ -75,6 +75,7 @@ All configuration is via environment variables:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
+| `TIMEZONE` | No | `UTC` | IANA timezone for discharge window (e.g. `Europe/Amsterdam`) |
 | `RTE_STATE_PATH` | No | `/tmp/zendure_rte_state.json` | File path for persisting round-trip efficiency state across restarts |
 | `RUST_LOG` | No | — | Log level filter (e.g. `zendure=debug` for verbose output) |
 
