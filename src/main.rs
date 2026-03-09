@@ -118,7 +118,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 };
 
-                let net_grid_power = grid_estimator.update(meter, latest_solar_power);
+                let Some(net_grid_power) = grid_estimator.update(meter, latest_solar_power) else {
+                    continue;
+                };
 
                 if let Some(decision) = ctrl.decide(net_grid_power, latest_solar_power, &battery_state) {
                     tracing::info!(

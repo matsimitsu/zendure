@@ -81,7 +81,7 @@ impl Config {
                 .parse::<f64>()
                 .map_err(|_| "CHARGE_START_THRESHOLD must be a number")?,
             discharge_start_threshold: env::var("DISCHARGE_START_THRESHOLD")
-                .unwrap_or_else(|_| "50.0".to_string())
+                .unwrap_or_else(|_| "0.0".to_string())
                 .parse::<f64>()
                 .map_err(|_| "DISCHARGE_START_THRESHOLD must be a number")?,
             min_mode_duration_secs: env::var("MIN_MODE_DURATION")
