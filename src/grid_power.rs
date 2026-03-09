@@ -1,87 +1,109 @@
+use std::time::Instant;
+
 use crate::models::MeterReading;
 
 /// Provides signed net grid power from meter data.
 /// Positive = importing from grid, negative = exporting to grid.
 ///
+/// Returns `Some(power)` when a new estimate is available (kWh tick detected),
+/// `None` when no new data (caller should skip decision-making and let the
+/// battery hold its current setting).
+///
 /// Implementations:
-/// - `KwhDeltaEstimator`: Uses unsigned meter readings + kWh register deltas for direction.
-/// - Future: Shelly 3EM or DSMR P1 meter would provide signed power directly.
+/// - `KwhDeltaEstimator`: Computes net power from kWh register deltas.
+/// - Future: Shelly 3EM would return `Some` on every reading (signed per-phase data).
 pub trait GridPowerEstimator {
-    fn update(&mut self, meter: &MeterReading, solar_power: f64) -> f64;
+    fn update(&mut self, meter: &MeterReading, solar_power: f64) -> Option<f64>;
 }
 
-/// Estimates signed grid power from an unsigned meter (no directional readings).
+/// Computes signed net grid power from the DSMR consumption/production kWh registers.
 ///
-/// Direction detection strategy:
-/// 1. If solar power >= phase 1 meter reading → phase 1 is definitely exporting
-///    (solar alone exceeds what the meter sees, so current must flow grid-ward).
-/// 2. Otherwise, use kWh register deltas: whichever cumulative register (import or export)
-///    increased since the last reading tells us the net direction.
-/// 3. If no kWh tick observed yet, default to importing.
+/// The DSMR smart meter accumulates energy across all three phases:
+/// - `consumption_total_kwh` increases when net importing from grid
+/// - `production_total_kwh` increases when net exporting to grid
 ///
-/// Phase 2 & 3 are always importing (no solar or battery on those phases).
+/// By comparing the deltas of both registers since the last tick, we get both
+/// direction and magnitude of net grid power — without needing to know individual
+/// phase directions.
+///
+/// Between kWh ticks (0.001 kWh / 1 Wh resolution), returns `None` so the
+/// controller skips decision-making and the battery holds its current setting.
+/// This prevents stale data from causing cumulative drift. At typical household
+/// power levels, ticks arrive every few seconds (high power) to about a minute
+/// (low power near net-zero — which means we're already on target).
 pub struct KwhDeltaEstimator {
-    prev_import_kwh: Option<f64>,
-    prev_export_kwh: Option<f64>,
-    /// Whether phase 1 is currently exporting, as determined by kWh register deltas.
-    phase1_exporting: Option<bool>,
+    /// kWh register baseline from which we accumulate deltas.
+    /// Only reset when a tick is detected, so deltas naturally accumulate
+    /// until there's enough resolution to compute meaningful power.
+    base_import_kwh: Option<f64>,
+    base_export_kwh: Option<f64>,
+    base_time: Option<Instant>,
 }
 
 impl KwhDeltaEstimator {
     pub fn new() -> Self {
         Self {
-            prev_import_kwh: None,
-            prev_export_kwh: None,
-            phase1_exporting: None,
+            base_import_kwh: None,
+            base_export_kwh: None,
+            base_time: None,
         }
-    }
-
-    fn update_direction(&mut self, meter: &MeterReading) {
-        let Some(prev_import) = self.prev_import_kwh else {
-            self.prev_import_kwh = Some(meter.consumption_total_kwh);
-            self.prev_export_kwh = Some(meter.production_total_kwh);
-            return;
-        };
-        let prev_export = self.prev_export_kwh.unwrap();
-
-        let import_delta = meter.consumption_total_kwh - prev_import;
-        let export_delta = meter.production_total_kwh - prev_export;
-
-        // kWh registers have 0.001 kWh (1 Wh) resolution. Use a small epsilon
-        // to ignore float rounding noise.
-        const KWH_EPSILON: f64 = 0.0005;
-
-        if export_delta > KWH_EPSILON && export_delta > import_delta {
-            self.phase1_exporting = Some(true);
-        } else if import_delta > KWH_EPSILON && import_delta > export_delta {
-            self.phase1_exporting = Some(false);
-        }
-        // If neither ticked, keep last known direction.
-
-        self.prev_import_kwh = Some(meter.consumption_total_kwh);
-        self.prev_export_kwh = Some(meter.production_total_kwh);
     }
 }
 
 impl GridPowerEstimator for KwhDeltaEstimator {
-    fn update(&mut self, meter: &MeterReading, solar_power: f64) -> f64 {
-        self.update_direction(meter);
+    fn update(&mut self, meter: &MeterReading, _solar_power: f64) -> Option<f64> {
+        let now = Instant::now();
 
-        // Phase 1 direction:
-        // - Solar heuristic is authoritative when solar clearly exceeds meter reading
-        // - kWh delta handles discharge periods when solar is low/zero
-        // - Default to importing if no direction established yet
-        let phase1_exporting =
-            solar_power >= meter.phase1_power || self.phase1_exporting == Some(true);
-
-        let net_p1 = if phase1_exporting {
-            -meter.phase1_power
-        } else {
-            meter.phase1_power
+        let Some(base_import) = self.base_import_kwh else {
+            // First reading: establish baseline, no power estimate yet.
+            self.base_import_kwh = Some(meter.consumption_total_kwh);
+            self.base_export_kwh = Some(meter.production_total_kwh);
+            self.base_time = Some(now);
+            return None;
         };
 
-        // Phase 2 & 3 have no solar or battery — always importing
-        net_p1 + meter.phase2_power + meter.phase3_power
+        let base_export = self.base_export_kwh.unwrap();
+        let base_time = self.base_time.unwrap();
+
+        let import_delta = meter.consumption_total_kwh - base_import;
+        let export_delta = meter.production_total_kwh - base_export;
+
+        // Guard against meter resets or bad data.
+        if import_delta < 0.0 || export_delta < 0.0 {
+            self.base_import_kwh = Some(meter.consumption_total_kwh);
+            self.base_export_kwh = Some(meter.production_total_kwh);
+            self.base_time = Some(now);
+            return None;
+        }
+
+        let elapsed_secs = base_time.elapsed().as_secs_f64();
+
+        // 0.001 kWh = 1 Wh tick. Use half as threshold for float comparison.
+        const KWH_TICK: f64 = 0.0005;
+
+        if elapsed_secs > 0.0 && (import_delta > KWH_TICK || export_delta > KWH_TICK) {
+            let elapsed_hours = elapsed_secs / 3600.0;
+            // Positive = net importing, negative = net exporting.
+            let net_grid_power = (import_delta - export_delta) / elapsed_hours * 1000.0;
+
+            // Reset baseline for next measurement window.
+            self.base_import_kwh = Some(meter.consumption_total_kwh);
+            self.base_export_kwh = Some(meter.production_total_kwh);
+            self.base_time = Some(now);
+
+            return Some(net_grid_power);
+        }
+
+        // No tick yet — caller should skip decision-making.
+        None
+    }
+}
+
+#[cfg(test)]
+impl KwhDeltaEstimator {
+    /// Wind the baseline clock back so the next update sees elapsed time.
+    pub(crate) fn wind_back(&mut self, secs: u64) {
+        self.base_time = Some(Instant::now() - std::time::Duration::from_secs(secs));
     }
 }
 
@@ -89,13 +111,7 @@ impl GridPowerEstimator for KwhDeltaEstimator {
 mod tests {
     use super::*;
 
-    fn meter(
-        phase1_power: f64,
-        phase2_power: f64,
-        phase3_power: f64,
-        import_kwh: f64,
-        export_kwh: f64,
-    ) -> MeterReading {
+    fn meter(import_kwh: f64, export_kwh: f64) -> MeterReading {
         MeterReading {
             device_id: "test".to_string(),
             consumption_total_kwh: import_kwh,
@@ -107,96 +123,130 @@ mod tests {
             phase1_voltage: 230.0,
             phase2_voltage: 230.0,
             phase3_voltage: 230.0,
-            phase1_current: phase1_power / 230.0,
-            phase2_current: phase2_power / 230.0,
-            phase3_current: phase3_power / 230.0,
+            phase1_current: 0.0,
+            phase2_current: 0.0,
+            phase3_current: 0.0,
             frequency: 50.0,
             phase1_pf: 1.0,
             phase2_pf: 1.0,
             phase3_pf: 1.0,
-            phase1_power,
-            phase2_power,
-            phase3_power,
-            total_power: phase1_power + phase2_power + phase3_power,
+            phase1_power: 0.0,
+            phase2_power: 0.0,
+            phase3_power: 0.0,
+            total_power: 0.0,
             timestamp: "2024-01-01T00:00:00Z".to_string(),
         }
     }
 
     #[test]
-    fn solar_heuristic_when_solar_exceeds_phase1() {
+    fn first_reading_returns_none() {
         let mut est = KwhDeltaEstimator::new();
-        let m = meter(500.0, 100.0, 50.0, 100.0, 200.0);
-        // Solar 800W > phase1 500W → exporting on phase 1
-        let net = est.update(&m, 800.0);
-        // net = -500 + 100 + 50 = -350 (exporting 350W)
-        assert!((net - (-350.0)).abs() < 0.1);
+        assert!(est.update(&meter(500.0, 300.0), 0.0).is_none());
     }
 
     #[test]
-    fn defaults_to_importing_without_kwh_data() {
+    fn import_tick_gives_positive_power() {
         let mut est = KwhDeltaEstimator::new();
-        let m = meter(200.0, 100.0, 50.0, 100.0, 200.0);
-        // Solar 0W, no kWh history → default to importing
-        let net = est.update(&m, 0.0);
-        // net = +200 + 100 + 50 = 350 (importing 350W)
-        assert!((net - 350.0).abs() < 0.1);
+        est.update(&meter(500.0, 300.0), 0.0);
+        est.wind_back(10);
+
+        // 0.001 kWh imported in 10 seconds = 360W
+        let net = est.update(&meter(500.001, 300.0), 0.0).unwrap();
+        assert!((net - 360.0).abs() < 1.0);
     }
 
     #[test]
-    fn kwh_delta_detects_export_during_discharge() {
+    fn export_tick_gives_negative_power() {
         let mut est = KwhDeltaEstimator::new();
+        est.update(&meter(500.0, 300.0), 0.0);
+        est.wind_back(10);
 
-        // First reading: establish baseline (no solar, battery not discharging yet)
-        let m1 = meter(100.0, 80.0, 50.0, 500.0, 300.0);
-        let net1 = est.update(&m1, 0.0);
-        assert!((net1 - 230.0).abs() < 0.1); // All importing
-
-        // Second reading: battery discharging, export register ticked
-        // Phase 1 shows 100W (battery output - house consumption)
-        let m2 = meter(100.0, 80.0, 50.0, 500.0, 300.002);
-        let net2 = est.update(&m2, 0.0);
-        // kWh delta detected export → phase 1 exporting
-        // net = -100 + 80 + 50 = 30 (still net importing due to phase 2+3)
-        assert!((net2 - 30.0).abs() < 0.1);
+        // 0.001 kWh exported in 10 seconds = -360W
+        let net = est.update(&meter(500.0, 300.001), 0.0).unwrap();
+        assert!((net - (-360.0)).abs() < 1.0);
     }
 
     #[test]
-    fn kwh_delta_detects_import_after_discharge_stops() {
+    fn both_tick_gives_net_power() {
         let mut est = KwhDeltaEstimator::new();
+        est.update(&meter(500.0, 300.0), 0.0);
+        est.wind_back(10);
 
-        // Establish baseline
-        let m1 = meter(100.0, 80.0, 50.0, 500.0, 300.0);
-        est.update(&m1, 0.0);
-
-        // Export detected (battery discharging)
-        let m2 = meter(100.0, 80.0, 50.0, 500.0, 300.002);
-        est.update(&m2, 0.0);
-
-        // Battery stops, import register ticks
-        let m3 = meter(100.0, 80.0, 50.0, 500.002, 300.002);
-        let net3 = est.update(&m3, 0.0);
-        // Back to importing on phase 1
-        // net = +100 + 80 + 50 = 230
-        assert!((net3 - 230.0).abs() < 0.1);
+        // 0.003 kWh imported, 0.001 kWh exported in 10s
+        // Net = (0.003 - 0.001) / (10/3600) * 1000 = 720W importing
+        let net = est.update(&meter(500.003, 300.001), 0.0).unwrap();
+        assert!((net - 720.0).abs() < 1.0);
     }
 
     #[test]
-    fn direction_persists_between_kwh_ticks() {
+    fn no_tick_returns_none() {
         let mut est = KwhDeltaEstimator::new();
+        est.update(&meter(500.0, 300.0), 0.0);
+        est.wind_back(10);
 
-        // Baseline
-        let m1 = meter(100.0, 80.0, 50.0, 500.0, 300.0);
-        est.update(&m1, 0.0);
+        // Same kWh values → no tick → None
+        assert!(est.update(&meter(500.0, 300.0), 0.0).is_none());
+    }
 
-        // Export tick
-        let m2 = meter(100.0, 80.0, 50.0, 500.0, 300.001);
-        est.update(&m2, 0.0);
+    #[test]
+    fn direction_change_detected() {
+        let mut est = KwhDeltaEstimator::new();
+        est.update(&meter(500.0, 300.0), 0.0);
+        est.wind_back(10);
 
-        // No tick — direction should persist as exporting
-        let m3 = meter(120.0, 80.0, 50.0, 500.0, 300.001);
-        let net3 = est.update(&m3, 0.0);
-        // Still exporting on phase 1
-        // net = -120 + 80 + 50 = 10
-        assert!((net3 - 10.0).abs() < 0.1);
+        // Importing 360W
+        est.update(&meter(500.001, 300.0), 0.0);
+        est.wind_back(10);
+
+        // Now exporting 360W
+        let net = est.update(&meter(500.001, 300.001), 0.0).unwrap();
+        assert!((net - (-360.0)).abs() < 1.0);
+    }
+
+    #[test]
+    fn longer_window_gives_accurate_low_power() {
+        let mut est = KwhDeltaEstimator::new();
+        est.update(&meter(500.0, 300.0), 0.0);
+        est.wind_back(72);
+
+        // 0.001 kWh in 72 seconds = 50W
+        let net = est.update(&meter(500.001, 300.0), 0.0).unwrap();
+        assert!((net - 50.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn meter_reset_returns_none() {
+        let mut est = KwhDeltaEstimator::new();
+        est.update(&meter(500.0, 300.0), 0.0);
+        est.wind_back(10);
+
+        // Meter reset: kWh values drop → None (resets baseline)
+        assert!(est.update(&meter(0.0, 0.0), 0.0).is_none());
+    }
+
+    #[test]
+    fn near_zero_net_from_equal_ticks() {
+        let mut est = KwhDeltaEstimator::new();
+        est.update(&meter(500.0, 300.0), 0.0);
+        est.wind_back(10);
+
+        // Equal import and export → net zero
+        let net = est.update(&meter(500.001, 300.001), 0.0).unwrap();
+        assert!(net.abs() < 1.0);
+    }
+
+    #[test]
+    fn baseline_resets_after_tick() {
+        let mut est = KwhDeltaEstimator::new();
+        est.update(&meter(500.0, 300.0), 0.0);
+        est.wind_back(10);
+
+        // First tick: 360W import
+        est.update(&meter(500.001, 300.0), 0.0);
+        est.wind_back(20);
+
+        // Second tick from new baseline: 0.002 kWh in 20s = 360W
+        let net = est.update(&meter(500.003, 300.0), 0.0).unwrap();
+        assert!((net - 360.0).abs() < 1.0);
     }
 }

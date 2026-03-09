@@ -81,7 +81,7 @@ impl Controller {
         Some(self.decide_at_hour(grid_power, solar_power, battery, hour))
     }
 
-    fn decide_at_hour(
+    pub(crate) fn decide_at_hour(
         &mut self,
         grid_power: f64,
         solar_power: f64,
@@ -352,7 +352,7 @@ mod tests {
             charge_margin: 50,
             discharge_margin: 5,
             charge_start_threshold: -100.0,
-            discharge_start_threshold: 50.0,
+            discharge_start_threshold: 0.0,
             idle_timeout: Duration::from_secs(5 * 60),
             daily_transitions: 0,
             daily_cooldown_suppressions: 0,
@@ -457,8 +457,9 @@ mod tests {
     #[test]
     fn idle_within_deadband() {
         let mut ctrl = controller_no_cooldown();
-        // 30W is below discharge_start_threshold (50W) and above charge_start_threshold (-100W)
-        let decision = ctrl.decide_at_hour(30.0, 100.0, &battery(50), 12);
+        // 0W is at discharge_start_threshold (0W) and above charge_start_threshold (-100W)
+        // During daytime (hour 12), discharge is blocked regardless
+        let decision = ctrl.decide_at_hour(0.0, 100.0, &battery(50), 12);
         assert_eq!(decision.mode, ControlMode::Idle);
     }
 
@@ -477,9 +478,10 @@ mod tests {
     }
 
     #[test]
-    fn deadband_no_discharge_at_40() {
+    fn deadband_no_discharge_at_zero() {
         let mut ctrl = controller_no_cooldown();
-        let decision = ctrl.decide_at_hour(40.0, 0.0, &battery(50), 20);
+        // 0W grid power is not > 0 threshold → idle
+        let decision = ctrl.decide_at_hour(0.0, 0.0, &battery(50), 20);
         assert_eq!(decision.mode, ControlMode::Idle);
     }
 
@@ -840,5 +842,146 @@ mod tests {
         ctrl.decide_at_hour(20.0, 100.0, &battery(50), 12);
         let decision = ctrl.decide_at_hour(-200.0, 300.0, &battery(50), 12);
         assert_eq!(decision.mode, ControlMode::Charge);
+    }
+
+    // --- Integration scenario tests ---
+
+    /// Simulates a full nighttime discharge scenario with the kWh-based grid
+    /// estimator and controller working together.
+    ///
+    /// Scenario: 04:00, no solar production.
+    /// - Phase 1: 50W house consumption + battery discharge
+    /// - Phase 2: 100W standby/lighting consumption
+    /// - Total house demand: 150W
+    ///
+    /// The battery should ramp up from idle to ~150W discharge, covering the
+    /// house demand and bringing net grid power close to zero.
+    ///
+    /// Each step simulates a kWh tick arriving after the appropriate time for
+    /// the current net power. Between ticks, the estimator returns None and no
+    /// decision is made — the battery holds its last setting.
+    #[test]
+    fn nighttime_discharge_converges_to_house_consumption() {
+        use crate::grid_power::{GridPowerEstimator, KwhDeltaEstimator};
+
+        let mut est = KwhDeltaEstimator::new();
+        let mut ctrl = controller_no_cooldown();
+
+        let house_total = 150.0_f64; // 50W P1 + 100W P2
+        let hour = 4; // Discharge period (outside 07:00–17:00)
+
+        let mut battery_discharge: i32;
+        let mut import_kwh = 500.0_f64;
+        let export_kwh = 300.0_f64;
+
+        // Helper: build a MeterReading with the given kWh values.
+        let make_meter = |imp: f64, exp: f64| -> crate::models::MeterReading {
+            crate::models::MeterReading {
+                device_id: "test".to_string(),
+                consumption_total_kwh: imp,
+                consumption_t1_kwh: 0.0,
+                consumption_t2_kwh: imp,
+                production_total_kwh: exp,
+                production_t1_kwh: 0.0,
+                production_t2_kwh: exp,
+                phase1_voltage: 230.0,
+                phase2_voltage: 230.0,
+                phase3_voltage: 230.0,
+                phase1_current: 0.0,
+                phase2_current: 0.0,
+                phase3_current: 0.0,
+                frequency: 50.0,
+                phase1_pf: 1.0,
+                phase2_pf: 1.0,
+                phase3_pf: 1.0,
+                phase1_power: 0.0,
+                phase2_power: 0.0,
+                phase3_power: 0.0,
+                total_power: 0.0,
+                timestamp: "2024-01-01T04:00:00Z".to_string(),
+            }
+        };
+
+        // Step 0: Baseline reading — establishes kWh reference, no estimate yet.
+        let m0 = make_meter(import_kwh, export_kwh);
+        assert!(est.update(&m0, 0.0).is_none());
+
+        // Step 1: 72 seconds later. Battery idle, house importing 150W.
+        // 150W × 72s = 3 Wh → import register ticks by 0.003 kWh.
+        // Estimator: 0.003 / (72/3600) × 1000 = 150W (importing).
+        import_kwh += 0.003;
+        est.wind_back(72);
+        let grid = est
+            .update(&make_meter(import_kwh, export_kwh), 0.0)
+            .unwrap();
+        assert!(
+            (grid - 150.0).abs() < 1.0,
+            "step 1: expected ~150W, got {grid:.1}W"
+        );
+
+        let d1 = ctrl.decide_at_hour(grid, 0.0, &battery(80), hour);
+        assert_eq!(d1.mode, ControlMode::Discharge, "step 1: should discharge");
+        // Idle → Discharge mode change → 75% ramp: (150 - 5) × 0.75 = 108W
+        assert_eq!(d1.power_watts, 108, "step 1: ramped first decision");
+        battery_discharge = d1.power_watts;
+
+        // Step 2: ~86 seconds later. Battery discharging 108W, net = 150-108 = 42W.
+        // 42W × 86s ≈ 1 Wh → import ticks by 0.001.
+        // Estimator: 0.001 / (86/3600) × 1000 ≈ 42W.
+        let actual_net = house_total - battery_discharge as f64; // 42W
+        let secs_per_tick = (3600.0 / actual_net).round() as u64; // ~86s
+        import_kwh += 0.001;
+        est.wind_back(secs_per_tick);
+        let grid = est
+            .update(&make_meter(import_kwh, export_kwh), 0.0)
+            .unwrap();
+        assert!(
+            (grid - actual_net).abs() < 1.0,
+            "step 2: expected ~{actual_net:.0}W, got {grid:.1}W"
+        );
+
+        let bat = battery_discharging(80, battery_discharge);
+        let d2 = ctrl.decide_at_hour(grid, 0.0, &bat, hour);
+        assert_eq!(d2.mode, ControlMode::Discharge, "step 2: still discharging");
+        // Same mode, no ramp: 108 + (~42 - 5) ≈ 144-145W (kWh quantization)
+        assert!(
+            (d2.power_watts - 145).abs() <= 1,
+            "step 2: expected ~145W, got {}W",
+            d2.power_watts
+        );
+        battery_discharge = d2.power_watts;
+
+        // Step 3: Battery at ~145W. Net = 150-145 = ~5W (nearly balanced!).
+        // ~5W × ~720s = 1 Wh → import ticks by 0.001.
+        // During those ~720 seconds, the battery HOLDS at ~145W — no stale-data drift.
+        let actual_net = house_total - battery_discharge as f64;
+        let secs_per_tick = (3600.0 / actual_net).round() as u64;
+        import_kwh += 0.001;
+        est.wind_back(secs_per_tick);
+        let grid = est
+            .update(&make_meter(import_kwh, export_kwh), 0.0)
+            .unwrap();
+        assert!(
+            (grid - actual_net).abs() < 2.0,
+            "step 3: expected ~{actual_net:.0}W, got {grid:.1}W"
+        );
+
+        let bat = battery_discharging(80, battery_discharge);
+        let d3 = ctrl.decide_at_hour(grid, 0.0, &bat, hour);
+        assert_eq!(d3.mode, ControlMode::Discharge, "step 3: still discharging");
+        // Same mode: ~145 + (~5 - 5) ≈ 144-145W — stable!
+        assert!(
+            (d3.power_watts - battery_discharge).abs() <= 1,
+            "step 3: should hold steady at ~{}W, got {}W",
+            battery_discharge,
+            d3.power_watts
+        );
+
+        // Final check: battery is discharging within the discharge margin of house demand.
+        let final_net = house_total - d3.power_watts as f64;
+        assert!(
+            final_net.abs() < 10.0,
+            "final net should be near zero, got {final_net:.0}W"
+        );
     }
 }

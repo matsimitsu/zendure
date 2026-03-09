@@ -56,7 +56,7 @@ All configuration is via environment variables:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `CHARGE_START_THRESHOLD` | No | `-100.0` | Grid power (W) below which charging starts. Negative = exporting |
-| `DISCHARGE_START_THRESHOLD` | No | `50.0` | Grid power (W) above which discharging starts during discharge hours |
+| `DISCHARGE_START_THRESHOLD` | No | `0.0` | Grid power (W) above which discharging starts during discharge hours |
 | `CHARGE_MARGIN` | No | `50` | Safety margin (W) subtracted from charge power to avoid grid import |
 | `DISCHARGE_MARGIN` | No | `5` | Safety margin (W) subtracted from discharge power |
 | `MIN_SOC` | No | `10` | Minimum SOC (%) — discharge is blocked at or below this level |
