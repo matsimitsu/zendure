@@ -4,12 +4,11 @@ use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS};
 use tokio::sync::mpsc;
 
 use crate::config::Config;
-use crate::models::{ControlDecision, CycleCounts, MeterReading};
+use crate::models::{ControlDecision, CycleCounts, ShellyReading};
 
 #[derive(Debug, Clone)]
 pub enum MqttEvent {
-    MeterReading(MeterReading),
-    SolarReading(f64),
+    GridPowerReading(ShellyReading),
 }
 
 pub fn create_mqtt_client(config: &Config) -> (AsyncClient, EventLoop) {
@@ -24,41 +23,26 @@ pub fn create_mqtt_client(config: &Config) -> (AsyncClient, EventLoop) {
 pub async fn run_subscriber(
     client: AsyncClient,
     mut eventloop: EventLoop,
-    meter_topic: String,
-    solar_topic: String,
+    shelly_topic: String,
     ha_prefix: String,
     tx: mpsc::Sender<MqttEvent>,
 ) {
     loop {
         match eventloop.poll().await {
             Ok(Event::Incoming(Packet::ConnAck(_))) => {
-                tracing::info!("MQTT connected, subscribing to topics");
-                subscribe_topics(&client, &meter_topic, &solar_topic).await;
+                tracing::info!("MQTT connected, subscribing to {shelly_topic}");
+                if let Err(e) = client.subscribe(&shelly_topic, QoS::AtMostOnce).await {
+                    tracing::error!("Failed to subscribe to {shelly_topic}: {e}");
+                }
                 publish_ha_discovery(&client, &ha_prefix).await;
             }
             Ok(Event::Incoming(Packet::Publish(publish))) => {
-                let topic = &publish.topic;
-                let payload = &publish.payload;
-
-                if topic == &meter_topic {
-                    match serde_json::from_slice::<MeterReading>(payload) {
+                if publish.topic == shelly_topic {
+                    match serde_json::from_slice::<ShellyReading>(&publish.payload) {
                         Ok(reading) => {
-                            let _ = tx.send(MqttEvent::MeterReading(reading)).await;
+                            let _ = tx.send(MqttEvent::GridPowerReading(reading)).await;
                         }
-                        Err(e) => tracing::warn!("Failed to parse meter reading: {e}"),
-                    }
-                } else if topic == &solar_topic {
-                    match std::str::from_utf8(payload)
-                        .ok()
-                        .and_then(|s| s.trim().parse::<f64>().ok())
-                    {
-                        Some(watts) => {
-                            let _ = tx.send(MqttEvent::SolarReading(watts)).await;
-                        }
-                        None => tracing::warn!(
-                            "Failed to parse solar reading: {:?}",
-                            std::str::from_utf8(payload)
-                        ),
+                        Err(e) => tracing::warn!("Failed to parse Shelly reading: {e}"),
                     }
                 }
             }
@@ -68,15 +52,6 @@ pub async fn run_subscriber(
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
-    }
-}
-
-async fn subscribe_topics(client: &AsyncClient, meter_topic: &str, solar_topic: &str) {
-    if let Err(e) = client.subscribe(meter_topic, QoS::AtMostOnce).await {
-        tracing::error!("Failed to subscribe to {meter_topic}: {e}");
-    }
-    if let Err(e) = client.subscribe(solar_topic, QoS::AtMostOnce).await {
-        tracing::error!("Failed to subscribe to {solar_topic}: {e}");
     }
 }
 
@@ -93,12 +68,6 @@ pub async fn publish_ha_discovery(client: &AsyncClient, prefix: &str) {
         (
             "decision_grid_power",
             "Grid Power (at decision)",
-            "W",
-            Some("power"),
-        ),
-        (
-            "decision_solar_power",
-            "Solar Power (at decision)",
             "W",
             Some("power"),
         ),
@@ -220,10 +189,6 @@ pub async fn publish_decision(client: &AsyncClient, prefix: &str, decision: &Con
         ("decision_power", decision.power_watts.to_string()),
         ("decision_reason", decision.reason.clone()),
         ("decision_grid_power", format!("{:.0}", decision.grid_power)),
-        (
-            "decision_solar_power",
-            format!("{:.0}", decision.solar_power),
-        ),
     ];
 
     for (id, value) in values {

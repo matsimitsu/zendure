@@ -11,8 +11,7 @@ pub struct Config {
     pub mqtt_client_id: String,
     pub zendure_ip: String,
     pub zendure_sn: String,
-    pub meter_topic: String,
-    pub solar_topic: String,
+    pub shelly_topic: String,
     pub ha_publish_prefix: String,
     pub zendure_poll_interval_secs: u64,
     /// Safety margin subtracted from charge power to avoid grid import (W)
@@ -59,9 +58,7 @@ impl Config {
                 .unwrap_or_else(|_| "zendure-controller".to_string()),
             zendure_ip,
             zendure_sn,
-            meter_topic: env::var("METER_TOPIC").unwrap_or_else(|_| "tele/ISK5MT174".to_string()),
-            solar_topic: env::var("SOLAR_TOPIC")
-                .unwrap_or_else(|_| "homeassistant/solar/inverter_active_power".to_string()),
+            shelly_topic: env::var("SHELLY_TOPIC").map_err(|_| "SHELLY_TOPIC is required")?,
             ha_publish_prefix: env::var("HA_PUBLISH_PREFIX")
                 .unwrap_or_else(|_| "zendure".to_string()),
             zendure_poll_interval_secs: env::var("ZENDURE_POLL_INTERVAL")

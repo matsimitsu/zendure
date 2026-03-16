@@ -1,13 +1,12 @@
 # Zendure AC 2400+ Controller
 
-Smart controller for the Zendure AC 2400+ home battery. Reads grid power and solar production from MQTT, decides when to charge or discharge the battery, and publishes decisions to MQTT for HomeAssistant integration.
+Smart controller for the Zendure AC 2400+ home battery. Reads net grid power from a Shelly Pro 3EM via MQTT, decides when to charge or discharge the battery, and publishes decisions to MQTT for HomeAssistant integration.
 
 ## How it works
 
-1. **Subscribes to MQTT** for smart meter readings (DSMR P1) and solar inverter production
+1. **Subscribes to MQTT** for Shelly Pro 3EM power readings (signed per-phase and total active power, updated every second)
 2. **Polls the Zendure device** via its local REST API for battery state (SOC, power, temperatures, pack data)
-3. **Calculates net grid power** — uses kWh delta estimation to correct for the solar inverter on phase 1
-4. **Decides what the battery should do**:
+3. **Decides what the battery should do**:
    - **Charge** when there's excess solar being exported to the grid (up to 2400W)
    - **Discharge** during evening/night/morning (17:00–07:00) to cover grid demand (up to inverter limit)
    - **Idle** otherwise
@@ -47,8 +46,7 @@ All configuration is via environment variables:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `METER_TOPIC` | No | `tele/ISK5MT174` | MQTT topic for smart meter readings (JSON) |
-| `SOLAR_TOPIC` | No | `homeassistant/solar/inverter_active_power` | MQTT topic for solar production (plain number, watts) |
+| `SHELLY_TOPIC` | Yes | — | MQTT topic for Shelly Pro 3EM readings (e.g. `shellypro3em-XXXX/status/em:0`) |
 | `HA_PUBLISH_PREFIX` | No | `zendure` | Prefix for MQTT topics published to HomeAssistant |
 
 ### Control thresholds
@@ -82,7 +80,7 @@ All configuration is via environment variables:
 ## Running
 
 ```bash
-MQTT_HOST=192.168.1.100 ZENDURE_IP=192.168.1.253 ZENDURE_SN=HEC4NENCN490270 cargo run
+MQTT_HOST=192.168.1.100 ZENDURE_IP=192.168.1.253 ZENDURE_SN=HEC4NENCN490270 SHELLY_TOPIC=shellypro3em-XXXX/status/em:0 cargo run
 ```
 
 ## HomeAssistant
@@ -94,7 +92,6 @@ The controller publishes MQTT discovery config automatically. These sensors appe
 - `Zendure Controller Battery Decision Power` — target power (W)
 - `Zendure Controller Battery Decision Reason` — human-readable explanation
 - `Zendure Controller Grid Power (at decision)` — net grid power used for the decision (W)
-- `Zendure Controller Solar Power (at decision)` — solar production at time of decision (W)
 - `Zendure Controller Battery Round-Trip Efficiency` — charge/discharge RTE (%)
 - `Zendure Controller Battery Usable Energy` — estimated usable energy remaining (kWh)
 - `Zendure Controller Battery Total Capacity` — total pack capacity (kWh)

@@ -1,59 +1,40 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-// --- MQTT input: smart meter reading ---
+// --- MQTT input: Shelly Pro 3EM reading ---
 
-/// DSMR P1 smart meter reading, received via MQTT on the meter topic.
-/// Per-phase power values are always positive (V × |I| × PF) — the meter
-/// cannot distinguish import from export. Solar is on phase 1, so that
-/// phase needs correction (see main.rs coordinator loop).
+/// Shelly Pro 3EM energy meter reading, received via MQTT on the status/em:0 topic.
+/// Provides signed per-phase and total active power every second.
+/// Positive = importing from grid, negative = exporting to grid.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
-pub struct MeterReading {
-    /// Meter identifier
-    pub device_id: String,
-    /// Cumulative energy imported from grid, total (kWh) — OBIS 1-0:1.8.0
-    pub consumption_total_kwh: f64,
-    /// Cumulative energy imported, tariff 1 / high (kWh) — OBIS 1-0:1.8.1
-    pub consumption_t1_kwh: f64,
-    /// Cumulative energy imported, tariff 2 / low (kWh) — OBIS 1-0:1.8.2
-    pub consumption_t2_kwh: f64,
-    /// Cumulative energy exported to grid, total (kWh) — OBIS 1-0:2.8.0
-    pub production_total_kwh: f64,
-    /// Cumulative energy exported, tariff 1 (kWh) — OBIS 1-0:2.8.1
-    pub production_t1_kwh: f64,
-    /// Cumulative energy exported, tariff 2 (kWh) — OBIS 1-0:2.8.2
-    pub production_t2_kwh: f64,
-    /// Phase 1 voltage (V) — OBIS 1-0:32.7.0
-    pub phase1_voltage: f64,
-    /// Phase 2 voltage (V) — OBIS 1-0:52.7.0
-    pub phase2_voltage: f64,
-    /// Phase 3 voltage (V) — OBIS 1-0:72.7.0
-    pub phase3_voltage: f64,
-    /// Phase 1 current, unsigned (A) — OBIS 1-0:31.7.0
-    pub phase1_current: f64,
-    /// Phase 2 current, unsigned (A) — OBIS 1-0:51.7.0
-    pub phase2_current: f64,
-    /// Phase 3 current, unsigned (A) — OBIS 1-0:71.7.0
-    pub phase3_current: f64,
-    /// Grid frequency (Hz) — OBIS 1-0:14.7.0
-    pub frequency: f64,
-    /// Phase 1 power factor — OBIS 1-0:33.7.0
-    pub phase1_pf: f64,
-    /// Phase 2 power factor — OBIS 1-0:53.7.0
-    pub phase2_pf: f64,
-    /// Phase 3 power factor — OBIS 1-0:73.7.0
-    pub phase3_pf: f64,
-    /// Phase 1 power (W), always positive — computed as V × |I| × PF
-    pub phase1_power: f64,
-    /// Phase 2 power (W), always positive — computed as V × |I| × PF
-    pub phase2_power: f64,
-    /// Phase 3 power (W), always positive — computed as V × |I| × PF
-    pub phase3_power: f64,
-    /// Sum of all phase powers (W), always positive
-    pub total_power: f64,
-    /// ISO 8601 timestamp of the reading
-    pub timestamp: String,
+pub struct ShellyReading {
+    /// Phase A active power (W), signed
+    pub a_act_power: f64,
+    /// Phase B active power (W), signed
+    pub b_act_power: f64,
+    /// Phase C active power (W), signed
+    pub c_act_power: f64,
+    /// Total active power across all phases (W), signed
+    pub total_act_power: f64,
+    /// Phase A voltage (V)
+    #[serde(default)]
+    pub a_voltage: f64,
+    /// Phase B voltage (V)
+    #[serde(default)]
+    pub b_voltage: f64,
+    /// Phase C voltage (V)
+    #[serde(default)]
+    pub c_voltage: f64,
+    /// Phase A current (A)
+    #[serde(default)]
+    pub a_current: f64,
+    /// Phase B current (A)
+    #[serde(default)]
+    pub b_current: f64,
+    /// Phase C current (A)
+    #[serde(default)]
+    pub c_current: f64,
 }
 
 // --- Zendure REST API types ---
@@ -290,6 +271,4 @@ pub struct ControlDecision {
     pub reason: String,
     /// Net grid power at time of decision (W): positive = importing, negative = exporting
     pub grid_power: f64,
-    /// Solar production at time of decision (W)
-    pub solar_power: f64,
 }

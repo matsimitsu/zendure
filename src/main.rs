@@ -1,14 +1,12 @@
 mod battery;
 mod config;
 mod controller;
-mod grid_power;
 mod models;
 mod mqtt;
 mod rte;
 mod zendure;
 
 use config::Config;
-use grid_power::{GridPowerEstimator, KwhDeltaEstimator};
 use mqtt::MqttEvent;
 use tokio::sync::mpsc;
 
@@ -50,25 +48,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (tx, mut rx) = mpsc::channel::<MqttEvent>(64);
 
-    let meter_topic = config.meter_topic.clone();
-    let solar_topic = config.solar_topic.clone();
+    let shelly_topic = config.shelly_topic.clone();
     let ha_prefix = config.ha_publish_prefix.clone();
     let subscriber_prefix = config.ha_publish_prefix.clone();
     tokio::spawn(async move {
-        mqtt::run_subscriber(
-            mqtt_client,
-            eventloop,
-            meter_topic,
-            solar_topic,
-            subscriber_prefix,
-            tx,
-        )
-        .await;
+        mqtt::run_subscriber(mqtt_client, eventloop, shelly_topic, subscriber_prefix, tx).await;
     });
 
-    let mut latest_meter: Option<models::MeterReading> = None;
-    let mut latest_solar_power: f64 = 0.0;
-    let mut grid_estimator = KwhDeltaEstimator::new();
     let mut ctrl = controller::Controller::from_config(&config);
 
     let rte_state_path = std::path::PathBuf::from(
@@ -87,42 +73,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         tokio::select! {
             event = rx.recv() => {
-                let Some(event) = event else { break };
+                let Some(MqttEvent::GridPowerReading(reading)) = event else { break };
 
-                let is_meter_update = matches!(&event, MqttEvent::MeterReading(_));
+                let net_grid_power = reading.total_act_power;
+                tracing::info!(
+                    "Shelly: total={:.0}W (A={:.0} B={:.0} C={:.0})",
+                    reading.total_act_power,
+                    reading.a_act_power,
+                    reading.b_act_power,
+                    reading.c_act_power,
+                );
 
-                match event {
-                    MqttEvent::MeterReading(reading) => {
-                        tracing::info!(
-                            "Meter: total={:.0}W (P1={:.0} P2={:.0} P3={:.0})",
-                            reading.total_power,
-                            reading.phase1_power,
-                            reading.phase2_power,
-                            reading.phase3_power,
-                        );
-                        latest_meter = Some(reading);
-                    }
-                    MqttEvent::SolarReading(watts) => {
-                        latest_solar_power = watts;
-                        tracing::info!("Solar: {:.0}W", watts);
-                    }
-                }
-
-                // Only make decisions on meter updates — solar just stores the
-                // latest value for the next meter-triggered decision.
-                if !is_meter_update {
-                    continue;
-                }
-
-                let Some(meter) = &latest_meter else {
-                    continue;
-                };
-
-                let Some(net_grid_power) = grid_estimator.update(meter, latest_solar_power) else {
-                    continue;
-                };
-
-                if let Some(decision) = ctrl.decide(net_grid_power, latest_solar_power, &battery_state) {
+                if let Some(decision) = ctrl.decide(net_grid_power, &battery_state) {
                     tracing::info!(
                         "Decision: {} at {}W — {} (net_grid={:.0}W)",
                         decision.mode,
