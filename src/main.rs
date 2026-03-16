@@ -104,6 +104,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         net_grid_power,
                     );
 
+                    if let Err(e) = zendure_client.apply_decision(&decision).await {
+                        tracing::error!("Failed to apply decision to battery: {e}");
+                        mqtt::publish_status(&publisher_client, &ha_prefix, "zendure_api_error").await;
+                    } else {
+                        mqtt::publish_status(&publisher_client, &ha_prefix, "operational").await;
+                    }
+
                     mqtt::publish_decision(&publisher_client, &ha_prefix, &decision).await;
                     mqtt::publish_cycle_counts(
                         &publisher_client,
@@ -111,7 +118,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &ctrl.cycle_counts(),
                     )
                     .await;
-                    mqtt::publish_status(&publisher_client, &ha_prefix, "operational").await;
                 }
             }
             _ = tokio::time::sleep_until(timeout_at) => {
@@ -131,8 +137,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ),
                         grid_power: 0.0,
                     };
+                    if let Err(e) = zendure_client.apply_decision(&decision).await {
+                        tracing::error!("Failed to apply failsafe idle to battery: {e}");
+                        mqtt::publish_status(&publisher_client, &ha_prefix, "mqtt_timeout_api_error").await;
+                    } else {
+                        mqtt::publish_status(&publisher_client, &ha_prefix, "mqtt_timeout").await;
+                    }
+
                     mqtt::publish_decision(&publisher_client, &ha_prefix, &decision).await;
-                    mqtt::publish_status(&publisher_client, &ha_prefix, "mqtt_timeout").await;
                 }
             }
             _ = poll_timer.tick() => {
