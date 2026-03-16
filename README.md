@@ -68,6 +68,7 @@ All configuration is via environment variables:
 | `MIN_DECISION_INTERVAL` | No | `5` | Minimum seconds between any two decisions (API protection) |
 | `IDLE_TIMEOUT_MINUTES` | No | `5` | Minutes of continuous idle before entering standby |
 | `CYCLE_WARN_THRESHOLD` | No | `200` | Daily mode transitions before forcing standby until midnight (0 = disabled) |
+| `MQTT_TIMEOUT` | No | `60` | Seconds without MQTT updates before forcing idle as a safety failsafe |
 
 ### Other
 

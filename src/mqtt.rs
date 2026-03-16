@@ -108,6 +108,7 @@ pub async fn publish_ha_discovery(client: &AsyncClient, prefix: &str) {
             "W",
             Some("power"),
         ),
+        ("controller_status", "Controller Status", "", None),
         ("daily_cycles", "Battery Daily Mode Transitions", "", None),
         (
             "daily_cooldown_suppressions",
@@ -279,6 +280,16 @@ pub async fn publish_battery_power(
         {
             tracing::warn!("Failed to publish {topic}: {e}");
         }
+    }
+}
+
+pub async fn publish_status(client: &AsyncClient, prefix: &str, status: &str) {
+    let topic = format!("{prefix}/controller_status");
+    if let Err(e) = client
+        .publish(&topic, QoS::AtMostOnce, false, status.as_bytes())
+        .await
+    {
+        tracing::warn!("Failed to publish {topic}: {e}");
     }
 }
 

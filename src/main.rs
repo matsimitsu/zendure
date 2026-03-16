@@ -68,12 +68,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Don't fire immediately — we just polled above
     poll_timer.tick().await;
 
+    let mqtt_timeout = std::time::Duration::from_secs(config.mqtt_timeout_secs);
+    let mut last_mqtt_update = tokio::time::Instant::now();
+    let mut mqtt_timed_out = false;
+
     tracing::info!("Coordinator running, waiting for MQTT data...");
 
     loop {
+        let timeout_at = last_mqtt_update + mqtt_timeout;
         tokio::select! {
             event = rx.recv() => {
                 let Some(MqttEvent::GridPowerReading(reading)) = event else { break };
+                last_mqtt_update = tokio::time::Instant::now();
+                if mqtt_timed_out {
+                    tracing::info!("MQTT updates resumed");
+                    mqtt_timed_out = false;
+                    mqtt::publish_status(&publisher_client, &ha_prefix, "operational").await;
+                }
 
                 let net_grid_power = reading.total_act_power;
                 tracing::info!(
@@ -100,6 +111,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &ctrl.cycle_counts(),
                     )
                     .await;
+                    mqtt::publish_status(&publisher_client, &ha_prefix, "operational").await;
+                }
+            }
+            _ = tokio::time::sleep_until(timeout_at) => {
+                if !mqtt_timed_out {
+                    tracing::warn!(
+                        "No MQTT updates for {}s — forcing idle as safety failsafe",
+                        mqtt_timeout.as_secs(),
+                    );
+                    mqtt_timed_out = true;
+
+                    let decision = models::ControlDecision {
+                        mode: models::ControlMode::Idle,
+                        power_watts: 0,
+                        reason: format!(
+                            "MQTT timeout: no updates for {}s",
+                            mqtt_timeout.as_secs(),
+                        ),
+                        grid_power: 0.0,
+                    };
+                    mqtt::publish_decision(&publisher_client, &ha_prefix, &decision).await;
+                    mqtt::publish_status(&publisher_client, &ha_prefix, "mqtt_timeout").await;
                 }
             }
             _ = poll_timer.tick() => {

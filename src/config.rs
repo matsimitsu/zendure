@@ -36,6 +36,8 @@ pub struct Config {
     pub max_soc: u32,
     /// IANA timezone for discharge window evaluation (e.g. Europe/Amsterdam)
     pub timezone: Tz,
+    /// Seconds without MQTT updates before forcing idle (safety failsafe)
+    pub mqtt_timeout_secs: u64,
 }
 
 impl Config {
@@ -109,6 +111,10 @@ impl Config {
                 .unwrap_or_else(|_| "UTC".to_string())
                 .parse::<Tz>()
                 .map_err(|_| "TIMEZONE must be a valid IANA timezone (e.g. Europe/Amsterdam)")?,
+            mqtt_timeout_secs: env::var("MQTT_TIMEOUT")
+                .unwrap_or_else(|_| "60".to_string())
+                .parse::<u64>()
+                .map_err(|_| "MQTT_TIMEOUT must be a number")?,
         })
     }
 }
