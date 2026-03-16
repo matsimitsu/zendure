@@ -223,8 +223,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         mqtt::publish_battery_power(
                             &publisher_client,
                             &ha_prefix,
-                            report.properties.pack_input_power.unwrap_or(0),
                             report.properties.output_pack_power.unwrap_or(0),
+                            report.properties.pack_input_power.unwrap_or(0),
                         )
                         .await;
 
