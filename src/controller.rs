@@ -111,6 +111,11 @@ impl Controller {
     }
 
     /// Determines the desired mode based on grid state, battery SOC, and time.
+    ///
+    /// Uses hysteresis: the threshold to *start* charging/discharging is more
+    /// aggressive than the threshold to *keep* doing so. This prevents
+    /// oscillation when the battery's own grid effect pushes the meter reading
+    /// close to the start threshold.
     fn target_mode(&self, grid_power: f64, battery: &BatteryState, hour: u32) -> ControlMode {
         let is_discharge_period = !(DISCHARGE_END_HOUR..DISCHARGE_START_HOUR).contains(&hour);
 
@@ -119,15 +124,30 @@ impl Controller {
         // current_power: negative = charging, positive = discharging.
         let underlying_grid = grid_power + battery.current_power as f64;
 
+        // Hysteresis: once charging, keep going as long as we're still exporting (< 0W).
+        // Only require the full start threshold to *begin* charging.
+        let charge_threshold = if self.last_mode == ControlMode::Charge {
+            0.0
+        } else {
+            self.charge_start_threshold
+        };
+
         // Exporting to grid and battery below max SOC → charge
-        if battery.soc < self.max_soc && underlying_grid < self.charge_start_threshold {
+        if battery.soc < self.max_soc && underlying_grid < charge_threshold {
             return ControlMode::Charge;
         }
+
+        // Hysteresis: once discharging, keep going as long as we're still importing (> 0W).
+        let discharge_threshold = if self.last_mode == ControlMode::Discharge {
+            0.0
+        } else {
+            self.discharge_start_threshold
+        };
 
         // Importing from grid during discharge hours and battery above min SOC → discharge
         if is_discharge_period
             && battery.soc > self.min_soc
-            && underlying_grid > self.discharge_start_threshold
+            && underlying_grid > discharge_threshold
         {
             return ControlMode::Discharge;
         }
@@ -828,6 +848,115 @@ mod tests {
         ctrl.decide_at_hour(20.0, &battery(50), 12);
         let decision = ctrl.decide_at_hour(-200.0, &battery(50), 12);
         assert_eq!(decision.mode, ControlMode::Charge);
+    }
+
+    // --- Charge hysteresis tests ---
+
+    #[test]
+    fn charge_hysteresis_keeps_charging_within_deadband() {
+        // underlying_grid = -50W, which is between charge_start_threshold (-100W) and 0W.
+        // From idle: -50 > -100 → would NOT start charging.
+        // But already charging: threshold drops to 0W, -50 < 0 → keeps charging.
+        let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(60));
+        let decision = ctrl.decide_at_hour(-50.0, &battery(50), 12);
+        assert_eq!(decision.mode, ControlMode::Charge);
+    }
+
+    #[test]
+    fn charge_hysteresis_does_not_start_within_deadband() {
+        // Same grid power (-50W) but starting from idle.
+        // underlying_grid = -50 > charge_start_threshold (-100) → stays idle.
+        let mut ctrl = controller_no_cooldown();
+        let decision = ctrl.decide_at_hour(-50.0, &battery(50), 12);
+        assert_eq!(decision.mode, ControlMode::Idle);
+    }
+
+    #[test]
+    fn charge_hysteresis_stops_when_importing() {
+        // Already charging, but underlying_grid >= 0 → even hysteresis can't save it.
+        // Battery charging at 200W, grid reads +10W → underlying = 10 + (-200) = -190W.
+        // Wait, let's use a simpler case: battery idle, grid +10W → underlying = +10 >= 0.
+        let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(60));
+        let decision = ctrl.decide_at_hour(10.0, &battery(50), 12);
+        assert_eq!(decision.mode, ControlMode::Idle);
+    }
+
+    #[test]
+    fn charge_hysteresis_boundary_at_zero() {
+        // Already charging, underlying_grid = 0.0 exactly → 0.0 < 0.0 is false → stops.
+        let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(60));
+        let decision = ctrl.decide_at_hour(0.0, &battery(50), 12);
+        assert_eq!(decision.mode, ControlMode::Idle);
+    }
+
+    // --- Discharge hysteresis tests ---
+
+    #[test]
+    fn discharge_hysteresis_keeps_discharging_near_zero() {
+        // Already discharging. Set a higher start threshold to make the deadband visible.
+        let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(60));
+        ctrl.discharge_start_threshold = 100.0;
+        // underlying_grid = 50W: below start threshold (100W) but above hysteresis (0W).
+        let decision = ctrl.decide_at_hour(50.0, &battery(50), 20);
+        assert_eq!(decision.mode, ControlMode::Discharge);
+    }
+
+    #[test]
+    fn discharge_hysteresis_does_not_start_below_threshold() {
+        // Same grid power but from idle — should NOT start discharging.
+        let mut ctrl = controller_no_cooldown();
+        ctrl.discharge_start_threshold = 100.0;
+        let decision = ctrl.decide_at_hour(50.0, &battery(50), 20);
+        assert_eq!(decision.mode, ControlMode::Idle);
+    }
+
+    #[test]
+    fn discharge_hysteresis_stops_when_exporting() {
+        // Already discharging, but underlying_grid = -10 <= 0 → not > 0 → stops discharging.
+        // -10 is also > charge_start_threshold (-100) → not enough export to charge → idle.
+        let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(60));
+        let decision = ctrl.decide_at_hour(-10.0, &battery(50), 20);
+        assert_eq!(decision.mode, ControlMode::Idle);
+    }
+
+    #[test]
+    fn discharge_hysteresis_boundary_at_zero() {
+        // Already discharging, underlying_grid = 0.0 exactly → 0.0 > 0.0 is false → stops.
+        let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(60));
+        ctrl.discharge_start_threshold = 100.0;
+        let decision = ctrl.decide_at_hour(0.0, &battery(50), 20);
+        assert_eq!(decision.mode, ControlMode::Idle);
+    }
+
+    // --- Hysteresis with battery feedback tests ---
+
+    #[test]
+    fn charge_hysteresis_with_battery_draw_prevents_oscillation() {
+        // Battery charging at 300W. Grid meter reads -20W (small export).
+        // underlying_grid = -20 + (-300) = -320W → well below 0 → keeps charging.
+        // Without hysteresis (threshold -100): -320 < -100 → would also charge.
+        // The real value of hysteresis shows when grid reads +80W:
+        // underlying = 80 + (-300) = -220W. Without hysteresis: -220 < -100 → charge.
+        // But what about +80 from idle? underlying = 80 → not < -100 → idle. Good.
+        //
+        // Key scenario: grid reads -20W while charging 300W.
+        // From idle this would be: underlying = -20, -20 > -100 → idle (correct, too little export).
+        // While charging: underlying = -20 + (-300) = -320, -320 < 0 → keep charging (correct).
+        let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(60));
+        let bat = battery_charging(50, 300);
+        let decision = ctrl.decide_at_hour(-20.0, &bat, 12);
+        assert_eq!(decision.mode, ControlMode::Charge);
+    }
+
+    #[test]
+    fn discharge_hysteresis_with_battery_output_prevents_oscillation() {
+        // Battery discharging 400W. Grid reads -30W (slight export = overshot).
+        // underlying_grid = -30 + 400 = 370W → still > 0 → keep discharging.
+        // From idle: underlying = -30 → not > 0 threshold → idle. Hysteresis prevents flip.
+        let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(60));
+        let bat = battery_discharging(50, 400);
+        let decision = ctrl.decide_at_hour(-30.0, &bat, 20);
+        assert_eq!(decision.mode, ControlMode::Discharge);
     }
 
     // --- Integration scenario tests ---
