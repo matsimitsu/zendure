@@ -114,15 +114,20 @@ impl Controller {
     fn target_mode(&self, grid_power: f64, battery: &BatteryState, hour: u32) -> ControlMode {
         let is_discharge_period = !(DISCHARGE_END_HOUR..DISCHARGE_START_HOUR).contains(&hour);
 
+        // Adjust for battery's own grid effect: the meter reading includes
+        // the battery's consumption (charging) or production (discharging).
+        // current_power: negative = charging, positive = discharging.
+        let underlying_grid = grid_power + battery.current_power as f64;
+
         // Exporting to grid and battery below max SOC → charge
-        if battery.soc < self.max_soc && grid_power < self.charge_start_threshold {
+        if battery.soc < self.max_soc && underlying_grid < self.charge_start_threshold {
             return ControlMode::Charge;
         }
 
         // Importing from grid during discharge hours and battery above min SOC → discharge
         if is_discharge_period
             && battery.soc > self.min_soc
-            && grid_power > self.discharge_start_threshold
+            && underlying_grid > self.discharge_start_threshold
         {
             return ControlMode::Discharge;
         }
@@ -544,13 +549,15 @@ mod tests {
     }
 
     #[test]
-    fn discharge_idles_when_overproducing() {
-        let mut ctrl = controller_no_cooldown();
+    fn discharge_reduces_power_when_overproducing() {
+        let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(60));
         // Battery discharging 400W but grid exporting 50W (overshot).
-        // -50W is in deadband (above -100W threshold) → idle
+        // underlying_grid = -50 + 400 = 350W → real demand still high, stay discharging.
+        // Power: 400 + (-50 - 5) = 345W (reduces toward balance).
         let bat = battery_discharging(50, 400);
         let decision = ctrl.decide_at_hour(-50.0, &bat, 20);
-        assert_eq!(decision.mode, ControlMode::Idle);
+        assert_eq!(decision.mode, ControlMode::Discharge);
+        assert_eq!(decision.power_watts, 345);
     }
 
     // --- Ramp tests ---
@@ -824,6 +831,30 @@ mod tests {
     }
 
     // --- Integration scenario tests ---
+
+    #[test]
+    fn charging_continues_when_own_draw_reduces_export() {
+        // Solar 250W, house 100W. Battery already charging at 75W.
+        // Grid reads -75W (= -150 + 75 from battery draw).
+        // Without the battery, export would be -150W → still above charge threshold.
+        // Bug: controller sees -75W > -100W threshold → incorrectly goes Idle.
+        let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(60));
+        let bat = battery_charging(50, 75);
+        let decision = ctrl.decide_at_hour(-75.0, &bat, 12);
+        assert_eq!(decision.mode, ControlMode::Charge);
+    }
+
+    #[test]
+    fn discharging_continues_when_own_output_reduces_import() {
+        // House 300W, battery already discharging 250W.
+        // Grid reads 50W (= 300 - 250 from battery output).
+        // Without battery, import would be 300W → still above discharge threshold.
+        // Same bug pattern: raw grid_power near threshold causes toggling.
+        let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(60));
+        let bat = battery_discharging(50, 250);
+        let decision = ctrl.decide_at_hour(50.0, &bat, 20);
+        assert_eq!(decision.mode, ControlMode::Discharge);
+    }
 
     /// Simulates a nighttime discharge scenario with Shelly Pro 3EM providing
     /// direct signed grid power every second.
