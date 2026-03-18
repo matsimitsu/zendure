@@ -14,6 +14,8 @@ pub struct BatteryState {
     pub current_power: i32,
     /// True when the battery is recalibrating its SOC reading.
     pub soc_calibrating: bool,
+    /// True when the battery reports it has reached its SOC limit and refuses charging.
+    pub soc_limit_reached: bool,
 }
 
 impl BatteryState {
@@ -26,6 +28,7 @@ impl BatteryState {
             max_charge_power: props.charge_max_limit.unwrap_or(2400) as i32,
             current_power: discharge - charge,
             soc_calibrating: props.soc_status == Some(1),
+            soc_limit_reached: props.soc_limit == Some(1),
         }
     }
 }

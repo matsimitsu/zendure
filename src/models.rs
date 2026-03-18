@@ -125,6 +125,8 @@ pub struct ZendureProperties {
     pub remain_out_time: Option<u32>,
     /// SOC calibration state: 0=not calibrating, 1=calibrating
     pub soc_status: Option<u32>,
+    /// SOC limit reached: 0=not at limit, 1=battery refuses further charging
+    pub soc_limit: Option<u32>,
     /// DC state: 0=off, 1=on, 2=standby
     pub dc_status: Option<u32>,
     /// PV input state: 0=off, 1=on
