@@ -132,8 +132,11 @@ impl Controller {
             self.charge_start_threshold
         };
 
-        // Exporting to grid and battery below max SOC → charge
-        if battery.soc < self.max_soc && underlying_grid < charge_threshold {
+        // Exporting to grid, battery below max SOC, and battery accepts charge → charge
+        if battery.soc < self.max_soc
+            && !battery.soc_limit_reached
+            && underlying_grid < charge_threshold
+        {
             return ControlMode::Charge;
         }
 
@@ -322,6 +325,7 @@ mod tests {
             max_charge_power: 2400,
             current_power: 0,
             soc_calibrating: false,
+            soc_limit_reached: false,
         }
     }
 
@@ -332,6 +336,7 @@ mod tests {
             max_charge_power: 2400,
             current_power: power,
             soc_calibrating: false,
+            soc_limit_reached: false,
         }
     }
 
@@ -342,6 +347,7 @@ mod tests {
             max_charge_power: 2400,
             current_power: -power,
             soc_calibrating: false,
+            soc_limit_reached: false,
         }
     }
 
@@ -508,6 +514,7 @@ mod tests {
             max_charge_power: 1000,
             current_power: 0,
             soc_calibrating: false,
+            soc_limit_reached: false,
         };
         let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(60));
         let decision = ctrl.decide_at_hour(-1500.0, &state, 12);
@@ -522,6 +529,7 @@ mod tests {
             max_charge_power: 2400,
             current_power: 0,
             soc_calibrating: false,
+            soc_limit_reached: false,
         };
         let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(60));
         let decision = ctrl.decide_at_hour(1000.0, &state, 20);
@@ -926,6 +934,47 @@ mod tests {
         ctrl.discharge_start_threshold = 100.0;
         let decision = ctrl.decide_at_hour(0.0, &battery(50), 20);
         assert_eq!(decision.mode, ControlMode::Idle);
+    }
+
+    // --- SOC limit tests ---
+
+    #[test]
+    fn soc_limit_reached_prevents_charging() {
+        // Battery reports socLimit: 1 at 99% — should not charge
+        let mut ctrl = controller_no_cooldown();
+        let mut bat = battery(99);
+        bat.soc_limit_reached = true;
+        let decision = ctrl.decide_at_hour(-500.0, &bat, 12);
+        assert_eq!(decision.mode, ControlMode::Idle);
+    }
+
+    #[test]
+    fn soc_limit_reached_stops_active_charging() {
+        // Already charging, but battery now reports socLimit: 1
+        let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(60));
+        let mut bat = battery(99);
+        bat.soc_limit_reached = true;
+        let decision = ctrl.decide_at_hour(-500.0, &bat, 12);
+        assert_eq!(decision.mode, ControlMode::Idle);
+    }
+
+    #[test]
+    fn soc_limit_not_reached_allows_charging() {
+        // Battery reports socLimit: 0 at 99% — charging allowed
+        let mut ctrl = controller_no_cooldown();
+        let bat = battery(99); // soc_limit_reached: false
+        let decision = ctrl.decide_at_hour(-500.0, &bat, 12);
+        assert_eq!(decision.mode, ControlMode::Charge);
+    }
+
+    #[test]
+    fn soc_limit_does_not_block_discharge() {
+        // socLimit should only affect charging, not discharging
+        let mut ctrl = controller_no_cooldown();
+        let mut bat = battery(99);
+        bat.soc_limit_reached = true;
+        let decision = ctrl.decide_at_hour(400.0, &bat, 20);
+        assert_eq!(decision.mode, ControlMode::Discharge);
     }
 
     // --- Hysteresis with battery feedback tests ---
