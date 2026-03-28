@@ -12,6 +12,8 @@ const RAMP_FACTOR: f64 = 0.75;
 
 pub struct Controller {
     last_mode: ControlMode,
+    /// Last active (non-idle) mode — Charge or Discharge
+    last_active_mode: Option<ControlMode>,
     last_mode_change: Instant,
     last_decision_time: Instant,
     last_idle_start: Option<Instant>,
@@ -37,6 +39,7 @@ impl Controller {
         let min_mode_duration = Duration::from_secs(config.min_mode_duration_secs);
         Self {
             last_mode: ControlMode::Idle,
+            last_active_mode: None,
             last_mode_change: Instant::now() - min_mode_duration,
             last_decision_time: Instant::now()
                 - Duration::from_secs(config.min_decision_interval_secs),
@@ -145,14 +148,18 @@ impl Controller {
             self.discharge_start_threshold
         };
 
-        // Require minimum idle duration before starting discharge (prevents
-        // charge→idle→discharge oscillation during variable solar conditions).
-        // Already-discharging is exempt (hysteresis keeps it going).
-        let idle_long_enough = match self.last_mode {
-            ControlMode::Discharge => true,
-            _ => self
-                .last_idle_start
-                .is_some_and(|t| t.elapsed() >= self.min_idle_before_discharge),
+        // Require minimum idle duration before discharge, but only when the
+        // last active mode was Charge. This prevents charge→idle→discharge
+        // oscillation during variable solar, while allowing discharge to
+        // resume quickly after a brief idle (e.g. demand dip).
+        let needs_idle_guard = self.last_active_mode == Some(ControlMode::Charge);
+        let idle_long_enough = if self.last_mode == ControlMode::Discharge {
+            true
+        } else if needs_idle_guard {
+            self.last_idle_start
+                .is_some_and(|t| t.elapsed() >= self.min_idle_before_discharge)
+        } else {
+            true
         };
 
         // Importing from grid and battery above min SOC → discharge
@@ -245,6 +252,9 @@ impl Controller {
         // Track mode changes and apply ramp
         let (final_power, ramped) = if mode != self.last_mode {
             self.daily_transitions += 1;
+            if matches!(mode, ControlMode::Charge | ControlMode::Discharge) {
+                self.last_active_mode = Some(mode);
+            }
             self.last_mode = mode;
             self.last_mode_change = Instant::now();
             self.last_idle_start = if mode == ControlMode::Idle {
@@ -359,6 +369,7 @@ mod tests {
     fn default_controller() -> Controller {
         Controller {
             last_mode: ControlMode::Idle,
+            last_active_mode: None,
             last_mode_change: Instant::now() - Duration::from_secs(60),
             last_decision_time: Instant::now() - Duration::from_secs(60),
             last_idle_start: None,
@@ -395,6 +406,10 @@ mod tests {
     fn controller_in_mode(mode: ControlMode, elapsed: Duration) -> Controller {
         Controller {
             last_mode: mode,
+            last_active_mode: match mode {
+                ControlMode::Charge | ControlMode::Discharge => Some(mode),
+                _ => None,
+            },
             last_mode_change: Instant::now() - elapsed,
             last_idle_start: match mode {
                 ControlMode::Idle | ControlMode::Standby => Some(Instant::now() - elapsed),
@@ -481,9 +496,10 @@ mod tests {
     }
 
     #[test]
-    fn no_discharge_before_idle_duration_met() {
+    fn no_discharge_after_charge_before_idle_duration_met() {
         let mut ctrl = controller_no_cooldown();
-        // Recently went idle — not idle long enough for discharge
+        // Last active mode was Charge, recently went idle — guard applies
+        ctrl.last_active_mode = Some(ControlMode::Charge);
         ctrl.last_idle_start = Some(Instant::now() - Duration::from_secs(60));
         ctrl.min_idle_before_discharge = Duration::from_secs(300);
         let decision = ctrl.decide_at_hour(400.0, &battery(80), 12);
@@ -491,10 +507,21 @@ mod tests {
     }
 
     #[test]
-    fn discharge_allowed_after_idle_duration_met() {
+    fn discharge_allowed_after_charge_when_idle_duration_met() {
         let mut ctrl = controller_no_cooldown();
-        // Idle for long enough
+        // Last active mode was Charge, but idle long enough
+        ctrl.last_active_mode = Some(ControlMode::Charge);
         ctrl.last_idle_start = Some(Instant::now() - Duration::from_secs(600));
+        ctrl.min_idle_before_discharge = Duration::from_secs(300);
+        let decision = ctrl.decide_at_hour(400.0, &battery(80), 12);
+        assert_eq!(decision.mode, ControlMode::Discharge);
+    }
+
+    #[test]
+    fn discharge_resumes_quickly_after_idle() {
+        // Last active mode was Discharge, briefly went idle — no guard needed
+        let mut ctrl = controller_in_mode(ControlMode::Idle, Duration::from_secs(5));
+        ctrl.last_active_mode = Some(ControlMode::Discharge);
         ctrl.min_idle_before_discharge = Duration::from_secs(300);
         let decision = ctrl.decide_at_hour(400.0, &battery(80), 12);
         assert_eq!(decision.mode, ControlMode::Discharge);
@@ -760,7 +787,8 @@ mod tests {
     #[test]
     fn no_standby_before_timeout() {
         let mut ctrl = controller_in_mode(ControlMode::Idle, Duration::from_secs(4 * 60));
-        let decision = ctrl.decide_at_hour(20.0, &battery(50), 12);
+        // Grid at 0W — no discharge demand
+        let decision = ctrl.decide_at_hour(0.0, &battery(50), 12);
         assert_eq!(decision.mode, ControlMode::Idle);
     }
 
