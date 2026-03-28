@@ -34,7 +34,9 @@ pub struct Config {
     pub min_soc: u32,
     /// Maximum SOC percentage before charging is blocked (default 100)
     pub max_soc: u32,
-    /// IANA timezone for discharge window evaluation (e.g. Europe/Amsterdam)
+    /// Minimum seconds of idle before discharge is allowed (prevents charge→discharge oscillation)
+    pub min_idle_before_discharge_secs: u64,
+    /// IANA timezone (e.g. Europe/Amsterdam)
     pub timezone: Tz,
     /// Seconds without MQTT updates before forcing idle (safety failsafe)
     pub mqtt_timeout_secs: u64,
@@ -107,6 +109,10 @@ impl Config {
                 .unwrap_or_else(|_| "100".to_string())
                 .parse::<u32>()
                 .map_err(|_| "MAX_SOC must be a number")?,
+            min_idle_before_discharge_secs: env::var("MIN_IDLE_BEFORE_DISCHARGE")
+                .unwrap_or_else(|_| "300".to_string())
+                .parse::<u64>()
+                .map_err(|_| "MIN_IDLE_BEFORE_DISCHARGE must be a number")?,
             timezone: env::var("TIMEZONE")
                 .unwrap_or_else(|_| "UTC".to_string())
                 .parse::<Tz>()
