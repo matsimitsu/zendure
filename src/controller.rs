@@ -8,8 +8,6 @@ use crate::config::Config;
 use crate::models::{ControlDecision, ControlMode, CycleCounts};
 
 const MAX_CHARGE_POWER: i32 = 2400;
-const DISCHARGE_START_HOUR: u32 = 17;
-const DISCHARGE_END_HOUR: u32 = 7;
 const RAMP_FACTOR: f64 = 0.75;
 
 pub struct Controller {
@@ -24,6 +22,7 @@ pub struct Controller {
     charge_start_threshold: f64,
     discharge_start_threshold: f64,
     idle_timeout: Duration,
+    min_idle_before_discharge: Duration,
     daily_transitions: u32,
     daily_cooldown_suppressions: u32,
     cycle_warn_threshold: u32,
@@ -49,6 +48,7 @@ impl Controller {
             charge_start_threshold: config.charge_start_threshold,
             discharge_start_threshold: config.discharge_start_threshold,
             idle_timeout: Duration::from_secs(config.idle_timeout_minutes * 60),
+            min_idle_before_discharge: Duration::from_secs(config.min_idle_before_discharge_secs),
             daily_transitions: 0,
             daily_cooldown_suppressions: 0,
             cycle_warn_threshold: config.cycle_warn_threshold,
@@ -116,9 +116,7 @@ impl Controller {
     /// aggressive than the threshold to *keep* doing so. This prevents
     /// oscillation when the battery's own grid effect pushes the meter reading
     /// close to the start threshold.
-    fn target_mode(&self, grid_power: f64, battery: &BatteryState, hour: u32) -> ControlMode {
-        let is_discharge_period = !(DISCHARGE_END_HOUR..DISCHARGE_START_HOUR).contains(&hour);
-
+    fn target_mode(&self, grid_power: f64, battery: &BatteryState, _hour: u32) -> ControlMode {
         // Adjust for battery's own grid effect: the meter reading includes
         // the battery's consumption (charging) or production (discharging).
         // current_power: negative = charging, positive = discharging.
@@ -147,11 +145,18 @@ impl Controller {
             self.discharge_start_threshold
         };
 
-        // Importing from grid during discharge hours and battery above min SOC → discharge
-        if is_discharge_period
-            && battery.soc > self.min_soc
-            && underlying_grid > discharge_threshold
-        {
+        // Require minimum idle duration before starting discharge (prevents
+        // charge→idle→discharge oscillation during variable solar conditions).
+        // Already-discharging is exempt (hysteresis keeps it going).
+        let idle_long_enough = match self.last_mode {
+            ControlMode::Discharge => true,
+            _ => self
+                .last_idle_start
+                .is_some_and(|t| t.elapsed() >= self.min_idle_before_discharge),
+        };
+
+        // Importing from grid and battery above min SOC → discharge
+        if idle_long_enough && battery.soc > self.min_soc && underlying_grid > discharge_threshold {
             return ControlMode::Discharge;
         }
 
@@ -364,6 +369,7 @@ mod tests {
             charge_start_threshold: -100.0,
             discharge_start_threshold: 0.0,
             idle_timeout: Duration::from_secs(5 * 60),
+            min_idle_before_discharge: Duration::from_secs(300),
             daily_transitions: 0,
             daily_cooldown_suppressions: 0,
             cycle_warn_threshold: 200,
@@ -374,10 +380,13 @@ mod tests {
         }
     }
 
-    /// Controller with no cooldown (for tests that only care about mode/power logic).
+    /// Controller with no cooldown and no idle-before-discharge requirement
+    /// (for tests that only care about mode/power logic).
     fn controller_no_cooldown() -> Controller {
         Controller {
             min_mode_duration: Duration::ZERO,
+            min_idle_before_discharge: Duration::ZERO,
+            last_idle_start: Some(Instant::now() - Duration::from_secs(60)),
             ..default_controller()
         }
     }
@@ -387,10 +396,9 @@ mod tests {
         Controller {
             last_mode: mode,
             last_mode_change: Instant::now() - elapsed,
-            last_idle_start: if mode == ControlMode::Idle {
-                Some(Instant::now() - elapsed)
-            } else {
-                None
+            last_idle_start: match mode {
+                ControlMode::Idle | ControlMode::Standby => Some(Instant::now() - elapsed),
+                _ => None,
             },
             ..default_controller()
         }
@@ -468,16 +476,37 @@ mod tests {
     fn idle_within_deadband() {
         let mut ctrl = controller_no_cooldown();
         // 0W is at discharge_start_threshold (0W) and above charge_start_threshold (-100W)
-        // During daytime (hour 12), discharge is blocked regardless
         let decision = ctrl.decide_at_hour(0.0, &battery(50), 12);
         assert_eq!(decision.mode, ControlMode::Idle);
     }
 
     #[test]
-    fn no_discharge_during_daytime() {
+    fn no_discharge_before_idle_duration_met() {
         let mut ctrl = controller_no_cooldown();
+        // Recently went idle — not idle long enough for discharge
+        ctrl.last_idle_start = Some(Instant::now() - Duration::from_secs(60));
+        ctrl.min_idle_before_discharge = Duration::from_secs(300);
         let decision = ctrl.decide_at_hour(400.0, &battery(80), 12);
         assert_eq!(decision.mode, ControlMode::Idle);
+    }
+
+    #[test]
+    fn discharge_allowed_after_idle_duration_met() {
+        let mut ctrl = controller_no_cooldown();
+        // Idle for long enough
+        ctrl.last_idle_start = Some(Instant::now() - Duration::from_secs(600));
+        ctrl.min_idle_before_discharge = Duration::from_secs(300);
+        let decision = ctrl.decide_at_hour(400.0, &battery(80), 12);
+        assert_eq!(decision.mode, ControlMode::Discharge);
+    }
+
+    #[test]
+    fn discharge_allowed_when_already_discharging() {
+        // Already discharging — should keep going regardless of idle duration
+        let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(60));
+        ctrl.min_idle_before_discharge = Duration::from_secs(300);
+        let decision = ctrl.decide_at_hour(400.0, &battery(80), 12);
+        assert_eq!(decision.mode, ControlMode::Discharge);
     }
 
     #[test]
@@ -648,11 +677,11 @@ mod tests {
     // --- Cooldown tests ---
 
     #[test]
-    fn toggle_charge_to_discharge_suppressed() {
+    fn charge_to_discharge_blocked_by_idle_duration() {
+        // In Charge mode → target_mode returns Idle (no idle time for discharge)
         let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(5));
         let decision = ctrl.decide_at_hour(300.0, &battery(50), 20);
         assert_eq!(decision.mode, ControlMode::Idle);
-        assert!(decision.reason.contains("Cooldown"));
     }
 
     #[test]
@@ -664,8 +693,9 @@ mod tests {
     }
 
     #[test]
-    fn toggle_allowed_after_cooldown_expires() {
-        let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(15));
+    fn discharge_allowed_after_sufficient_idle() {
+        // Was in Charge, then idle for 10 minutes (> 5 min default)
+        let mut ctrl = controller_in_mode(ControlMode::Idle, Duration::from_secs(600));
         let decision = ctrl.decide_at_hour(300.0, &battery(50), 20);
         assert_eq!(decision.mode, ControlMode::Discharge);
     }
@@ -678,8 +708,8 @@ mod tests {
     }
 
     #[test]
-    fn idle_to_discharge_always_allowed() {
-        let mut ctrl = controller_in_mode(ControlMode::Idle, Duration::from_secs(1));
+    fn idle_to_discharge_allowed_after_idle_duration() {
+        let mut ctrl = controller_in_mode(ControlMode::Idle, Duration::from_secs(600));
         let decision = ctrl.decide_at_hour(300.0, &battery(50), 20);
         assert_eq!(decision.mode, ControlMode::Discharge);
     }
@@ -694,20 +724,25 @@ mod tests {
     #[test]
     fn rapid_oscillation_stays_idle() {
         let mut ctrl = controller_in_mode(ControlMode::Idle, Duration::from_secs(0));
+        ctrl.min_idle_before_discharge = Duration::from_secs(300);
         let bat = battery(50);
 
         let d1 = ctrl.decide_at_hour(-200.0, &bat, 20);
         assert_eq!(d1.mode, ControlMode::Charge);
 
+        // After charging, idle duration not met → stays idle (not discharge)
         let d2 = ctrl.decide_at_hour(200.0, &bat, 20);
         assert_eq!(d2.mode, ControlMode::Idle, "should go idle, not discharge");
-        assert!(d2.reason.contains("Cooldown"));
 
         let d3 = ctrl.decide_at_hour(-200.0, &bat, 20);
         assert_eq!(d3.mode, ControlMode::Charge);
 
         let d4 = ctrl.decide_at_hour(200.0, &bat, 20);
-        assert_eq!(d4.mode, ControlMode::Idle, "still suppressed");
+        assert_eq!(
+            d4.mode,
+            ControlMode::Idle,
+            "still idle, not enough idle time"
+        );
     }
 
     // --- Standby tests ---
@@ -716,7 +751,8 @@ mod tests {
     fn idle_timeout_triggers_standby() {
         let mut ctrl = controller_in_mode(ControlMode::Idle, Duration::from_secs(16 * 60));
         ctrl.idle_timeout = Duration::from_secs(15 * 60);
-        let decision = ctrl.decide_at_hour(20.0, &battery(50), 12);
+        // Grid at 0W — no discharge demand, so idle persists until standby triggers
+        let decision = ctrl.decide_at_hour(0.0, &battery(50), 12);
         assert_eq!(decision.mode, ControlMode::Standby);
         assert!(decision.reason.contains("standby"));
     }
@@ -761,10 +797,11 @@ mod tests {
 
     #[test]
     fn cooldown_suppression_increments_counter() {
-        let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(5));
+        // Discharge→Charge toggle within cooldown
+        let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(5));
         assert_eq!(ctrl.daily_cooldown_suppressions, 0);
 
-        ctrl.decide_at_hour(300.0, &battery(50), 20);
+        ctrl.decide_at_hour(-200.0, &battery(50), 20);
         assert_eq!(ctrl.daily_cooldown_suppressions, 1);
         // Suppression doesn't count as a transition
         assert_eq!(ctrl.daily_transitions, 0);
@@ -1034,18 +1071,18 @@ mod tests {
         assert_eq!(decision.mode, ControlMode::Discharge);
     }
 
-    /// Simulates a nighttime discharge scenario with Shelly Pro 3EM providing
+    /// Simulates a discharge scenario with Shelly Pro 3EM providing
     /// direct signed grid power every second.
     ///
-    /// Scenario: 04:00, no solar production. House consuming 150W.
+    /// Scenario: House consuming 150W, battery idle long enough.
     /// The battery should ramp up from idle to ~150W discharge, covering the
     /// house demand and bringing net grid power close to zero.
     #[test]
-    fn nighttime_discharge_converges_to_house_consumption() {
+    fn discharge_converges_to_house_consumption() {
         let mut ctrl = controller_no_cooldown();
 
         let house_total = 150.0_f64;
-        let hour = 4; // Discharge period (outside 07:00–17:00)
+        let hour = 12;
 
         // Step 1: Battery idle, house importing 150W from grid.
         let d1 = ctrl.decide_at_hour(150.0, &battery(80), hour);

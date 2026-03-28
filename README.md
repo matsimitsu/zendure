@@ -8,7 +8,7 @@ Smart controller for the Zendure AC 2400+ home battery. Reads net grid power fro
 2. **Polls the Zendure device** via its local REST API for battery state (SOC, power, temperatures, pack data)
 3. **Decides what the battery should do**:
    - **Charge** when there's excess solar being exported to the grid (up to 2400W)
-   - **Discharge** during evening/night/morning (17:00–07:00) to cover grid demand (up to inverter limit)
+   - **Discharge** to cover grid demand (up to inverter limit), after a configurable idle period to prevent charge/discharge oscillation
    - **Idle** otherwise
    - **Standby** after prolonged idle or when daily cycle limit is reached
 5. **Safety guards**:
@@ -54,7 +54,7 @@ All configuration is via environment variables:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `CHARGE_START_THRESHOLD` | No | `-100.0` | Grid power (W) below which charging starts. Negative = exporting |
-| `DISCHARGE_START_THRESHOLD` | No | `0.0` | Grid power (W) above which discharging starts during discharge hours |
+| `DISCHARGE_START_THRESHOLD` | No | `0.0` | Grid power (W) above which discharging starts |
 | `CHARGE_MARGIN` | No | `50` | Safety margin (W) subtracted from charge power to avoid grid import |
 | `DISCHARGE_MARGIN` | No | `5` | Safety margin (W) subtracted from discharge power |
 | `MIN_SOC` | No | `10` | Minimum SOC (%) — discharge is blocked at or below this level |
@@ -64,6 +64,7 @@ All configuration is via environment variables:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
+| `MIN_IDLE_BEFORE_DISCHARGE` | No | `300` | Minimum seconds of idle before discharge is allowed (prevents charge→discharge oscillation) |
 | `MIN_MODE_DURATION` | No | `10` | Minimum seconds before a charge/discharge toggle is allowed |
 | `MIN_DECISION_INTERVAL` | No | `5` | Minimum seconds between any two decisions (API protection) |
 | `IDLE_TIMEOUT_MINUTES` | No | `5` | Minutes of continuous idle before entering standby |
@@ -74,7 +75,7 @@ All configuration is via environment variables:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `TIMEZONE` | No | `UTC` | IANA timezone for discharge window (e.g. `Europe/Amsterdam`) |
+| `TIMEZONE` | No | `UTC` | IANA timezone for cycle counting (e.g. `Europe/Amsterdam`) |
 | `RTE_STATE_PATH` | No | `/tmp/zendure_rte_state.json` | File path for persisting round-trip efficiency state across restarts |
 | `RUST_LOG` | No | — | Log level filter (e.g. `zendure=debug` for verbose output) |
 
