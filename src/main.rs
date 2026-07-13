@@ -6,7 +6,7 @@ mod mqtt;
 mod rte;
 mod zendure;
 
-use config::Config;
+use config::{Config, SolarPhase};
 use mqtt::MqttEvent;
 use tokio::sync::mpsc;
 
@@ -87,15 +87,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 let net_grid_power = reading.total_act_power;
+                // Solar production = export (negative power) on the phase the
+                // inverter feeds into. The meter total nets this against loads
+                // on other phases, so read the single phase directly.
+                let solar_phase_power = match config.solar_phase {
+                    SolarPhase::A => reading.a_act_power,
+                    SolarPhase::B => reading.b_act_power,
+                    SolarPhase::C => reading.c_act_power,
+                };
+                let solar_power = (-solar_phase_power).max(0.0);
                 tracing::info!(
-                    "Shelly: total={:.0}W (A={:.0} B={:.0} C={:.0})",
+                    "Shelly: total={:.0}W (A={:.0} B={:.0} C={:.0}), solar={:.0}W",
                     reading.total_act_power,
                     reading.a_act_power,
                     reading.b_act_power,
                     reading.c_act_power,
+                    solar_power,
                 );
 
-                if let Some(decision) = ctrl.decide(net_grid_power, &battery_state) {
+                if let Some(decision) = ctrl.decide(net_grid_power, solar_power, &battery_state) {
                     tracing::info!(
                         "Decision: {} at {}W — {} (net_grid={:.0}W)",
                         decision.mode,

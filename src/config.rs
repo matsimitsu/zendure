@@ -2,6 +2,27 @@ use std::env;
 
 use chrono_tz::Tz;
 
+/// Which Shelly Pro 3EM phase the solar inverter (e.g. Huawei Sun2000) feeds
+/// into. Solar production is read as the export on that single phase, since the
+/// meter's total nets solar export against loads on the other phases.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SolarPhase {
+    A,
+    B,
+    C,
+}
+
+impl SolarPhase {
+    fn parse(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "A" => Ok(SolarPhase::A),
+            "B" => Ok(SolarPhase::B),
+            "C" => Ok(SolarPhase::C),
+            _ => Err("SOLAR_PHASE must be one of A, B, or C".to_string()),
+        }
+    }
+}
+
 #[allow(dead_code)]
 pub struct Config {
     pub mqtt_host: String,
@@ -34,6 +55,12 @@ pub struct Config {
     pub min_soc: u32,
     /// Maximum SOC percentage before charging is blocked (default 100)
     pub max_soc: u32,
+    /// Which meter phase the solar inverter feeds into.
+    pub solar_phase: SolarPhase,
+    /// Solar inverter export (W) on `solar_phase` at or above which discharge is
+    /// skipped, so large loads (e.g. EV charging) pull from grid+solar instead
+    /// of draining the home battery. 0 disables the guard (default).
+    pub solar_discharge_block_threshold: i32,
     /// Minimum seconds of idle before discharge is allowed (prevents charge→discharge oscillation)
     pub min_idle_before_discharge_secs: u64,
     /// IANA timezone (e.g. Europe/Amsterdam)
@@ -109,6 +136,13 @@ impl Config {
                 .unwrap_or_else(|_| "100".to_string())
                 .parse::<u32>()
                 .map_err(|_| "MAX_SOC must be a number")?,
+            solar_phase: SolarPhase::parse(
+                &env::var("SOLAR_PHASE").unwrap_or_else(|_| "A".to_string()),
+            )?,
+            solar_discharge_block_threshold: env::var("SOLAR_DISCHARGE_BLOCK_THRESHOLD")
+                .unwrap_or_else(|_| "0".to_string())
+                .parse::<i32>()
+                .map_err(|_| "SOLAR_DISCHARGE_BLOCK_THRESHOLD must be a number")?,
             min_idle_before_discharge_secs: env::var("MIN_IDLE_BEFORE_DISCHARGE")
                 .unwrap_or_else(|_| "300".to_string())
                 .parse::<u64>()

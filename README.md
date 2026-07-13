@@ -59,6 +59,8 @@ All configuration is via environment variables:
 | `DISCHARGE_MARGIN` | No | `5` | Safety margin (W) subtracted from discharge power |
 | `MIN_SOC` | No | `10` | Minimum SOC (%) — discharge is blocked at or below this level |
 | `MAX_SOC` | No | `100` | Maximum SOC (%) — charging is blocked at or above this level |
+| `SOLAR_PHASE` | No | `A` | Which Shelly phase (`A`, `B`, or `C`) the solar inverter feeds into |
+| `SOLAR_DISCHARGE_BLOCK_THRESHOLD` | No | `0` | Solar export (W) on `SOLAR_PHASE` at or above which discharge is skipped, so large loads (e.g. EV charging) pull from grid+solar instead of draining the battery. `0` disables the guard |
 
 ### Timing and safety
 
