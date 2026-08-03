@@ -60,6 +60,21 @@ impl ZendureClient {
         *self.storage_mode.lock().unwrap() = mode;
     }
 
+    /// Write the charge/discharge power-cap setpoints to the device.
+    ///
+    /// These are read/write setpoints the device can reset to 0 (which stalls
+    /// all power flow). We write them **only at startup** — a deliberate,
+    /// restart-controlled action — and never overwrite them mid-run, so if the
+    /// device zeroes a cap while running we stand down rather than fighting it.
+    pub async fn write_power_caps(&self) -> Result<(), reqwest::Error> {
+        self.ensure_ram_mode().await?;
+        self.write_properties(serde_json::json!({
+            "chargeMaxLimit": DEVICE_MAX_CHARGE_POWER,
+            "inverseMaxPower": DEVICE_MAX_DISCHARGE_POWER,
+        }))
+        .await
+    }
+
     /// Apply a control decision to the battery via the Zendure REST API.
     ///
     /// - Charge: wakes to RAM mode, sets acMode=1 (only on mode change) and inputLimit.
@@ -73,11 +88,7 @@ impl ZendureClient {
         match decision.mode {
             ControlMode::Charge => {
                 self.ensure_ram_mode().await?;
-                // Re-assert the charge cap: the device stores chargeMaxLimit as a
-                // setpoint that can reset to 0 (which stalls all charging), so we
-                // write it back on every charge command to self-heal.
                 let mut props = serde_json::json!({
-                    "chargeMaxLimit": DEVICE_MAX_CHARGE_POWER,
                     "inputLimit": decision.power_watts,
                 });
                 if self.set_ac_mode(1) {
@@ -87,10 +98,7 @@ impl ZendureClient {
             }
             ControlMode::Discharge => {
                 self.ensure_ram_mode().await?;
-                // Re-assert the inverter output cap for the same reason as
-                // chargeMaxLimit above.
                 let mut props = serde_json::json!({
-                    "inverseMaxPower": DEVICE_MAX_DISCHARGE_POWER,
                     "outputLimit": decision.power_watts,
                 });
                 if self.set_ac_mode(2) {

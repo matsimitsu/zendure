@@ -19,6 +19,10 @@ pub struct BatteryState {
     pub soc_calibrating: bool,
     /// True when the battery reports it has reached its SOC limit and refuses charging.
     pub soc_limit_reached: bool,
+    /// True when the device reports a fault (faultLevel > 0) or error flag.
+    /// While faulted, the controller stays idle and does not command power or
+    /// overwrite the device's power-cap setpoints.
+    pub fault: bool,
 }
 
 impl BatteryState {
@@ -27,20 +31,19 @@ impl BatteryState {
         let charge = props.output_pack_power.unwrap_or(0) as i32;
         Self {
             soc: props.electric_level.unwrap_or(0),
-            // A reported 0 means the device's power-cap setpoint was reset (not
-            // that it genuinely can't charge/discharge), so fall back to the
-            // rated cap — same as an absent field.
+            // Honor the device's reported caps verbatim. A reported 0 means the
+            // device zeroed its own power-cap setpoint — we deliberately let that
+            // stop charging/discharging rather than overwriting it mid-run (the
+            // caps are only written once, at startup). An *absent* field falls
+            // back to the rated cap.
             max_discharge_power: props
                 .inverse_max_power
-                .filter(|&v| v > 0)
                 .unwrap_or(DEVICE_MAX_DISCHARGE_POWER) as i32,
-            max_charge_power: props
-                .charge_max_limit
-                .filter(|&v| v > 0)
-                .unwrap_or(DEVICE_MAX_CHARGE_POWER) as i32,
+            max_charge_power: props.charge_max_limit.unwrap_or(DEVICE_MAX_CHARGE_POWER) as i32,
             current_power: discharge - charge,
             soc_calibrating: props.soc_status == Some(1),
             soc_limit_reached: props.soc_limit == Some(1),
+            fault: props.fault_level.unwrap_or(0) > 0 || props.is_error.unwrap_or(0) != 0,
         }
     }
 }
@@ -139,8 +142,9 @@ mod tests {
     use crate::models::ZendureProperties;
 
     #[test]
-    fn reported_zero_charge_limit_falls_back_to_default() {
-        // Device reset chargeMaxLimit to 0 — treat as the rated cap, not "can't charge".
+    fn reported_zero_limit_is_honored() {
+        // Device zeroed its own caps mid-run — honor it (stop), don't overwrite.
+        // Caps are only (re)written at startup, so this stalls until a restart.
         let props = ZendureProperties {
             electric_level: Some(34),
             charge_max_limit: Some(0),
@@ -148,8 +152,25 @@ mod tests {
             ..Default::default()
         };
         let state = BatteryState::from_properties(&props);
-        assert_eq!(state.max_charge_power, DEVICE_MAX_CHARGE_POWER as i32);
-        assert_eq!(state.max_discharge_power, DEVICE_MAX_DISCHARGE_POWER as i32);
+        assert_eq!(state.max_charge_power, 0);
+        assert_eq!(state.max_discharge_power, 0);
+    }
+
+    #[test]
+    fn fault_level_or_error_flag_sets_fault() {
+        assert!(!BatteryState::from_properties(&ZendureProperties::default()).fault);
+
+        let faulted = ZendureProperties {
+            fault_level: Some(2),
+            ..Default::default()
+        };
+        assert!(BatteryState::from_properties(&faulted).fault);
+
+        let errored = ZendureProperties {
+            is_error: Some(1),
+            ..Default::default()
+        };
+        assert!(BatteryState::from_properties(&errored).fault);
     }
 
     #[test]

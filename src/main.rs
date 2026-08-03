@@ -28,7 +28,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get_properties()
         .await
         .map_err(|e| e.to_string())?;
-    let mut battery_state = battery::BatteryState::from_properties(&initial_report.properties);
 
     // Sync tracked storage mode with the device's actual state. The client
     // defaults to RAM, but the device may have been left in Flash/standby
@@ -42,6 +41,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     zendure_client.set_storage_mode(initial_storage_mode);
     tracing::info!("Device storage mode at startup: {initial_storage_mode:?}");
+
+    // Write the charge/discharge power caps once, here at startup. The device
+    // stores these as setpoints it can reset to 0; we deliberately only write
+    // them at startup (never mid-run) so a device-initiated 0 stops power flow
+    // until a human restarts the process, rather than being silently overwritten.
+    if let Err(e) = zendure_client.write_power_caps().await {
+        tracing::warn!("Failed to write power caps at startup: {e}");
+    }
+
+    // Re-read so battery_state reflects the caps we just wrote, otherwise the
+    // first decisions would use the pre-write (possibly 0) limits.
+    let battery_report = match zendure_client.get_properties().await {
+        Ok(report) => report,
+        Err(e) => {
+            tracing::warn!("Failed to re-read properties after writing caps: {e}");
+            initial_report.clone()
+        }
+    };
+    let mut battery_state = battery::BatteryState::from_properties(&battery_report.properties);
 
     let mut pack_capacities = rte::pack_capacities(&initial_report.pack_data);
     let mut min_soc_percent: u32 = initial_report

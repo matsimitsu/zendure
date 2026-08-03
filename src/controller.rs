@@ -114,6 +114,26 @@ impl Controller {
             };
         }
 
+        // 0b. Device-reported fault — stay idle. Idle only writes inputLimit=0 /
+        // outputLimit=0, so we neither command power nor overwrite the device's
+        // chargeMaxLimit/inverseMaxPower setpoints. If a genuine fault zeroed
+        // those limits, we leave them at 0 and stand down rather than forcing a
+        // charge.
+        if battery.fault {
+            tracing::warn!("Device reports a fault, idling");
+            if self.last_mode != ControlMode::Idle {
+                self.last_mode = ControlMode::Idle;
+                self.last_mode_change = Instant::now();
+                self.last_idle_start = Some(Instant::now());
+            }
+            return ControlDecision {
+                mode: ControlMode::Idle,
+                power_watts: 0,
+                reason: "Device reports a fault, idling".to_string(),
+                grid_power,
+            };
+        }
+
         // 1. What mode should we be in?
         let mode = self.target_mode(grid_power, solar_power, battery, hour);
 
@@ -369,6 +389,7 @@ mod tests {
             current_power: 0,
             soc_calibrating: false,
             soc_limit_reached: false,
+            fault: false,
         }
     }
 
@@ -380,6 +401,7 @@ mod tests {
             current_power: power,
             soc_calibrating: false,
             soc_limit_reached: false,
+            fault: false,
         }
     }
 
@@ -391,6 +413,7 @@ mod tests {
             current_power: -power,
             soc_calibrating: false,
             soc_limit_reached: false,
+            fault: false,
         }
     }
 
@@ -600,6 +623,7 @@ mod tests {
             current_power: 0,
             soc_calibrating: false,
             soc_limit_reached: false,
+            fault: false,
         };
         let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(60));
         let decision = ctrl.decide_at_hour(-1500.0, 0.0, &state, 12);
@@ -615,6 +639,7 @@ mod tests {
             current_power: 0,
             soc_calibrating: false,
             soc_limit_reached: false,
+            fault: false,
         };
         let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(60));
         let decision = ctrl.decide_at_hour(1000.0, 0.0, &state, 20);
@@ -930,6 +955,28 @@ mod tests {
         let decision = ctrl.decide_at_hour(400.0, 0.0, &bat, 20);
         assert_eq!(decision.mode, ControlMode::Idle);
         assert!(decision.reason.contains("calibration"));
+    }
+
+    #[test]
+    fn fault_forces_idle_and_does_not_charge() {
+        let mut ctrl = controller_no_cooldown();
+        let mut bat = battery(34);
+        bat.fault = true;
+        // Would normally charge on this much solar export, but a fault overrides.
+        let decision = ctrl.decide_at_hour(-1653.0, 1722.0, &bat, 12);
+        assert_eq!(decision.mode, ControlMode::Idle);
+        assert_eq!(decision.power_watts, 0);
+        assert!(decision.reason.contains("fault"));
+    }
+
+    #[test]
+    fn fault_prevents_discharge() {
+        let mut ctrl = controller_no_cooldown();
+        let mut bat = battery(80);
+        bat.fault = true;
+        let decision = ctrl.decide_at_hour(400.0, 0.0, &bat, 20);
+        assert_eq!(decision.mode, ControlMode::Idle);
+        assert!(decision.reason.contains("fault"));
     }
 
     #[test]

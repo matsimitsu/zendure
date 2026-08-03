@@ -17,6 +17,8 @@ Smart controller for the Zendure AC 2400+ home battery. Reads net grid power fro
    - **Ramp** — starts at 75% power on mode changes to avoid overshooting
    - **SOC calibration** — idles when the battery reports SOC calibration in progress
    - **Cycle limit** — forces standby when daily mode transitions exceed a threshold
+   - **Device fault** — idles when the device reports a fault (`faultLevel` > 0 or `is_error`)
+   - **Power caps** — the device stores its charge (`chargeMaxLimit`, 2400W) and discharge (`inverseMaxPower`, 800W) limits as setpoints it can reset to 0, which stalls all power flow. The controller writes them **once at startup** and never mid-run. If the device zeroes a cap while running, the controller honors it (that direction stops) rather than overwriting a value the device changed for reasons we can't see — recovery is a deliberate process restart.
 6. **Tracks round-trip efficiency** (RTE) — measures charge vs discharge energy, persisted to disk
 7. **Publishes to MQTT** — HomeAssistant auto-discovers all sensors
 
