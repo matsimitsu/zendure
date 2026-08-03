@@ -7,6 +7,7 @@ mod rte;
 mod zendure;
 
 use config::{Config, SolarPhase};
+use models::StorageMode;
 use mqtt::MqttEvent;
 use tokio::sync::mpsc;
 
@@ -28,6 +29,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .map_err(|e| e.to_string())?;
     let mut battery_state = battery::BatteryState::from_properties(&initial_report.properties);
+
+    // Sync tracked storage mode with the device's actual state. The client
+    // defaults to RAM, but the device may have been left in Flash/standby
+    // (e.g. after an idle-timeout standby before a restart). Without this,
+    // ensure_ram_mode() short-circuits and never wakes the device, so it keeps
+    // reporting chargeMaxLimit=0 / inverseMaxPower=0 and every command clamps to 0W.
+    let initial_storage_mode = if initial_report.properties.smart_mode == Some(1) {
+        StorageMode::Ram
+    } else {
+        StorageMode::Flash
+    };
+    zendure_client.set_storage_mode(initial_storage_mode);
+    tracing::info!("Device storage mode at startup: {initial_storage_mode:?}");
+
     let mut pack_capacities = rte::pack_capacities(&initial_report.pack_data);
     let mut min_soc_percent: u32 = initial_report
         .properties
@@ -107,11 +122,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if let Some(decision) = ctrl.decide(net_grid_power, solar_power, &battery_state) {
                     tracing::info!(
-                        "Decision: {} at {}W — {} (net_grid={:.0}W)",
+                        "Decision: {} at {}W — {} (net_grid={:.0}W, battery: SOC={}%, max_charge={}W, max_discharge={}W, current={}W, soc_limit={})",
                         decision.mode,
                         decision.power_watts,
                         decision.reason,
                         net_grid_power,
+                        battery_state.soc,
+                        battery_state.max_charge_power,
+                        battery_state.max_discharge_power,
+                        battery_state.current_power,
+                        battery_state.soc_limit_reached,
                     );
 
                     if let Err(e) = zendure_client.apply_decision(&decision).await {
