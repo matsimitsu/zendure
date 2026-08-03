@@ -1,4 +1,7 @@
-use crate::models::{ControlDecision, ControlMode, StorageMode, ZendureProperties};
+use crate::models::{
+    ControlDecision, ControlMode, DEVICE_MAX_CHARGE_POWER, DEVICE_MAX_DISCHARGE_POWER, StorageMode,
+    ZendureProperties,
+};
 use crate::zendure::ZendureClient;
 
 /// Current battery state, used by the controller to make decisions.
@@ -24,8 +27,17 @@ impl BatteryState {
         let charge = props.output_pack_power.unwrap_or(0) as i32;
         Self {
             soc: props.electric_level.unwrap_or(0),
-            max_discharge_power: props.inverse_max_power.unwrap_or(800) as i32,
-            max_charge_power: props.charge_max_limit.unwrap_or(2400) as i32,
+            // A reported 0 means the device's power-cap setpoint was reset (not
+            // that it genuinely can't charge/discharge), so fall back to the
+            // rated cap — same as an absent field.
+            max_discharge_power: props
+                .inverse_max_power
+                .filter(|&v| v > 0)
+                .unwrap_or(DEVICE_MAX_DISCHARGE_POWER) as i32,
+            max_charge_power: props
+                .charge_max_limit
+                .filter(|&v| v > 0)
+                .unwrap_or(DEVICE_MAX_CHARGE_POWER) as i32,
             current_power: discharge - charge,
             soc_calibrating: props.soc_status == Some(1),
             soc_limit_reached: props.soc_limit == Some(1),
@@ -118,6 +130,46 @@ impl Battery for ZendureClient {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::ZendureProperties;
+
+    #[test]
+    fn reported_zero_charge_limit_falls_back_to_default() {
+        // Device reset chargeMaxLimit to 0 — treat as the rated cap, not "can't charge".
+        let props = ZendureProperties {
+            electric_level: Some(34),
+            charge_max_limit: Some(0),
+            inverse_max_power: Some(0),
+            ..Default::default()
+        };
+        let state = BatteryState::from_properties(&props);
+        assert_eq!(state.max_charge_power, DEVICE_MAX_CHARGE_POWER as i32);
+        assert_eq!(state.max_discharge_power, DEVICE_MAX_DISCHARGE_POWER as i32);
+    }
+
+    #[test]
+    fn absent_limits_fall_back_to_default() {
+        let props = ZendureProperties::default();
+        let state = BatteryState::from_properties(&props);
+        assert_eq!(state.max_charge_power, DEVICE_MAX_CHARGE_POWER as i32);
+        assert_eq!(state.max_discharge_power, DEVICE_MAX_DISCHARGE_POWER as i32);
+    }
+
+    #[test]
+    fn reported_nonzero_limits_are_respected() {
+        let props = ZendureProperties {
+            charge_max_limit: Some(1200),
+            inverse_max_power: Some(600),
+            ..Default::default()
+        };
+        let state = BatteryState::from_properties(&props);
+        assert_eq!(state.max_charge_power, 1200);
+        assert_eq!(state.max_discharge_power, 600);
     }
 }
 

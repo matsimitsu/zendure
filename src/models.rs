@@ -1,6 +1,16 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Rated charge power cap (W) for the solarFlow2400AC+. The device stores this
+/// as a read/write setpoint (`chargeMaxLimit`) that can be reset to 0 by a
+/// firmware/factory reset, which stalls all charging — so the controller both
+/// writes it back and falls back to it when the device reports 0.
+pub const DEVICE_MAX_CHARGE_POWER: u32 = 2400;
+/// Rated inverter output cap (W) — Germany's 800W feed-in limit. Stored on the
+/// device as the read/write `inverseMaxPower` setpoint; treated like
+/// [`DEVICE_MAX_CHARGE_POWER`].
+pub const DEVICE_MAX_DISCHARGE_POWER: u32 = 800;
+
 // --- MQTT input: Shelly Pro 3EM reading ---
 
 /// Shelly Pro 3EM energy meter reading, received via MQTT on the status/em:0 topic.
@@ -64,7 +74,7 @@ pub struct ZendureReport {
 /// All fields are Option because the API may omit any field.
 /// Values confirmed from live device at 192.168.1.253.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ZendureProperties {
     /// Battery state of charge (%) — 0-100
