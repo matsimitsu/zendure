@@ -19,7 +19,9 @@ pub struct BatteryState {
     pub soc_calibrating: bool,
     /// True when the battery reports it has reached its SOC limit and refuses charging.
     pub soc_limit_reached: bool,
-    /// True when the device reports a fault (faultLevel > 0) or error flag.
+    /// True when the device reports an error (isError). We deliberately ignore
+    /// faultLevel: it also goes non-zero for benign conditions like WiFi
+    /// hiccups or firmware update checks, which caused spurious idling.
     /// While faulted, the controller stays idle and does not command power or
     /// overwrite the device's power-cap setpoints.
     pub fault: bool,
@@ -43,7 +45,7 @@ impl BatteryState {
             current_power: discharge - charge,
             soc_calibrating: props.soc_status == Some(1),
             soc_limit_reached: props.soc_limit == Some(1),
-            fault: props.fault_level.unwrap_or(0) > 0 || props.is_error.unwrap_or(0) != 0,
+            fault: props.is_error.unwrap_or(0) != 0,
         }
     }
 }
@@ -157,14 +159,16 @@ mod tests {
     }
 
     #[test]
-    fn fault_level_or_error_flag_sets_fault() {
+    fn error_flag_sets_fault_but_fault_level_is_ignored() {
         assert!(!BatteryState::from_properties(&ZendureProperties::default()).fault);
 
-        let faulted = ZendureProperties {
+        // faultLevel also goes non-zero for benign conditions (WiFi hiccups,
+        // firmware update checks), so it must NOT set fault.
+        let benign = ZendureProperties {
             fault_level: Some(2),
             ..Default::default()
         };
-        assert!(BatteryState::from_properties(&faulted).fault);
+        assert!(!BatteryState::from_properties(&benign).fault);
 
         let errored = ZendureProperties {
             is_error: Some(1),

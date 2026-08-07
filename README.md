@@ -12,12 +12,12 @@ Smart controller for the Zendure AC 2400+ home battery. Reads net grid power fro
    - **Idle** otherwise
    - **Standby** after prolonged idle or when daily cycle limit is reached
 5. **Safety guards**:
-   - **SOC limits** — stops charging at max SOC (default 100%) and discharging at min SOC (default 10%)
+   - **SOC limits** — stops charging at max SOC (default 100%) and discharging at min SOC (default 10%); on the configured `BALANCE_WEEKDAY` (default Monday), max SOC is raised to 100% for a periodic cell-balancing full charge
    - **Cooldown** — prevents rapid charge/discharge toggling
    - **Ramp** — starts at 75% power on mode changes to avoid overshooting
    - **SOC calibration** — idles when the battery reports SOC calibration in progress
    - **Cycle limit** — forces standby when daily mode transitions exceed a threshold
-   - **Device fault** — idles when the device reports a fault (`faultLevel` > 0 or `is_error`)
+   - **Device fault** — idles when the device reports an error (`isError`); `faultLevel` is ignored since it also goes non-zero for benign conditions like WiFi issues or firmware update checks
    - **Power caps** — the device stores its charge (`chargeMaxLimit`, 2400W) and discharge (`inverseMaxPower`, 800W) limits as setpoints it can reset to 0, which stalls all power flow. The controller writes them **once at startup** and never mid-run. If the device zeroes a cap while running, the controller honors it (that direction stops) rather than overwriting a value the device changed for reasons we can't see — recovery is a deliberate process restart.
 6. **Tracks round-trip efficiency** (RTE) — measures charge vs discharge energy, persisted to disk
 7. **Publishes to MQTT** — HomeAssistant auto-discovers all sensors
@@ -61,6 +61,7 @@ All configuration is via environment variables:
 | `DISCHARGE_MARGIN` | No | `5` | Safety margin (W) subtracted from discharge power |
 | `MIN_SOC` | No | `10` | Minimum SOC (%) — discharge is blocked at or below this level |
 | `MAX_SOC` | No | `100` | Maximum SOC (%) — charging is blocked at or above this level |
+| `BALANCE_WEEKDAY` | No | `mon` | Weekday (`Mon`–`Sun`) on which `MAX_SOC` is raised to 100% so the pack gets a periodic full charge for cell balancing. `none` disables the override |
 | `SOLAR_PHASE` | No | `A` | Which Shelly phase (`A`, `B`, or `C`) the solar inverter feeds into |
 | `SOLAR_DISCHARGE_BLOCK_THRESHOLD` | No | `0` | Solar export (W) on `SOLAR_PHASE` at or above which discharge is skipped, so large loads (e.g. EV charging) pull from grid+solar instead of draining the battery. `0` disables the guard |
 

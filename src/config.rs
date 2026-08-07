@@ -1,5 +1,6 @@
 use std::env;
 
+use chrono::Weekday;
 use chrono_tz::Tz;
 
 /// Which Shelly Pro 3EM phase the solar inverter (e.g. Huawei Sun2000) feeds
@@ -20,6 +21,22 @@ impl SolarPhase {
             "C" => Ok(SolarPhase::C),
             _ => Err("SOLAR_PHASE must be one of A, B, or C".to_string()),
         }
+    }
+}
+
+fn parse_weekday(s: &str) -> Result<Weekday, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "mon" | "monday" => Ok(Weekday::Mon),
+        "tue" | "tuesday" => Ok(Weekday::Tue),
+        "wed" | "wednesday" => Ok(Weekday::Wed),
+        "thu" | "thursday" => Ok(Weekday::Thu),
+        "fri" | "friday" => Ok(Weekday::Fri),
+        "sat" | "saturday" => Ok(Weekday::Sat),
+        "sun" | "sunday" => Ok(Weekday::Sun),
+        _ => Err(
+            "BALANCE_WEEKDAY must be one of Mon, Tue, Wed, Thu, Fri, Sat, Sun, or 'none'"
+                .to_string(),
+        ),
     }
 }
 
@@ -55,6 +72,9 @@ pub struct Config {
     pub min_soc: u32,
     /// Maximum SOC percentage before charging is blocked (default 100)
     pub max_soc: u32,
+    /// Weekday on which `max_soc` is raised to 100% for a periodic cell-balancing
+    /// full charge. `None` disables the override (default: Monday).
+    pub balance_weekday: Option<Weekday>,
     /// Which meter phase the solar inverter feeds into.
     pub solar_phase: SolarPhase,
     /// Solar inverter export (W) on `solar_phase` at or above which discharge is
@@ -136,6 +156,17 @@ impl Config {
                 .unwrap_or_else(|_| "100".to_string())
                 .parse::<u32>()
                 .map_err(|_| "MAX_SOC must be a number")?,
+            balance_weekday: {
+                let raw = env::var("BALANCE_WEEKDAY").unwrap_or_else(|_| "mon".to_string());
+                if matches!(
+                    raw.trim().to_ascii_lowercase().as_str(),
+                    "none" | "off" | ""
+                ) {
+                    None
+                } else {
+                    Some(parse_weekday(&raw)?)
+                }
+            },
             solar_phase: SolarPhase::parse(
                 &env::var("SOLAR_PHASE").unwrap_or_else(|_| "A".to_string()),
             )?,

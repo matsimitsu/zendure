@@ -143,7 +143,9 @@ pub struct ZendureProperties {
     pub pv_status: Option<u32>,
     /// Data ready flag: 0=not ready, 1=ready
     pub data_ready: Option<u32>,
-    /// Fault severity level (0=none)
+    /// Fault severity level (0=none). Not used to decide faults: also goes
+    /// non-zero for benign conditions like WiFi hiccups or firmware update
+    /// checks. See `BatteryState::fault`.
     pub fault_level: Option<u32>,
     /// Error flag: 0=no error, 1=error
     pub is_error: Option<u32>,

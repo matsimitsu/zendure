@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use chrono::{Datelike, Timelike, Utc};
+use chrono::{Datelike, Timelike, Utc, Weekday};
 use chrono_tz::Tz;
 
 use crate::battery::BatteryState;
@@ -31,6 +31,7 @@ pub struct Controller {
     last_cycle_reset_day: u32,
     min_soc: u32,
     max_soc: u32,
+    balance_weekday: Option<Weekday>,
     solar_discharge_block_threshold: i32,
     timezone: Tz,
 }
@@ -59,6 +60,7 @@ impl Controller {
             last_cycle_reset_day: Utc::now().with_timezone(&config.timezone).ordinal(),
             min_soc: config.min_soc,
             max_soc: config.max_soc,
+            balance_weekday: config.balance_weekday,
             solar_discharge_block_threshold: config.solar_discharge_block_threshold,
             timezone: config.timezone,
         }
@@ -171,9 +173,8 @@ impl Controller {
         };
 
         // Exporting to grid, battery below max SOC, and battery accepts charge → charge
-        if battery.soc < self.max_soc
-            && !battery.soc_limit_reached
-            && underlying_grid < charge_threshold
+        let max_soc = self.effective_max_soc(Utc::now().with_timezone(&self.timezone).weekday());
+        if battery.soc < max_soc && !battery.soc_limit_reached && underlying_grid < charge_threshold
         {
             return ControlMode::Charge;
         }
@@ -216,6 +217,17 @@ impl Controller {
         }
 
         ControlMode::Idle
+    }
+
+    /// Max SOC for `weekday`, raised to 100% on `balance_weekday` so the pack
+    /// gets a periodic full charge for cell balancing even if `max_soc` is
+    /// normally kept lower for longevity.
+    fn effective_max_soc(&self, weekday: Weekday) -> u32 {
+        if self.balance_weekday == Some(weekday) {
+            100
+        } else {
+            self.max_soc
+        }
     }
 
     /// Calculates the target power for a given mode, accounting for battery
@@ -438,6 +450,7 @@ mod tests {
             last_cycle_reset_day: Utc::now().ordinal(),
             min_soc: 10,
             max_soc: 100,
+            balance_weekday: None,
             solar_discharge_block_threshold: 0,
             timezone: Tz::UTC,
         }
@@ -1276,6 +1289,34 @@ mod tests {
         let mut ctrl = controller_no_cooldown();
         ctrl.solar_discharge_block_threshold = 1000;
         let decision = ctrl.decide_at_hour(-500.0, 2000.0, &battery(50), 12);
+        assert_eq!(decision.mode, ControlMode::Charge);
+    }
+
+    // --- Balance weekday tests ---
+
+    #[test]
+    fn effective_max_soc_raised_on_balance_weekday() {
+        let mut ctrl = default_controller();
+        ctrl.max_soc = 95;
+        ctrl.balance_weekday = Some(Weekday::Mon);
+        assert_eq!(ctrl.effective_max_soc(Weekday::Mon), 100);
+        assert_eq!(ctrl.effective_max_soc(Weekday::Tue), 95);
+    }
+
+    #[test]
+    fn effective_max_soc_unaffected_when_disabled() {
+        let mut ctrl = default_controller();
+        ctrl.max_soc = 95;
+        ctrl.balance_weekday = None;
+        assert_eq!(ctrl.effective_max_soc(Weekday::Mon), 95);
+    }
+
+    #[test]
+    fn balance_weekday_allows_charging_past_normal_max_soc() {
+        let mut ctrl = controller_no_cooldown();
+        ctrl.max_soc = 95;
+        ctrl.balance_weekday = Some(Utc::now().with_timezone(&ctrl.timezone).weekday());
+        let decision = ctrl.decide_at_hour(-500.0, 0.0, &battery(97), 12);
         assert_eq!(decision.mode, ControlMode::Charge);
     }
 }
