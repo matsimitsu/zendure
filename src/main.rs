@@ -1,4 +1,5 @@
 mod battery;
+mod clock;
 mod config;
 mod controller;
 mod models;
@@ -6,6 +7,7 @@ mod mqtt;
 mod rte;
 mod zendure;
 
+use clock::Clock;
 use config::{Config, SolarPhase};
 use models::StorageMode;
 use mqtt::MqttEvent;
@@ -88,7 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mqtt::run_subscriber(mqtt_client, eventloop, shelly_topic, subscriber_prefix, tx).await;
     });
 
-    let mut ctrl = controller::Controller::from_config(&config);
+    let mut ctrl = controller::Controller::from_config(&config, &Clock::now(config.timezone));
 
     let rte_state_path = std::path::PathBuf::from(
         std::env::var("RTE_STATE_PATH")
@@ -138,7 +140,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     solar_power,
                 );
 
-                if let Some(decision) = ctrl.decide(net_grid_power, solar_power, &battery_state) {
+                let clock = Clock::now(config.timezone);
+                if let Some(decision) =
+                    ctrl.decide(net_grid_power, solar_power, &battery_state, &clock)
+                {
                     tracing::info!(
                         "Decision: {} at {}W — {} (net_grid={:.0}W, battery: SOC={}%, max_charge={}W, max_discharge={}W, current={}W, soc_limit={})",
                         decision.mode,

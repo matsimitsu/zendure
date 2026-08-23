@@ -1,0 +1,46 @@
+use chrono::{Datelike, Timelike, Utc, Weekday};
+use chrono_tz::Tz;
+
+/// Time context captured at the edge and handed to the controller, so the
+/// decision logic never reads a clock itself. Everything the controller needs to
+/// know about "when" lives here.
+///
+/// `now_ms` is wall-clock unix milliseconds rather than a monotonic `Instant`
+/// because a recorded event has to replay identically later, which a
+/// process-relative counter can't do. The cost is NTP sensitivity: a backwards
+/// step makes an elapsed comparison read as "not yet elapsed", delaying a mode
+/// change until time catches up. A forward step permits one slightly early.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Clock {
+    /// Wall-clock unix milliseconds.
+    pub now_ms: i64,
+    /// Hour of day (0–23) in the configured timezone. Reported in decision
+    /// reasons; no longer used to gate any behavior.
+    pub hour: u32,
+    /// Day of year (1–366) in the configured timezone. Only ever compared for
+    /// change, to reset the daily counters at midnight.
+    pub day_ordinal: u32,
+    /// Weekday in the configured timezone; drives the balance-day max SOC override.
+    pub weekday: Weekday,
+}
+
+impl Clock {
+    /// Read the real clock. Called only at the edges — the MQTT handler and the
+    /// failsafe timeout — never below them.
+    pub fn now(tz: Tz) -> Self {
+        let utc = Utc::now();
+        let local = utc.with_timezone(&tz);
+        Self {
+            now_ms: utc.timestamp_millis(),
+            hour: local.hour(),
+            day_ordinal: local.ordinal(),
+            weekday: local.weekday(),
+        }
+    }
+}
+
+/// A `Duration` as whole milliseconds, for comparing against `Clock::now_ms`
+/// deltas. Config durations are seconds/minutes, so the cast can't overflow.
+pub fn as_millis(duration: std::time::Duration) -> i64 {
+    duration.as_millis() as i64
+}
