@@ -1,5 +1,6 @@
 mod battery;
 mod clock;
+mod command;
 mod config;
 mod controller;
 mod models;
@@ -8,6 +9,7 @@ mod rte;
 mod zendure;
 
 use clock::Clock;
+use command::Command;
 use config::{Config, SolarPhase};
 use models::StorageMode;
 use mqtt::MqttEvent;
@@ -157,7 +159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         battery_state.soc_limit_reached,
                     );
 
-                    if let Err(e) = zendure_client.apply_decision(&decision).await {
+                    if let Err(e) = zendure_client.apply_command(&Command::from(&decision)).await {
                         tracing::error!("Failed to apply decision to battery: {e}");
                         mqtt::publish_status(&publisher_client, &ha_prefix, "zendure_api_error").await;
                     } else {
@@ -190,7 +192,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ),
                         grid_power: 0.0,
                     };
-                    if let Err(e) = zendure_client.apply_decision(&decision).await {
+                    if let Err(e) = zendure_client.apply_command(&Command::from(&decision)).await {
                         tracing::error!("Failed to apply failsafe idle to battery: {e}");
                         mqtt::publish_status(&publisher_client, &ha_prefix, "mqtt_timeout_api_error").await;
                     } else {

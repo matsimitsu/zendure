@@ -1,9 +1,10 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
+use crate::command::Command;
 use crate::models::{
-    ControlDecision, ControlMode, DEVICE_MAX_CHARGE_POWER, DEVICE_MAX_DISCHARGE_POWER, StorageMode,
-    ZendureReport, ZendureWriteRequest,
+    DEVICE_MAX_CHARGE_POWER, DEVICE_MAX_DISCHARGE_POWER, StorageMode, ZendureReport,
+    ZendureWriteRequest,
 };
 
 #[allow(dead_code)]
@@ -75,38 +76,38 @@ impl ZendureClient {
         .await
     }
 
-    /// Apply a control decision to the battery via the Zendure REST API.
+    /// Apply a command to the battery via the Zendure REST API.
     ///
-    /// - Charge: wakes to RAM mode, sets acMode=1 (only on mode change) and inputLimit.
-    /// - Discharge: wakes to RAM mode, sets acMode=2 (only on mode change) and outputLimit.
-    /// - Idle: sets inputLimit=0, outputLimit=0 (stays in RAM mode for quick resume).
-    /// - Standby: sets smartMode=0 (flash), inputLimit=0, outputLimit=0.
+    /// - SetCharge: wakes to RAM mode, sets acMode=1 (only on mode change) and inputLimit.
+    /// - SetDischarge: wakes to RAM mode, sets acMode=2 (only on mode change) and outputLimit.
+    /// - SetIdle: sets inputLimit=0, outputLimit=0 (stays in RAM mode for quick resume).
+    /// - SetStandby: sets smartMode=0 (flash), inputLimit=0, outputLimit=0.
     ///
     /// acMode is only sent when switching between charge/discharge to avoid
     /// unnecessary inverter resets when just adjusting power levels.
-    pub async fn apply_decision(&self, decision: &ControlDecision) -> Result<(), reqwest::Error> {
-        match decision.mode {
-            ControlMode::Charge => {
+    pub async fn apply_command(&self, command: &Command) -> Result<(), reqwest::Error> {
+        match *command {
+            Command::SetCharge(power_watts) => {
                 self.ensure_ram_mode().await?;
                 let mut props = serde_json::json!({
-                    "inputLimit": decision.power_watts,
+                    "inputLimit": power_watts,
                 });
                 if self.set_ac_mode(1) {
                     props["acMode"] = serde_json::json!(1);
                 }
                 self.write_properties(props).await
             }
-            ControlMode::Discharge => {
+            Command::SetDischarge(power_watts) => {
                 self.ensure_ram_mode().await?;
                 let mut props = serde_json::json!({
-                    "outputLimit": decision.power_watts,
+                    "outputLimit": power_watts,
                 });
                 if self.set_ac_mode(2) {
                     props["acMode"] = serde_json::json!(2);
                 }
                 self.write_properties(props).await
             }
-            ControlMode::Idle => {
+            Command::SetIdle => {
                 *self.last_ac_mode.lock().unwrap() = None;
                 self.write_properties(serde_json::json!({
                     "inputLimit": 0,
@@ -114,7 +115,7 @@ impl ZendureClient {
                 }))
                 .await
             }
-            ControlMode::Standby => {
+            Command::SetStandby => {
                 *self.last_ac_mode.lock().unwrap() = None;
                 self.set_storage_mode(StorageMode::Flash);
                 self.write_properties(serde_json::json!({
