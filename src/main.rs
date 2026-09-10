@@ -3,14 +3,17 @@ mod clock;
 mod command;
 mod config;
 mod controller;
+mod engine;
+mod event;
 mod models;
 mod mqtt;
 mod rte;
 mod zendure;
 
 use clock::Clock;
-use command::Command;
 use config::{Config, SolarPhase};
+use engine::Engine;
+use event::Event;
 use models::StorageMode;
 use mqtt::MqttEvent;
 use tokio::sync::mpsc;
@@ -63,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             initial_report.clone()
         }
     };
-    let mut battery_state = battery::BatteryState::from_properties(&battery_report.properties);
+    let battery_state = battery::BatteryState::from_properties(&battery_report.properties);
 
     let mut pack_capacities = rte::pack_capacities(&initial_report.pack_data);
     let mut min_soc_percent: u32 = initial_report
@@ -92,7 +95,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mqtt::run_subscriber(mqtt_client, eventloop, shelly_topic, subscriber_prefix, tx).await;
     });
 
-    let mut ctrl = controller::Controller::from_config(&config, &Clock::now(config.timezone));
+    let mqtt_timeout = std::time::Duration::from_secs(config.mqtt_timeout_secs);
+    let mut engine = Engine::new(
+        controller::Controller::from_config(&config, &Clock::now(config.timezone)),
+        battery_state,
+        mqtt_timeout,
+    );
 
     let rte_state_path = std::path::PathBuf::from(
         std::env::var("RTE_STATE_PATH")
@@ -105,9 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Don't fire immediately — we just polled above
     poll_timer.tick().await;
 
-    let mqtt_timeout = std::time::Duration::from_secs(config.mqtt_timeout_secs);
     let mut last_mqtt_update = tokio::time::Instant::now();
-    let mut mqtt_timed_out = false;
 
     tracing::info!("Coordinator running, waiting for MQTT data...");
 
@@ -117,11 +123,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             event = rx.recv() => {
                 let Some(MqttEvent::GridPowerReading(reading)) = event else { break };
                 last_mqtt_update = tokio::time::Instant::now();
-                if mqtt_timed_out {
-                    tracing::info!("MQTT updates resumed");
-                    mqtt_timed_out = false;
-                    mqtt::publish_status(&publisher_client, &ha_prefix, "operational").await;
-                }
 
                 let net_grid_power = reading.total_act_power;
                 // Solar production = export (negative power) on the phase the
@@ -143,60 +144,68 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
 
                 let clock = Clock::now(config.timezone);
-                if let Some(decision) =
-                    ctrl.decide(net_grid_power, solar_power, &battery_state, &clock)
-                {
+                let step = engine.step(&Event::GridPower {
+                    at: clock,
+                    total_w: net_grid_power,
+                    solar_w: solar_power,
+                });
+
+                if let Some(status) = step.status {
+                    tracing::info!("MQTT updates resumed");
+                    mqtt::publish_status(&publisher_client, &ha_prefix, status).await;
+                }
+
+                if let Some(decision) = step.decision {
                     tracing::info!(
                         "Decision: {} at {}W — {} (net_grid={:.0}W, battery: SOC={}%, max_charge={}W, max_discharge={}W, current={}W, soc_limit={})",
                         decision.mode,
                         decision.power_watts,
                         decision.reason,
                         net_grid_power,
-                        battery_state.soc,
-                        battery_state.max_charge_power,
-                        battery_state.max_discharge_power,
-                        battery_state.current_power,
-                        battery_state.soc_limit_reached,
+                        engine.battery().soc,
+                        engine.battery().max_charge_power,
+                        engine.battery().max_discharge_power,
+                        engine.battery().current_power,
+                        engine.battery().soc_limit_reached,
                     );
 
-                    if let Err(e) = zendure_client.apply_command(&Command::from(&decision)).await {
-                        tracing::error!("Failed to apply decision to battery: {e}");
-                        mqtt::publish_status(&publisher_client, &ha_prefix, "zendure_api_error").await;
-                    } else {
-                        mqtt::publish_status(&publisher_client, &ha_prefix, "operational").await;
+                    if let Some(command) = step.commands.first() {
+                        if let Err(e) = zendure_client.apply_command(command).await {
+                            tracing::error!("Failed to apply decision to battery: {e}");
+                            mqtt::publish_status(&publisher_client, &ha_prefix, "zendure_api_error").await;
+                        } else {
+                            mqtt::publish_status(&publisher_client, &ha_prefix, "operational").await;
+                        }
                     }
 
                     mqtt::publish_decision(&publisher_client, &ha_prefix, &decision).await;
                     mqtt::publish_cycle_counts(
                         &publisher_client,
                         &ha_prefix,
-                        &ctrl.cycle_counts(),
+                        &engine.cycle_counts(),
                     )
                     .await;
                 }
             }
             _ = tokio::time::sleep_until(timeout_at) => {
-                if !mqtt_timed_out {
+                let clock = Clock::now(config.timezone);
+                let step = engine.step(&Event::MqttTimeout { at: clock });
+
+                if step.status.is_some() {
                     tracing::warn!(
                         "No MQTT updates for {}s — forcing idle as safety failsafe",
                         mqtt_timeout.as_secs(),
                     );
-                    mqtt_timed_out = true;
+                }
 
-                    let decision = models::ControlDecision {
-                        mode: models::ControlMode::Idle,
-                        power_watts: 0,
-                        reason: format!(
-                            "MQTT timeout: no updates for {}s",
-                            mqtt_timeout.as_secs(),
-                        ),
-                        grid_power: 0.0,
-                    };
-                    if let Err(e) = zendure_client.apply_command(&Command::from(&decision)).await {
-                        tracing::error!("Failed to apply failsafe idle to battery: {e}");
-                        mqtt::publish_status(&publisher_client, &ha_prefix, "mqtt_timeout_api_error").await;
-                    } else {
-                        mqtt::publish_status(&publisher_client, &ha_prefix, "mqtt_timeout").await;
+                if let Some(decision) = step.decision {
+                    if let Some(command) = step.commands.first() {
+                        if let Err(e) = zendure_client.apply_command(command).await {
+                            tracing::error!("Failed to apply failsafe idle to battery: {e}");
+                            mqtt::publish_status(&publisher_client, &ha_prefix, "mqtt_timeout_api_error").await;
+                        } else {
+                            mqtt::publish_status(&publisher_client, &ha_prefix, "mqtt_timeout").await;
+                        }
                     }
 
                     mqtt::publish_decision(&publisher_client, &ha_prefix, &decision).await;
@@ -286,7 +295,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Persist RTE state periodically (every poll)
                         rte_tracker.save();
 
-                        battery_state = state;
+                        engine.step(&Event::BatteryUpdate {
+                            at: Clock::now(config.timezone),
+                            state,
+                        });
                     }
                     Err(e) => {
                         tracing::warn!("Failed to poll battery state: {e}");

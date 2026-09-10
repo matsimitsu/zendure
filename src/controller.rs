@@ -76,6 +76,37 @@ impl Controller {
         }
     }
 
+    /// A controller with permissive defaults (no cooldown-relevant history,
+    /// generous margins) for tests outside this module, e.g. `engine.rs`'s.
+    /// This module's own tests build fixtures with more control via
+    /// `default_controller`/`controller_in_mode` below.
+    #[cfg(test)]
+    pub(crate) fn test_default(now_ms: i64, day_ordinal: u32) -> Self {
+        Controller {
+            last_mode: ControlMode::Idle,
+            last_active_mode: None,
+            last_mode_change_ms: now_ms - 60_000,
+            last_decision_ms: now_ms - 60_000,
+            last_idle_start_ms: None,
+            min_mode_duration: Duration::from_secs(10),
+            min_decision_interval: Duration::ZERO,
+            charge_margin: 50,
+            discharge_margin: 5,
+            charge_start_threshold: -100.0,
+            discharge_start_threshold: 0.0,
+            idle_timeout: Duration::from_secs(5 * 60),
+            min_idle_before_discharge: Duration::from_secs(300),
+            daily_transitions: 0,
+            daily_cooldown_suppressions: 0,
+            cycle_warn_threshold: 200,
+            last_cycle_reset_day: day_ordinal,
+            min_soc: 10,
+            max_soc: 100,
+            balance_weekday: None,
+            solar_discharge_block_threshold: 0,
+        }
+    }
+
     /// Returns `None` if the minimum decision interval hasn't elapsed yet.
     ///
     /// `solar_power` is the solar inverter's production (W), read as the export
@@ -466,29 +497,7 @@ mod tests {
     }
 
     fn default_controller() -> Controller {
-        Controller {
-            last_mode: ControlMode::Idle,
-            last_active_mode: None,
-            last_mode_change_ms: NOW_MS - MINUTE_MS,
-            last_decision_ms: NOW_MS - MINUTE_MS,
-            last_idle_start_ms: None,
-            min_mode_duration: Duration::from_secs(10),
-            min_decision_interval: Duration::ZERO,
-            charge_margin: 50,
-            discharge_margin: 5,
-            charge_start_threshold: -100.0,
-            discharge_start_threshold: 0.0,
-            idle_timeout: Duration::from_secs(5 * 60),
-            min_idle_before_discharge: Duration::from_secs(300),
-            daily_transitions: 0,
-            daily_cooldown_suppressions: 0,
-            cycle_warn_threshold: 200,
-            last_cycle_reset_day: DAY,
-            min_soc: 10,
-            max_soc: 100,
-            balance_weekday: None,
-            solar_discharge_block_threshold: 0,
-        }
+        Controller::test_default(NOW_MS, DAY)
     }
 
     /// Controller with no cooldown and no idle-before-discharge requirement
