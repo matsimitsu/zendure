@@ -83,6 +83,25 @@ All configuration is via environment variables:
 | `TIMEZONE` | No | `UTC` | IANA timezone for cycle counting (e.g. `Europe/Amsterdam`) |
 | `RTE_STATE_PATH` | No | `/tmp/zendure_rte_state.json` | File path for persisting round-trip efficiency state across restarts |
 | `RUST_LOG` | No | — | Log level filter (e.g. `zendure=debug` for verbose output) |
+| `JOURNAL_RAW_PATH` | No | `/var/lib/zendure/raw` | Directory for the raw capture log (see below). If it can't be created, capture is disabled and the controller starts normally |
+| `JOURNAL_RETENTION_DAYS` | No | `90` | Days of raw capture to keep; older files are deleted at startup and at each daily rollover |
+
+## Raw capture
+
+Every Shelly reading, every Zendure poll response, and every decision (with the
+command sent and whether the device accepted it) is appended to a daily NDJSON
+file under `JOURNAL_RAW_PATH`:
+
+```
+{"ts_ms":1757620800123,"kind":"shelly","payload":{"total_act_power":150.5,...}}
+{"ts_ms":1757620800456,"kind":"zendure_poll","payload":{"electricLevel":64,...}}
+{"ts_ms":1757620801789,"kind":"decision","payload":{"decision":{...},"command":"set_discharge(145W)","outcome":"ok"}}
+```
+
+Payloads are stored exactly as received rather than re-serialized from parsed
+types, so undocumented device fields are kept. This exists so that when
+something looks wrong in a graph, the inputs that produced it still exist —
+recorded data cannot be backfilled. Logging failures never affect control.
 
 ## Running
 

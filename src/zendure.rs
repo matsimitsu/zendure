@@ -33,8 +33,19 @@ impl ZendureClient {
     }
 
     pub async fn get_properties(&self) -> Result<ZendureReport, reqwest::Error> {
-        let url = format!("{}/properties/report", self.base_url);
-        self.http.get(&url).send().await?.json().await
+        self.http.get(self.report_url()).send().await?.json().await
+    }
+
+    /// The same request returned as text, so the response can be captured
+    /// verbatim before parsing. The device's API is undocumented and
+    /// `ZendureProperties` is `Deserialize`-only, so round-tripping through our
+    /// own types would discard exactly the fields worth keeping.
+    pub async fn get_properties_raw(&self) -> Result<String, reqwest::Error> {
+        self.http.get(self.report_url()).send().await?.text().await
+    }
+
+    fn report_url(&self) -> String {
+        format!("{}/properties/report", self.base_url)
     }
 
     /// Ensure the device is in RAM mode (smartMode: 1) before sending commands.

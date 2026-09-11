@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS};
@@ -5,6 +6,7 @@ use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::models::{ControlDecision, CycleCounts, ShellyReading};
+use crate::rawlog::RawLog;
 
 #[derive(Debug, Clone)]
 pub enum MqttEvent {
@@ -26,6 +28,7 @@ pub async fn run_subscriber(
     shelly_topic: String,
     ha_prefix: String,
     tx: mpsc::Sender<MqttEvent>,
+    raw_log: Option<Arc<RawLog>>,
 ) {
     loop {
         match eventloop.poll().await {
@@ -38,6 +41,11 @@ pub async fn run_subscriber(
             }
             Ok(Event::Incoming(Packet::Publish(publish))) => {
                 if publish.topic == shelly_topic {
+                    // Capture before parsing: a reading we fail to decode is
+                    // exactly the one worth having on record.
+                    if let Some(log) = &raw_log {
+                        log.raw("shelly", &String::from_utf8_lossy(&publish.payload));
+                    }
                     match serde_json::from_slice::<ShellyReading>(&publish.payload) {
                         Ok(reading) => {
                             let _ = tx.send(MqttEvent::GridPowerReading(reading)).await;

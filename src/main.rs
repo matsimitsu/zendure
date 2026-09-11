@@ -7,6 +7,7 @@ mod engine;
 mod event;
 mod models;
 mod mqtt;
+mod rawlog;
 mod rte;
 mod zendure;
 
@@ -16,6 +17,7 @@ use engine::Engine;
 use event::Event;
 use models::StorageMode;
 use mqtt::MqttEvent;
+use rawlog::RawLog;
 use tokio::sync::mpsc;
 
 #[tokio::main]
@@ -83,6 +85,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pack_capacities.len(),
     );
 
+    // Raw capture: append-only NDJSON of everything in and out, on by default.
+    // A bridge until the structured journal lands, but recorded data cannot be
+    // backfilled, so it starts now. Any failure here disables the log and
+    // leaves control untouched.
+    let raw_log = RawLog::new(
+        std::path::PathBuf::from(
+            std::env::var("JOURNAL_RAW_PATH")
+                .unwrap_or_else(|_| "/var/lib/zendure/raw".to_string()),
+        ),
+        std::env::var("JOURNAL_RETENTION_DAYS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(90),
+    )
+    .map(std::sync::Arc::new);
+
     let (mqtt_client, eventloop) = mqtt::create_mqtt_client(&config);
     let publisher_client = mqtt_client.clone();
 
@@ -91,8 +109,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shelly_topic = config.shelly_topic.clone();
     let ha_prefix = config.ha_publish_prefix.clone();
     let subscriber_prefix = config.ha_publish_prefix.clone();
+    let subscriber_log = raw_log.clone();
     tokio::spawn(async move {
-        mqtt::run_subscriber(mqtt_client, eventloop, shelly_topic, subscriber_prefix, tx).await;
+        mqtt::run_subscriber(
+            mqtt_client,
+            eventloop,
+            shelly_topic,
+            subscriber_prefix,
+            tx,
+            subscriber_log,
+        )
+        .await;
     });
 
     let mqtt_timeout = std::time::Duration::from_secs(config.mqtt_timeout_secs);
@@ -169,13 +196,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         engine.battery().soc_limit_reached,
                     );
 
+                    let mut outcome = "no_command";
+                    let mut error = None;
                     if let Some(command) = step.commands.first() {
                         if let Err(e) = zendure_client.apply_command(command).await {
                             tracing::error!("Failed to apply decision to battery: {e}");
+                            outcome = "error";
+                            error = Some(e.to_string());
                             mqtt::publish_status(&publisher_client, &ha_prefix, "zendure_api_error").await;
                         } else {
+                            outcome = "ok";
                             mqtt::publish_status(&publisher_client, &ha_prefix, "operational").await;
                         }
+                    }
+
+                    // Recorded after actuation, so `outcome` reflects whether the
+                    // write to the device actually landed — which is what you want
+                    // when reconstructing an incident.
+                    if let Some(log) = &raw_log {
+                        log.value("decision", &serde_json::json!({
+                            "decision": &decision,
+                            "command": step.commands.first().map(|c| c.to_string()),
+                            "outcome": outcome,
+                            "error": error,
+                        }));
                     }
 
                     mqtt::publish_decision(&publisher_client, &ha_prefix, &decision).await;
@@ -199,20 +243,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 if let Some(decision) = step.decision {
+                    let mut outcome = "no_command";
+                    let mut error = None;
                     if let Some(command) = step.commands.first() {
                         if let Err(e) = zendure_client.apply_command(command).await {
                             tracing::error!("Failed to apply failsafe idle to battery: {e}");
+                            outcome = "error";
+                            error = Some(e.to_string());
                             mqtt::publish_status(&publisher_client, &ha_prefix, "mqtt_timeout_api_error").await;
                         } else {
+                            outcome = "ok";
                             mqtt::publish_status(&publisher_client, &ha_prefix, "mqtt_timeout").await;
                         }
+                    }
+
+                    if let Some(log) = &raw_log {
+                        log.value("failsafe", &serde_json::json!({
+                            "decision": &decision,
+                            "command": step.commands.first().map(|c| c.to_string()),
+                            "outcome": outcome,
+                            "error": error,
+                        }));
                     }
 
                     mqtt::publish_decision(&publisher_client, &ha_prefix, &decision).await;
                 }
             }
             _ = poll_timer.tick() => {
-                match zendure_client.get_properties().await {
+                // Capture the response verbatim before parsing, so undocumented
+                // device fields survive even though our types drop them.
+                let fetched = match zendure_client.get_properties_raw().await {
+                    Ok(body) => {
+                        if let Some(log) = &raw_log {
+                            log.raw("zendure_poll", &body);
+                        }
+                        serde_json::from_str::<models::ZendureReport>(&body)
+                            .map_err(|e| format!("parse error: {e}"))
+                    }
+                    Err(e) => Err(format!("request failed: {e}")),
+                };
+                match fetched {
                     Ok(report) => {
                         let state = battery::BatteryState::from_properties(&report.properties);
                         tracing::debug!(
