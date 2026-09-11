@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,9 @@ pub struct RteTracker {
     last_discharge_power: f64,
     window: Duration,
     state_path: PathBuf,
+    /// `save` runs on every poll, so a persistently unwritable path would log
+    /// once per poll forever. Warn on the first failure, stay quiet after.
+    save_failed: AtomicBool,
 }
 
 impl RteTracker {
@@ -51,7 +55,15 @@ impl RteTracker {
             last_discharge_power: 0.0,
             window: Duration::from_secs(24 * 3600),
             state_path,
+            save_failed: AtomicBool::new(false),
         };
+        // The default lives under /var/lib, which the service user owns via
+        // systemd's StateDirectory but which won't exist in a dev checkout.
+        if let Some(parent) = tracker.state_path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            tracing::warn!("RTE state directory {} unusable: {e}", parent.display());
+        }
         tracker.load();
         tracker
     }
@@ -157,11 +169,19 @@ impl RteTracker {
         };
 
         match serde_json::to_string(&state) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(&self.state_path, json) {
-                    tracing::warn!("Failed to persist RTE state: {e}");
+            Ok(json) => match std::fs::write(&self.state_path, json) {
+                Ok(()) => self.save_failed.store(false, Ordering::Relaxed),
+                Err(e) => {
+                    if !self.save_failed.swap(true, Ordering::Relaxed) {
+                        tracing::warn!(
+                            "Failed to persist RTE state to {}: {e} (further failures logged at debug)",
+                            self.state_path.display(),
+                        );
+                    } else {
+                        tracing::debug!("Failed to persist RTE state: {e}");
+                    }
                 }
-            }
+            },
             Err(e) => tracing::warn!("Failed to serialize RTE state: {e}"),
         }
     }
@@ -347,6 +367,42 @@ mod tests {
         // Load into new tracker — samples should be restored
         let tracker2 = RteTracker::new(path);
         assert!(tracker2.total_charge_wh() > 0.0 || tracker2.total_discharge_wh() > 0.0);
+    }
+
+    #[test]
+    fn test_creates_missing_state_directory() {
+        // The default path lives under /var/lib/zendure, which systemd's
+        // StateDirectory owns but which won't exist on a fresh box until the
+        // service has started once. Persisting must not depend on that.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/state/rte.json");
+        let t0 = Instant::now();
+
+        let mut tracker = RteTracker::new(path.clone());
+        tracker.record_at(t0, 1000.0, 0.0);
+        tracker.record_at(t0 + Duration::from_secs(3600), 0.0, 850.0);
+        tracker.save();
+
+        assert!(
+            path.exists(),
+            "state file should be written into a created directory"
+        );
+        let restored = RteTracker::new(path);
+        assert!(restored.total_charge_wh() > 0.0 || restored.total_discharge_wh() > 0.0);
+    }
+
+    #[test]
+    fn test_unwritable_path_does_not_panic() {
+        // A misconfigured path must degrade to "no persistence", never take the
+        // controller down — save() runs on every poll.
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("iam-a-file");
+        std::fs::write(&blocker, b"x").unwrap();
+
+        let mut tracker = RteTracker::new(blocker.join("state.json"));
+        tracker.record_at(Instant::now(), 1000.0, 0.0);
+        tracker.save();
+        tracker.save(); // second failure takes the quiet path
     }
 
     #[test]

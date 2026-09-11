@@ -81,7 +81,7 @@ All configuration is via environment variables:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `TIMEZONE` | No | `UTC` | IANA timezone for cycle counting (e.g. `Europe/Amsterdam`) |
-| `RTE_STATE_PATH` | No | `/tmp/zendure_rte_state.json` | File path for persisting round-trip efficiency state across restarts |
+| `RTE_STATE_PATH` | No | `/var/lib/zendure/rte_state.json` | File path for persisting round-trip efficiency state across restarts. Must survive reboots — `/tmp` is cleared, which loses the rolling 24h window |
 | `RUST_LOG` | No | — | Log level filter (e.g. `zendure=debug` for verbose output) |
 | `JOURNAL_RAW_PATH` | No | `/var/lib/zendure/raw` | Directory for the raw capture log (see below). If it can't be created, capture is disabled and the controller starts normally |
 | `JOURNAL_RETENTION_DAYS` | No | `90` | Days of raw capture to keep; older files are deleted at startup and at each daily rollover |
