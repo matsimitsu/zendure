@@ -17,6 +17,7 @@ mod journal;
 mod models;
 mod mqtt;
 mod publish;
+mod registry;
 mod replay;
 mod rte;
 mod run;

@@ -635,7 +635,7 @@ pub(crate) mod testing {
     /// step. That order is what `seq` alignment depends on, so a helper writing
     /// them any other way would be exercising a daemon that does not exist.
     ///
-    /// The outcomes come from `device::actuate` against a recording double
+    /// The outcomes come from `registry::actuate` against a recording double
     /// rather than being built here, so the `command` column is filled by the
     /// same code that fills it in production. Hand-building them made a
     /// recorded column and a replayed render two expressions of one local
@@ -651,9 +651,10 @@ pub(crate) mod testing {
     ) -> crate::config::SessionConfig {
         use crate::config::SessionConfig;
         use crate::controller::Controller;
-        use crate::device::{RecordingBattery, actuate};
+        use crate::device::RecordingBattery;
         use crate::engine::Engine;
         use crate::fixtures::journey;
+        use crate::registry::{self, Battery, Devices};
         use crate::world::World;
 
         let config = SessionConfig::test_default();
@@ -664,7 +665,9 @@ pub(crate) mod testing {
             World::new(),
             std::time::Duration::from_secs(config.mqtt_timeout_secs),
         );
-        let battery = RecordingBattery::new(journey::BATTERY_ID);
+        let devices = Devices::new([Battery::Recording(RecordingBattery::new(
+            journey::BATTERY_ID,
+        ))]);
 
         for (i, event) in events.iter().enumerate() {
             j.event(event);
@@ -675,7 +678,8 @@ pub(crate) mod testing {
             }
 
             if let Some(decision) = step.decision {
-                let outcomes = actuate(&battery, &step.directives, ControlPath::Objective).await;
+                let outcomes =
+                    registry::actuate(&devices, &step.directives, ControlPath::Objective).await;
                 j.decision(
                     event.at(),
                     ControlPath::Objective,

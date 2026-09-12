@@ -12,11 +12,11 @@
 //! possible.** [`run`] takes its stop condition as a parameter, which is one of
 //! the two seams a test needs; the other is the device, and `run` still reaches
 //! a real Zendure over HTTP in its first eighty lines. Until the read path is
-//! behind a trait — `device::actuate` is already generic over
-//! `BatteryController`, so only the poll is missing — driving `run` from a test
-//! means owning a battery. Saying otherwise would be worse than saying nothing:
-//! the next person looking for a regression test for a `select!` defect would
-//! believe the seam is here and stop looking.
+//! behind a trait — `registry::actuate` already routes through [`Devices`], so
+//! only the poll is missing — driving `run` from a test means owning a
+//! battery. Saying otherwise would be worse than saying nothing: the next
+//! person looking for a regression test for a `select!` defect would believe
+//! the seam is here and stop looking.
 //!
 //! What is testable and is tested: [`shut_down`], whose ordering is the
 //! subtlest thing in the file.
@@ -28,7 +28,7 @@ use crate::allocate::Directive;
 use crate::announce::Announcer;
 use crate::clock::Clock;
 use crate::config::Config;
-use crate::device::{self, Applied, ControlPath};
+use crate::device::{Applied, ControlPath};
 use crate::engine::Engine;
 use crate::event::Event;
 use crate::journal::Journal;
@@ -37,6 +37,7 @@ use crate::models::ControlDecision;
 use crate::models::StorageMode;
 use crate::mqtt::{self, MqttEvent, MqttPublisher, PublisherTask};
 use crate::publish::Publisher;
+use crate::registry::{self, Battery, Devices};
 use crate::units::{DeciKelvin, Soc, Timestamp, WattHours, Watts};
 use crate::world::{Measurement, World};
 use crate::zendure::ZendureClient;
@@ -128,7 +129,7 @@ pub fn shutdown_signal() -> Result<impl Future<Output = StopReason>, std::io::Er
 /// to be read after actuation too.
 #[allow(clippy::too_many_arguments)]
 async fn apply_decision(
-    client: &ZendureClient,
+    devices: &Devices,
     publisher: &dyn Publisher,
     journal: &Journal,
     engine: &Engine,
@@ -140,7 +141,7 @@ async fn apply_decision(
 ) {
     // The whole list, not its first element: a step that means "stop one box,
     // start another" has to reach both devices.
-    let outcomes = device::actuate(client, directives, path).await;
+    let outcomes = registry::actuate(devices, directives, path).await;
     let failed = outcomes.iter().any(|o| o.applied == Applied::Error);
 
     // The engine's state goes in beside the decision so the row carries the
@@ -356,6 +357,23 @@ pub async fn run(
         telemetry.pack_count(),
     );
 
+    // One battery, held in the registry rather than as a bare local — the
+    // next device this process drives is a second entry here, not a second
+    // local variable threaded through every call site below.
+    let devices = Devices::new([Battery::Zendure(zendure_client)]);
+
+    // `Devices`/`BatteryController` has no read capability yet — `apply` is
+    // the only thing behind the enum so far — so the startup handshake above
+    // reached `zendure_client`'s inherent methods directly, and the poll arm
+    // below still needs to. Rather than keep a second owned `ZendureClient`
+    // alongside the registry (two names for the one battery, free to drift),
+    // this reaches back into the registry for the concrete adapter it holds.
+    // Temporary: the next commit adds a read trait and this match goes away
+    // in favour of calling it on whichever adapter is being polled.
+    let Some((_, Battery::Zendure(zendure_client))) = devices.primary() else {
+        unreachable!("devices was just constructed with exactly the one Zendure battery above")
+    };
+
     // On by default: by the time you think to enable logging, the bug you
     // wanted it for has already happened. Any failure here disables the journal
     // and leaves control untouched.
@@ -503,7 +521,7 @@ pub async fn run(
                             }
 
                             apply_decision(
-                                &zendure_client,
+                                &devices,
                                 &*publisher,
                                 &journal,
                                 &engine,
@@ -537,7 +555,7 @@ pub async fn run(
                     // Every battery stands down, and one unreachable box does
                     // not leave the others running through the outage.
                     apply_decision(
-                        &zendure_client,
+                        &devices,
                         &*publisher,
                         &journal,
                         &engine,
