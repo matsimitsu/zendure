@@ -5,13 +5,19 @@ use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS};
 use tokio::sync::mpsc;
 
 use crate::config::Config;
-use crate::models::{ControlDecision, CycleCounts, ShellyReading};
+use crate::models::{ControlDecision, CycleCounts};
 use crate::rawlog::RawLog;
+use crate::source::MeterObservation;
+use crate::source::shelly::{self, SolarPhase};
 use crate::units::{KiloWattHours, Percent, Soc, Watts};
 
 #[derive(Debug, Clone)]
 pub enum MqttEvent {
-    GridPowerReading(ShellyReading),
+    /// Already normalized, not the meter's own JSON. The undecoded payload is
+    /// captured verbatim by the raw log one line before it is parsed, so
+    /// pushing the DTO down the channel as well would buy nothing — and would
+    /// cost the coordinator loop its ignorance of what a Shelly is.
+    Meter(MeterObservation),
 }
 
 pub fn create_mqtt_client(config: &Config) -> (AsyncClient, EventLoop) {
@@ -27,6 +33,7 @@ pub async fn run_subscriber(
     client: AsyncClient,
     mut eventloop: EventLoop,
     shelly_topic: String,
+    solar_phase: SolarPhase,
     ha_prefix: String,
     tx: mpsc::Sender<MqttEvent>,
     raw_log: Option<Arc<RawLog>>,
@@ -47,9 +54,23 @@ pub async fn run_subscriber(
                     if let Some(log) = &raw_log {
                         log.raw("shelly", &String::from_utf8_lossy(&publish.payload));
                     }
-                    match serde_json::from_slice::<ShellyReading>(&publish.payload) {
-                        Ok(reading) => {
-                            let _ = tx.send(MqttEvent::GridPowerReading(reading)).await;
+                    match shelly::parse(&publish.payload, solar_phase) {
+                        Ok(obs) => {
+                            // Logged here rather than in the coordinator loop,
+                            // because this is where the reading now exists.
+                            // The line is unchanged, but it is emitted from the
+                            // subscriber task, so it can interleave with the
+                            // `Decision:` line a few microseconds differently
+                            // than it used to.
+                            tracing::info!(
+                                "Shelly: total={:.0}W (A={:.0} B={:.0} C={:.0}), solar={:.0}W",
+                                obs.grid.total,
+                                obs.grid.phases[0],
+                                obs.grid.phases[1],
+                                obs.grid.phases[2],
+                                obs.solar,
+                            );
+                            let _ = tx.send(MqttEvent::Meter(obs)).await;
                         }
                         Err(e) => tracing::warn!("Failed to parse Shelly reading: {e}"),
                     }

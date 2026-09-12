@@ -4,28 +4,11 @@ use std::time::Duration;
 use chrono::Weekday;
 use chrono_tz::Tz;
 
+// `SolarPhase` is the meter's own idea of how many wires it watches, so it
+// belongs to the adapter that reads them. Parsing `SOLAR_PHASE` is still this
+// file's job — reading the environment is what `Config` is for.
+use crate::source::shelly::SolarPhase;
 use crate::units::{GridPower, PowerMargin, Soc, SolarPower};
-
-/// Which Shelly Pro 3EM phase the solar inverter (e.g. Huawei Sun2000) feeds
-/// into. Solar production is read as the export on that single phase, since the
-/// meter's total nets solar export against loads on the other phases.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SolarPhase {
-    A,
-    B,
-    C,
-}
-
-impl SolarPhase {
-    fn parse(s: &str) -> Result<Self, String> {
-        match s.trim().to_ascii_uppercase().as_str() {
-            "A" => Ok(SolarPhase::A),
-            "B" => Ok(SolarPhase::B),
-            "C" => Ok(SolarPhase::C),
-            _ => Err("SOLAR_PHASE must be one of A, B, or C".to_string()),
-        }
-    }
-}
 
 fn parse_weekday(s: &str) -> Result<Weekday, String> {
     match s.trim().to_ascii_lowercase().as_str() {

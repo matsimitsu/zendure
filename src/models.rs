@@ -3,42 +3,6 @@ use std::fmt;
 
 use crate::units::{GridPower, Setpoint};
 
-// --- MQTT input: Shelly Pro 3EM reading ---
-
-/// Shelly Pro 3EM energy meter reading, received via MQTT on the status/em:0 topic.
-/// Provides signed per-phase and total active power every second.
-/// Positive = importing from grid, negative = exporting to grid.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
-pub struct ShellyReading {
-    /// Phase A active power (W), signed
-    pub a_act_power: f64,
-    /// Phase B active power (W), signed
-    pub b_act_power: f64,
-    /// Phase C active power (W), signed
-    pub c_act_power: f64,
-    /// Total active power across all phases (W), signed
-    pub total_act_power: f64,
-    /// Phase A voltage (V)
-    #[serde(default)]
-    pub a_voltage: f64,
-    /// Phase B voltage (V)
-    #[serde(default)]
-    pub b_voltage: f64,
-    /// Phase C voltage (V)
-    #[serde(default)]
-    pub c_voltage: f64,
-    /// Phase A current (A)
-    #[serde(default)]
-    pub a_current: f64,
-    /// Phase B current (A)
-    #[serde(default)]
-    pub b_current: f64,
-    /// Phase C current (A)
-    #[serde(default)]
-    pub c_current: f64,
-}
-
 // --- Zendure REST API types ---
 
 /// Top-level response from GET /properties/report on the Zendure AC 2400+.

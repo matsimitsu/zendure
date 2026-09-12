@@ -10,20 +10,21 @@ mod models;
 mod mqtt;
 mod rawlog;
 mod rte;
+mod source;
 mod units;
 mod world;
 mod zendure;
 
 use clock::Clock;
-use config::{Config, SolarPhase};
+use config::Config;
 use engine::Engine;
 use event::Event;
 use models::StorageMode;
 use mqtt::MqttEvent;
 use rawlog::RawLog;
 use tokio::sync::mpsc;
-use units::{GridPower, Soc, SolarPower, WattHours, Watts};
-use world::{DeviceId, Measurement, MeterReading, World};
+use units::{Soc, WattHours, Watts};
+use world::{DeviceId, Measurement, World};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -118,6 +119,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (tx, mut rx) = mpsc::channel::<MqttEvent>(64);
 
     let shelly_topic = config.shelly_topic.clone();
+    // The one place the configured phase is read: from here it belongs to the
+    // adapter that knows what a phase is.
+    let solar_phase = config.solar_phase;
     let ha_prefix = config.ha_publish_prefix.clone();
     let subscriber_prefix = config.ha_publish_prefix.clone();
     let subscriber_log = raw_log.clone();
@@ -126,6 +130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             mqtt_client,
             eventloop,
             shelly_topic,
+            solar_phase,
             subscriber_prefix,
             tx,
             subscriber_log,
@@ -169,40 +174,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         tokio::select! {
             event = rx.recv() => {
-                let Some(MqttEvent::GridPowerReading(reading)) = event else { break };
+                let Some(MqttEvent::Meter(obs)) = event else { break };
                 mqtt_deadline = tokio::time::Instant::now() + mqtt_timeout;
 
-                let net_grid_power = GridPower(reading.total_act_power);
-                // Solar production = export (negative power) on the phase the
-                // inverter feeds into. The meter total nets this against loads
-                // on other phases, so read the single phase directly.
-                let solar_phase_power = match config.solar_phase {
-                    SolarPhase::A => GridPower(reading.a_act_power),
-                    SolarPhase::B => GridPower(reading.b_act_power),
-                    SolarPhase::C => GridPower(reading.c_act_power),
-                };
-                let solar_power = SolarPower::from_phase_export(solar_phase_power);
-                tracing::info!(
-                    "Shelly: total={:.0}W (A={:.0} B={:.0} C={:.0}), solar={:.0}W",
-                    reading.total_act_power,
-                    reading.a_act_power,
-                    reading.b_act_power,
-                    reading.c_act_power,
-                    solar_power,
-                );
+                // Already normalized by the source adapter: whichever meter
+                // sent this, the loop sees a signed total, three phases and a
+                // production figure, and nothing about the wire format.
+                let net_grid_power = obs.grid.total;
 
                 let clock = Clock::now(config.timezone);
                 let step = engine.step(&Event::Meter {
                     at: clock,
-                    grid: MeterReading::new(
-                        net_grid_power,
-                        [
-                            GridPower(reading.a_act_power),
-                            GridPower(reading.b_act_power),
-                            GridPower(reading.c_act_power),
-                        ],
-                    ),
-                    solar: solar_power,
+                    grid: obs.grid,
+                    solar: obs.solar,
                 });
 
                 if let Some(status) = step.status {
