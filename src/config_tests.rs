@@ -1,8 +1,7 @@
 //! Tests for `config.rs`, kept in their own file because the module covers
-//! two independent readers (`from_env`/`from_vars` and `from_toml_str`) plus
-//! the `SessionConfig` projection between them.
+//! both `from_toml_str` and the `SessionConfig` projection out of it.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use super::*;
@@ -416,33 +415,56 @@ fn the_tuning_table_has_exactly_the_session_config_keys() {
     assert_eq!(toml_keys, session_keys);
 }
 
-/// Production's environment, from the ansible unit file. If this ever
-/// disagrees with `config.example.toml`, the example file is what is wrong —
-/// it is supposed to be the record of what production runs, not the other
-/// way around.
+/// Production's values, pinned as an explicit `Config` literal rather than
+/// reached for a helper that would hide which value belongs to which field —
+/// thirty fields, written out in full. If this ever disagrees with
+/// `config.example.toml`, the example file is what is wrong: it is supposed
+/// to be the record of what production runs, not the other way around.
+///
+/// This used to compare `config.example.toml` against `Config::from_vars` fed
+/// production's actual environment variables (the twelve the ansible unit
+/// file set) — proof that the environment path and the TOML path agreed
+/// before the environment path was deleted. That proof lives in git history
+/// now (`from_env`/`from_vars` are gone); this literal is what pins it in the
+/// tree.
 #[test]
-fn the_example_config_is_the_environment_production_ran() {
-    let env: HashMap<&str, &str> = [
-        ("MQTT_HOST", "127.0.0.1"),
-        ("MQTT_CLIENT_ID", "odroid"),
-        ("ZENDURE_IP", "192.168.1.253"),
-        ("ZENDURE_SN", "HEC4NENCN490270"),
-        ("TIMEZONE", "Europe/Amsterdam"),
-        ("SHELLY_TOPIC", "shellypro3em-a4f00fcfcc18/status/em:0"),
-        ("SOLAR_PHASE", "A"),
-        ("SOLAR_DISCHARGE_BLOCK_THRESHOLD", "200"),
-        ("MAX_SOC", "80"),
-        ("BALANCE_WEEKDAY", "Mon"),
-        ("JOURNAL_RETENTION_DAYS", "30"),
-        ("RTE_STATE_PATH", "/var/lib/zendure/rte_state.json"),
-    ]
-    .into_iter()
-    .collect();
+fn the_example_config_is_what_production_runs() {
+    let production = Config {
+        mqtt_host: "127.0.0.1".to_string(),
+        mqtt_port: 1883,
+        mqtt_username: None,
+        mqtt_password: None,
+        mqtt_client_id: "odroid".to_string(),
+        zendure_ip: "192.168.1.253".to_string(),
+        zendure_sn: "HEC4NENCN490270".to_string(),
+        shelly_topic: "shellypro3em-a4f00fcfcc18/status/em:0".to_string(),
+        ha_publish_prefix: "zendure".to_string(),
+        zendure_poll_interval: Duration::from_secs(10),
+        charge_margin: PowerMargin::new(50),
+        discharge_margin: PowerMargin::new(5),
+        charge_start_threshold: GridPower(-100.0),
+        discharge_start_threshold: GridPower(0.0),
+        min_mode_duration: Duration::from_secs(10),
+        min_decision_interval: Duration::from_secs(5),
+        idle_timeout: Duration::from_secs(300),
+        cycle_warn_threshold: 200,
+        min_soc: Soc::new(10),
+        max_soc: Soc::new(80),
+        balance_weekday: Some(Weekday::Mon),
+        solar_phase: SolarPhase::A,
+        solar_discharge_block_threshold: SolarPower::new(200.0),
+        min_idle_before_discharge: Duration::from_secs(300),
+        timezone: "Europe/Amsterdam".parse().unwrap(),
+        mqtt_timeout: Duration::from_secs(60),
+        journal_path: PathBuf::from("/var/lib/zendure/journal.db"),
+        journal_retention_days: RetentionDays::new(30).unwrap(),
+        rte_state_path: PathBuf::from("/var/lib/zendure/rte_state.json"),
+        log_filter: "zendure=info".to_string(),
+    };
 
-    let from_env = Config::from_vars(|k| env.get(k).map(|v| v.to_string())).unwrap();
     let (from_toml, warnings) =
         Config::from_toml_str(include_str!("../config.example.toml")).unwrap();
 
     assert_eq!(warnings, Vec::<String>::new(), "{warnings:?}");
-    assert_eq!(from_env, from_toml);
+    assert_eq!(production, from_toml);
 }

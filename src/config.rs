@@ -1,12 +1,4 @@
-// `Config::from_toml_str`/`from_toml` and everything behind them are not yet
-// called from `main.rs` — wiring up a `--config` flag is deliberately the
-// next commit, not this one, so `from_env` stays what `main` calls for now.
-// Every item below has a call site in `config_tests.rs`; none is speculative
-// API. `units.rs` carries this same attribute for the same reason.
-#![allow(dead_code)]
-
 use std::collections::HashSet;
-use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -41,10 +33,8 @@ pub const DEFAULT_RTE_STATE_PATH: &str = "/var/lib/zendure/rte_state.json";
 
 /// Where `--config` reads from unless told otherwise.
 ///
-/// Not yet read by anything: `main.rs` still calls [`Config::from_env`], and
-/// wiring `--config` up to [`Config::from_toml`] is the next commit. The
-/// constant exists now so that commit is a one-line change in `main.rs`
-/// rather than a decision about what the default path should be.
+/// Also `cli.rs`'s default for the daemon (and `--check`) when `--config` is
+/// not given, so this one string is the only place that default is spelled.
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/zendure/config.toml";
 
 fn parse_weekday(s: &str) -> Result<Weekday, String> {
@@ -59,68 +49,6 @@ fn parse_weekday(s: &str) -> Result<Weekday, String> {
         // Names what is wrong, not where it was read from — the caller knows
         // whether that was an environment variable or a TOML key.
         _ => Err("must be one of Mon, Tue, Wed, Thu, Fri, Sat, Sun, or 'none'".to_string()),
-    }
-}
-
-/// Reads `key` (or `default`) as whole seconds into a `Duration`, keeping the
-/// original error-message shape (`"<KEY> must be a number"`).
-///
-/// `get` is `Config::from_vars`'s indirection over the environment, so this
-/// reads identically whether the caller is `from_env` or a test's in-memory
-/// map.
-fn secs_from_env(
-    get: &impl Fn(&str) -> Option<String>,
-    key: &str,
-    default: &str,
-) -> Result<Duration, String> {
-    let secs = get(key)
-        .unwrap_or_else(|| default.to_string())
-        .parse::<u64>()
-        .map_err(|_| format!("{key} must be a number"))?;
-    Ok(Duration::from_secs(secs))
-}
-
-/// Reads `key` (or `default`) as whole minutes into a `Duration`, keeping the
-/// original error-message shape (`"<KEY> must be a number"`).
-fn minutes_from_env(
-    get: &impl Fn(&str) -> Option<String>,
-    key: &str,
-    default: &str,
-) -> Result<Duration, String> {
-    let minutes = get(key)
-        .unwrap_or_else(|| default.to_string())
-        .parse::<u64>()
-        .map_err(|_| format!("{key} must be a number"))?;
-    Ok(Duration::from_secs(minutes * 60))
-}
-
-/// Reads `JOURNAL_RETENTION_DAYS`, **warning and falling back rather than
-/// failing**.
-///
-/// Every other knob in this file is strict, and this one deliberately is not.
-/// The journal is a logging concern, and `journal.rs` holds the line that a
-/// logging failure must never become a control failure — an unusable
-/// `JOURNAL_PATH` already degrades to "no journal" for exactly this reason.
-/// Parsing this strictly put a typo in a *logging* variable on the path that
-/// exits `main`, so systemd would restart-loop while the battery held whatever
-/// command it last received. Loud and running beats silent and stopped.
-fn retention_from_env(get: &impl Fn(&str) -> Option<String>) -> RetentionDays {
-    const DEFAULT: i64 = 90;
-    let fallback = RetentionDays::new(DEFAULT).expect("90 is a valid retention");
-
-    let Some(raw) = get("JOURNAL_RETENTION_DAYS") else {
-        return fallback;
-    };
-    match raw
-        .parse::<i64>()
-        .map_err(|e| e.to_string())
-        .and_then(RetentionDays::new)
-    {
-        Ok(days) => days,
-        Err(e) => {
-            tracing::warn!("JOURNAL_RETENTION_DAYS={raw} ignored ({e}); keeping {DEFAULT} days");
-            fallback
-        }
     }
 }
 
@@ -268,6 +196,17 @@ impl Taker {
     /// failure. Getting one of these wrong means the controller decides
     /// slightly differently; it must never be the reason the controller
     /// stops running.
+    ///
+    /// **Warning and falling back rather than failing is deliberate, not
+    /// laziness.** `Config` is read at process startup, and systemd restarts
+    /// this service on failure — so parsing a knob strictly would put a typo
+    /// on the path that exits `main`, and the daemon would restart-loop while
+    /// the battery held whatever command it last received. Loud and running
+    /// beats silent and stopped. `journal.retention_days` is the sharpest
+    /// example: a bad value there is a *logging* concern, and `journal.rs`
+    /// holds the line that a logging failure must never become a control
+    /// failure — an unusable journal path already degrades to "no journal"
+    /// for exactly this reason.
     fn lenient<T: DeserializeOwned + std::fmt::Debug>(
         &mut self,
         path: &str,
@@ -278,8 +217,14 @@ impl Taker {
             Some(v) => match v.try_into::<T>() {
                 Ok(v) => Ok(v),
                 Err(e) => {
+                    // `toml`'s errors carry a multi-line span, which reads
+                    // badly inside a one-line warning and worse in a systemd
+                    // journal that splits on newlines. The first line is the
+                    // part that names what was wrong.
+                    let reason = e.to_string();
+                    let reason = reason.lines().next().unwrap_or("invalid").trim();
                     self.warnings
-                        .push(format!("{path} ignored ({e}); keeping {default:?}"));
+                        .push(format!("{path} ignored ({reason}); keeping {default:?}"));
                     Ok(default)
                 }
             },
@@ -413,7 +358,6 @@ fn take_device_secs(table: &mut toml::Table, key: &str) -> Result<u64, String> {
     }
 }
 
-#[allow(dead_code)]
 #[cfg_attr(test, derive(PartialEq))]
 pub struct Config {
     pub mqtt_host: String,
@@ -471,7 +415,7 @@ pub struct Config {
     ///
     /// `RUST_LOG` overrides this at the point the subscriber is built — an
     /// operator's `systemctl edit` override, not configuration this file
-    /// owns — so neither `from_env` nor `from_toml_str` ever reads it.
+    /// owns — so `from_toml_str` never reads it.
     pub log_filter: String,
 }
 
@@ -652,128 +596,6 @@ impl Config {
             solar_discharge_block_threshold: *solar_discharge_block_threshold,
             mqtt_timeout_secs: mqtt_timeout.as_secs(),
         }
-    }
-}
-
-impl Config {
-    /// `from_env`'s body, taking its source of truth as a function instead of
-    /// reading `std::env::var` directly.
-    ///
-    /// The indirection exists for exactly one caller: a test that wants to
-    /// prove the environment and `config.example.toml` produce the same
-    /// `Config`. That test cannot use `std::env::set_var` to stage the
-    /// environment — it is `unsafe` as of edition 2024, and `cargo test` runs
-    /// suites in parallel, so one test's environment would bleed into
-    /// another's. Threading `get` through instead means the "environment" a
-    /// test runs against is just a `HashMap`, race-free by construction.
-    fn from_vars(get: impl Fn(&str) -> Option<String>) -> Result<Config, String> {
-        let mqtt_host = get("MQTT_HOST").ok_or_else(|| "MQTT_HOST is required".to_string())?;
-        let zendure_ip = get("ZENDURE_IP").ok_or_else(|| "ZENDURE_IP is required".to_string())?;
-        let zendure_sn = get("ZENDURE_SN").ok_or_else(|| "ZENDURE_SN is required".to_string())?;
-
-        let mqtt_port = get("MQTT_PORT")
-            .unwrap_or_else(|| "1883".to_string())
-            .parse::<u16>()
-            .map_err(|_| "MQTT_PORT must be a valid port number")?;
-
-        Ok(Config {
-            mqtt_host,
-            mqtt_port,
-            mqtt_username: get("MQTT_USERNAME"),
-            mqtt_password: get("MQTT_PASSWORD"),
-            mqtt_client_id: get("MQTT_CLIENT_ID")
-                .unwrap_or_else(|| "zendure-controller".to_string()),
-            zendure_ip,
-            zendure_sn,
-            shelly_topic: get("SHELLY_TOPIC")
-                .ok_or_else(|| "SHELLY_TOPIC is required".to_string())?,
-            ha_publish_prefix: get("HA_PUBLISH_PREFIX").unwrap_or_else(|| "zendure".to_string()),
-            zendure_poll_interval: secs_from_env(&get, "ZENDURE_POLL_INTERVAL", "10")?,
-            charge_margin: PowerMargin::new(
-                get("CHARGE_MARGIN")
-                    .unwrap_or_else(|| "50".to_string())
-                    .parse::<u32>()
-                    .map_err(|_| "CHARGE_MARGIN must be a number")?,
-            ),
-            discharge_margin: PowerMargin::new(
-                get("DISCHARGE_MARGIN")
-                    .unwrap_or_else(|| "5".to_string())
-                    .parse::<u32>()
-                    .map_err(|_| "DISCHARGE_MARGIN must be a number")?,
-            ),
-            charge_start_threshold: GridPower(
-                get("CHARGE_START_THRESHOLD")
-                    .unwrap_or_else(|| "-100.0".to_string())
-                    .parse::<f64>()
-                    .map_err(|_| "CHARGE_START_THRESHOLD must be a number")?,
-            ),
-            discharge_start_threshold: GridPower(
-                get("DISCHARGE_START_THRESHOLD")
-                    .unwrap_or_else(|| "0.0".to_string())
-                    .parse::<f64>()
-                    .map_err(|_| "DISCHARGE_START_THRESHOLD must be a number")?,
-            ),
-            min_mode_duration: secs_from_env(&get, "MIN_MODE_DURATION", "10")?,
-            min_decision_interval: secs_from_env(&get, "MIN_DECISION_INTERVAL", "5")?,
-            idle_timeout: minutes_from_env(&get, "IDLE_TIMEOUT_MINUTES", "5")?,
-            cycle_warn_threshold: get("CYCLE_WARN_THRESHOLD")
-                .unwrap_or_else(|| "200".to_string())
-                .parse::<u32>()
-                .map_err(|_| "CYCLE_WARN_THRESHOLD must be a number")?,
-            min_soc: Soc::new(
-                get("MIN_SOC")
-                    .unwrap_or_else(|| "10".to_string())
-                    .parse::<u32>()
-                    .map_err(|_| "MIN_SOC must be a number")?,
-            ),
-            max_soc: Soc::new(
-                get("MAX_SOC")
-                    .unwrap_or_else(|| "100".to_string())
-                    .parse::<u32>()
-                    .map_err(|_| "MAX_SOC must be a number")?,
-            ),
-            balance_weekday: {
-                let raw = get("BALANCE_WEEKDAY").unwrap_or_else(|| "mon".to_string());
-                if matches!(
-                    raw.trim().to_ascii_lowercase().as_str(),
-                    "none" | "off" | ""
-                ) {
-                    None
-                } else {
-                    Some(parse_weekday(&raw).map_err(|e| format!("BALANCE_WEEKDAY {e}"))?)
-                }
-            },
-            solar_phase: SolarPhase::parse(&get("SOLAR_PHASE").unwrap_or_else(|| "A".to_string()))
-                .map_err(|e| format!("SOLAR_PHASE {e}"))?,
-            solar_discharge_block_threshold: SolarPower::new(
-                get("SOLAR_DISCHARGE_BLOCK_THRESHOLD")
-                    .unwrap_or_else(|| "0".to_string())
-                    .parse::<f64>()
-                    .map_err(|_| "SOLAR_DISCHARGE_BLOCK_THRESHOLD must be a number")?,
-            ),
-            min_idle_before_discharge: secs_from_env(&get, "MIN_IDLE_BEFORE_DISCHARGE", "300")?,
-            timezone: get("TIMEZONE")
-                .unwrap_or_else(|| "UTC".to_string())
-                .parse::<Tz>()
-                .map_err(|_| "TIMEZONE must be a valid IANA timezone (e.g. Europe/Amsterdam)")?,
-            mqtt_timeout: secs_from_env(&get, "MQTT_TIMEOUT", "60")?,
-            journal_path: PathBuf::from(
-                get("JOURNAL_PATH").unwrap_or_else(|| DEFAULT_JOURNAL_PATH.to_string()),
-            ),
-            journal_retention_days: retention_from_env(&get),
-            rte_state_path: PathBuf::from(
-                get("RTE_STATE_PATH").unwrap_or_else(|| DEFAULT_RTE_STATE_PATH.to_string()),
-            ),
-            // `RUST_LOG` is an override applied where the subscriber is built,
-            // not configuration `Config` reads — see the field's own doc
-            // comment. `from_env` therefore always uses the same default a
-            // config file would.
-            log_filter: "zendure=info".to_string(),
-        })
-    }
-
-    pub fn from_env() -> Result<Self, String> {
-        Self::from_vars(|k| env::var(k).ok())
     }
 }
 

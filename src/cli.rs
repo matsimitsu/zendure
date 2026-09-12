@@ -2,28 +2,39 @@
 //!
 //! Parsing only — no I/O, no `std::env`, so the whole surface is testable
 //! against an argument vector. Hand-rolled rather than pulled from a crate:
-//! there are two subcommands and six flags, and the one thing that has to be
-//! exactly right is that **no arguments still starts the daemon**, unchanged,
-//! since that is how systemd invokes it.
+//! there are two subcommands and eight flags, and the one thing that has to
+//! be exactly right is that **no arguments still starts the daemon**,
+//! unchanged, since that is how systemd invokes it.
 //!
 //! The offline subcommands are parsed *before* any configuration is read, which
 //! is what lets `export` and `replay` run on a laptop with no `MQTT_HOST`,
 //! no `ZENDURE_IP` and no broker. A fixture is hermetic; so is the tool that
-//! makes one.
+//! makes one. That is also why [`Invocation::Export`] and
+//! [`Invocation::Replay`] carry no config field: `commands::export` and
+//! `commands::replay_fixture` take exactly the arguments those variants hold,
+//! so there is no field to read one from even by accident. `--config` is
+//! therefore rejected on both, structurally rather than by a check someone
+//! has to remember to keep — see `parse_export`/`parse_replay`, which already
+//! reject any flag they do not name.
 
 use std::path::PathBuf;
 
 use chrono::DateTime;
 
-use crate::config::DEFAULT_JOURNAL_PATH;
+use crate::config::{DEFAULT_CONFIG_PATH, DEFAULT_JOURNAL_PATH};
 use crate::units::Timestamp;
 
 pub const HELP: &str = "\
 zendure — home battery controller
 
-    zendure
+    zendure [--config <path>] [--check]
         Run the controller. This is what the service does, and what no
-        arguments has always meant.
+        arguments has always meant. --config points at the TOML config file
+        (default /etc/zendure/config.toml). --check parses it, prints the
+        effective configuration, and exits instead of starting anything —
+        and unlike a normal run, a config that merely warns still fails
+        --check, which is what lets a deploy hook catch a typo before it
+        ever reaches the running controller.
 
     zendure export --from <when> --to <when> [--db <path>] [--out <file>]
         Write the journal between two instants as a replay fixture. Starts at
@@ -42,8 +53,16 @@ zendure — home battery controller
 
 #[derive(Debug, PartialEq)]
 pub enum Invocation {
-    Daemon,
+    Daemon {
+        config: PathBuf,
+    },
     Help,
+    CheckConfig {
+        config: PathBuf,
+    },
+    // No config field, deliberately: see the module doc comment. Adding one
+    // here would let `commands::export`/`replay_fixture` read configuration
+    // by accident, which is exactly what the hermeticity promise forbids.
     Export {
         from: Timestamp,
         to: Timestamp,
@@ -62,15 +81,45 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Invocation, Stri
     let mut args = args.into_iter();
 
     let Some(first) = args.next() else {
-        return Ok(Invocation::Daemon);
+        return Ok(Invocation::Daemon {
+            config: PathBuf::from(DEFAULT_CONFIG_PATH),
+        });
     };
 
     match first.as_str() {
         "-h" | "--help" | "help" => Ok(Invocation::Help),
         "export" => parse_export(args),
         "replay" => parse_replay(args),
+        // Anything else that looks like a flag is a daemon argument — there
+        // is no explicit `daemon` subcommand to type, so `--config` or
+        // `--check` showing up first is what "no arguments, but configured"
+        // looks like. Anything that is not one of the two flags below still
+        // falls through to `parse_daemon`'s own catch-all, which reports it
+        // the same way `parse_export`/`parse_replay` report an argument they
+        // do not recognise.
+        "--config" | "--check" => parse_daemon(std::iter::once(first).chain(args)),
         other => Err(format!("unknown command `{other}`\n\n{HELP}")),
     }
+}
+
+fn parse_daemon<I: Iterator<Item = String>>(mut args: I) -> Result<Invocation, String> {
+    let mut config = None;
+    let mut check = false;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--config" => config = Some(PathBuf::from(value(&mut args, "--config")?)),
+            "--check" => check = true,
+            other => return Err(format!("unexpected argument `{other}`")),
+        }
+    }
+
+    let config = config.unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
+    Ok(if check {
+        Invocation::CheckConfig { config }
+    } else {
+        Invocation::Daemon { config }
+    })
 }
 
 fn parse_export<I: Iterator<Item = String>>(mut args: I) -> Result<Invocation, String> {
@@ -185,7 +234,75 @@ mod tests {
     /// The one behaviour that must never change: this is how systemd starts it.
     #[test]
     fn no_arguments_runs_the_daemon() {
-        assert_eq!(parse_args(&[]), Ok(Invocation::Daemon));
+        assert_eq!(
+            parse_args(&[]),
+            Ok(Invocation::Daemon {
+                config: PathBuf::from(DEFAULT_CONFIG_PATH),
+            })
+        );
+    }
+
+    #[test]
+    fn daemon_takes_an_explicit_config_path() {
+        assert_eq!(
+            parse_args(&["--config", "/tmp/zendure.toml"]),
+            Ok(Invocation::Daemon {
+                config: PathBuf::from("/tmp/zendure.toml"),
+            })
+        );
+    }
+
+    #[test]
+    fn check_defaults_the_config_path_like_the_daemon_does() {
+        assert_eq!(
+            parse_args(&["--check"]),
+            Ok(Invocation::CheckConfig {
+                config: PathBuf::from(DEFAULT_CONFIG_PATH),
+            })
+        );
+    }
+
+    /// `--check` and `--config` compose in either order — an operator
+    /// reaching for `--check --config foo.toml` should not have to remember
+    /// that only one spelling parses.
+    #[test]
+    fn check_and_config_compose_in_either_order() {
+        assert_eq!(
+            parse_args(&["--check", "--config", "/tmp/zendure.toml"]),
+            Ok(Invocation::CheckConfig {
+                config: PathBuf::from("/tmp/zendure.toml"),
+            })
+        );
+        assert_eq!(
+            parse_args(&["--config", "/tmp/zendure.toml", "--check"]),
+            Ok(Invocation::CheckConfig {
+                config: PathBuf::from("/tmp/zendure.toml"),
+            })
+        );
+    }
+
+    /// `export` and `replay` read no configuration at all — see the module
+    /// doc comment — so `--config` must be rejected on both rather than
+    /// silently accepted and ignored.
+    #[test]
+    fn export_rejects_config() {
+        let err = parse_args(&[
+            "export",
+            "--from",
+            "1000",
+            "--to",
+            "2000",
+            "--config",
+            "/tmp/zendure.toml",
+        ])
+        .unwrap_err();
+        assert!(err.contains("--config"), "{err}");
+    }
+
+    #[test]
+    fn replay_rejects_config() {
+        let err = parse_args(&["replay", "f.json", "--config", "/tmp/zendure.toml"]).unwrap_err();
+        assert!(err.contains("--config"), "{err}");
     }
 
     #[test]

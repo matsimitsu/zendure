@@ -50,13 +50,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .skip(1)
         .map(|a| a.to_string_lossy().into_owned());
 
-    match cli::parse(args) {
-        // Falls through to the controller below. No arguments has always meant
-        // "run", and that is how the service invokes it.
-        Ok(cli::Invocation::Daemon) => {}
+    let config_path = match cli::parse(args) {
+        // Falls through to the controller below, carrying the path to read.
+        // No arguments has always meant "run", and that is how the service
+        // invokes it.
+        Ok(cli::Invocation::Daemon { config }) => config,
         Ok(cli::Invocation::Help) => {
             print!("{}", cli::HELP);
             return Ok(());
+        }
+        Ok(cli::Invocation::CheckConfig { config }) => {
+            return finish(commands::check_config(&config));
         }
         Ok(cli::Invocation::Export { from, to, db, out }) => {
             return finish(commands::export(&db, from, to, out.as_deref()));
@@ -73,7 +77,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("{message}");
             std::process::exit(2);
         }
-    }
+    };
+
+    // Read before the tracing subscriber exists, for two reasons at once:
+    // building the subscriber needs `config.log_filter`, and a fatal parse
+    // error has nowhere useful to go through `tracing` anyway — there is no
+    // subscriber yet to send it to. `eprintln!` and `exit(1)` rather than `?`,
+    // for the same reason the CLI error path above does not use `?`: `main`
+    // renders a returned `Err` with `Debug`, which would turn a multi-line
+    // parse error into one quoted line full of `\n`. The message still reaches
+    // an operator either way — systemd's `StandardError=` defaults to the
+    // journal, so stderr at this point is captured exactly as if a subscriber
+    // had written it.
+    let (config, warnings) = match Config::from_toml(&config_path) {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
 
     // `RUST_LOG` wins outright when it is set. It used to be merged with a
     // hard-coded `zendure=info`, and `add_directive` *replaces* a directive with
@@ -82,11 +104,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // unreachable by the one incantation an operator would try.
     let filter = match std::env::var("RUST_LOG") {
         Ok(spec) if !spec.trim().is_empty() => tracing_subscriber::EnvFilter::new(spec),
-        _ => tracing_subscriber::EnvFilter::new("zendure=info"),
+        _ => tracing_subscriber::EnvFilter::new(config.log_filter.clone()),
     };
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    let config = Config::from_env()?;
+    // Only now replayed as `tracing::warn!` — this ordering is the whole
+    // reason `Config::from_toml` returns warnings instead of logging them
+    // itself: logging one before the subscriber exists would just drop it.
+    for warning in warnings {
+        tracing::warn!("{warning}");
+    }
 
     // Registered before the loop starts, so a process that cannot be asked to
     // stop fails at startup rather than on the first `systemctl stop`.
