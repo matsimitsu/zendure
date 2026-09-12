@@ -1,7 +1,7 @@
 {
   "format": 1,
   "session": {
-    "started_at_ms": 1000000000,
+    "started_at": 1789231148918,
     "version": "0.0.0-test",
     "config": {
       "charge_margin": 50,
@@ -21,11 +21,11 @@
     }
   },
   "seed": {
-    "at_ms": 1000000000,
+    "at": 1757000020000,
     "state": {
       "world": {
         "grid": {
-          "total": 0.0,
+          "total": -800.0,
           "phases": [
             0.0,
             0.0,
@@ -33,15 +33,26 @@
           ]
         },
         "solar": 0.0,
-        "devices": {}
+        "devices": {
+          "test-battery": {
+            "class": "battery",
+            "soc": 50,
+            "max_discharge_power": 800,
+            "max_charge_power": 2400,
+            "current_power": 0,
+            "soc_calibrating": false,
+            "soc_limit_reached": false,
+            "fault": false
+          }
+        }
       },
       "controller": {
-        "last_mode": "Idle",
-        "last_active_mode": null,
-        "last_mode_change": 999990000,
-        "last_decision": 1000000000,
-        "last_idle_start": 1000000000,
-        "daily_transitions": 0,
+        "last_mode": "Charge",
+        "last_active_mode": "Charge",
+        "last_mode_change": 1757000000000,
+        "last_decision": 1757000020000,
+        "last_idle_start": null,
+        "daily_transitions": 1,
         "daily_cooldown_suppressions": 0,
         "last_cycle_reset_day": 100
       },
@@ -50,65 +61,9 @@
   },
   "events": [
     {
-      "kind": "device_update",
-      "at": {
-        "now": 1000000000,
-        "hour": 12,
-        "day_ordinal": 100,
-        "weekday": "Wed"
-      },
-      "id": "test-battery",
-      "measurement": {
-        "class": "battery",
-        "soc": 50,
-        "max_discharge_power": 800,
-        "max_charge_power": 2400,
-        "current_power": 0,
-        "soc_calibrating": false,
-        "soc_limit_reached": false,
-        "fault": false
-      }
-    },
-    {
       "kind": "meter",
       "at": {
-        "now": 1000000000,
-        "hour": 12,
-        "day_ordinal": 100,
-        "weekday": "Wed"
-      },
-      "grid": {
-        "total": -500.0,
-        "phases": [
-          0.0,
-          0.0,
-          0.0
-        ]
-      },
-      "solar": 0.0
-    },
-    {
-      "kind": "meter",
-      "at": {
-        "now": 1000020000,
-        "hour": 12,
-        "day_ordinal": 100,
-        "weekday": "Wed"
-      },
-      "grid": {
-        "total": -800.0,
-        "phases": [
-          0.0,
-          0.0,
-          0.0
-        ]
-      },
-      "solar": 0.0
-    },
-    {
-      "kind": "meter",
-      "at": {
-        "now": 1000040000,
+        "now": 1757000040000,
         "hour": 12,
         "day_ordinal": 100,
         "weekday": "Wed"
@@ -126,7 +81,7 @@
     {
       "kind": "device_update",
       "at": {
-        "now": 1000060000,
+        "now": 1757000060000,
         "hour": 12,
         "day_ordinal": 100,
         "weekday": "Wed"
@@ -146,7 +101,7 @@
     {
       "kind": "mqtt_timeout",
       "at": {
-        "now": 1000080000,
+        "now": 1757000080000,
         "hour": 12,
         "day_ordinal": 100,
         "weekday": "Wed"
@@ -155,7 +110,7 @@
     {
       "kind": "meter",
       "at": {
-        "now": 1000100000,
+        "now": 1757000100000,
         "hour": 12,
         "day_ordinal": 100,
         "weekday": "Wed"
@@ -173,7 +128,7 @@
     {
       "kind": "meter",
       "at": {
-        "now": 1000120000,
+        "now": 1757000120000,
         "hour": 12,
         "day_ordinal": 100,
         "weekday": "Wed"
@@ -191,7 +146,7 @@
     {
       "kind": "meter",
       "at": {
-        "now": 1000140000,
+        "now": 1757000140000,
         "hour": 12,
         "day_ordinal": 100,
         "weekday": "Wed"
@@ -208,14 +163,11 @@
     }
   ],
   "expected": [
-    "1000000000ms: —",
-    "1000000000ms: test-battery set_charge(337W)",
-    "1000020000ms: test-battery set_charge(750W)",
-    "1000040000ms: test-battery set_idle",
-    "1000060000ms: —",
-    "1000080000ms: test-battery set_idle",
-    "1000100000ms: test-battery set_idle",
-    "1000120000ms: test-battery set_charge(412W)",
-    "1000140000ms: test-battery set_idle"
+    "1757000040000ms: test-battery set_idle",
+    "1757000060000ms: —",
+    "1757000080000ms: test-battery set_idle",
+    "1757000100000ms: test-battery set_idle",
+    "1757000120000ms: test-battery set_charge(412W)",
+    "1757000140000ms: test-battery set_idle"
   ]
 }

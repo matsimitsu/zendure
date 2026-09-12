@@ -341,3 +341,44 @@ fn retention_cutoff_is_the_window_behind_now() {
     let expected = now - chrono::Duration::days(30);
     assert_eq!(cutoff, Timestamp::from_millis(expected.timestamp_millis()));
 }
+
+/// Reading a value back has to enforce the same invariant constructing it does.
+///
+/// `#[serde(transparent)]` derives both halves and the derived `Deserialize`
+/// writes the field directly, so every clamp here was bypassed on the way in.
+/// Harmless while the journal only ever read its own writes; not harmless once
+/// `replay --set` and hand-edited fixtures exist, where the number comes from a
+/// person. `min_soc=1000` — the shape the device reports SOC setpoints in —
+/// used to yield `Soc(1000)`, against which `soc > min_soc` is never true.
+#[test]
+fn clamping_newtypes_clamp_on_the_way_in_too() {
+    assert_eq!(serde_json::from_str::<Soc>("1000").unwrap(), Soc::new(1000));
+    assert_eq!(serde_json::from_str::<Soc>("1000").unwrap(), Soc::FULL);
+
+    // The one that inverts a guard rather than merely saturating: the README
+    // documents a negative `SOLAR_DISCHARGE_BLOCK_THRESHOLD` as "disables the
+    // guard", which is only true because the clamp turns it into the `0`
+    // sentinel. Unclamped, it wires the guard permanently on.
+    let off = serde_json::from_str::<SolarPower>("-500").unwrap();
+    assert_eq!(off, SolarPower::ZERO);
+    assert_eq!(off, SolarPower::new(-500.0));
+
+    assert_eq!(
+        serde_json::from_str::<Setpoint>("-42").unwrap(),
+        Setpoint::ZERO
+    );
+}
+
+/// And a valid value still round-trips byte-for-byte, so the journal, MQTT and
+/// every fixture already written read back unchanged.
+#[test]
+fn validating_deserialize_leaves_the_wire_format_alone() {
+    for json in ["0", "55", "100"] {
+        let soc: Soc = serde_json::from_str(json).unwrap();
+        assert_eq!(serde_json::to_string(&soc).unwrap(), json);
+    }
+    let solar: SolarPower = serde_json::from_str("212.5").unwrap();
+    assert_eq!(serde_json::to_string(&solar).unwrap(), "212.5");
+    let setpoint: Setpoint = serde_json::from_str("145").unwrap();
+    assert_eq!(serde_json::to_string(&setpoint).unwrap(), "145");
+}

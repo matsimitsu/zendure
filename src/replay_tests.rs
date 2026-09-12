@@ -1,124 +1,43 @@
 use super::*;
 
-use crate::allocate::allocate;
-use crate::battery::BatteryState;
-use crate::clock::Clock;
 use crate::command::Command;
-use crate::device::{Applied, ControlPath, Outcome};
-use crate::event::journey;
-use crate::journal::{self, Journal};
-use crate::models::ControlDecision;
-use crate::units::{RetentionDays, Setpoint};
-use crate::world::{DeviceId, Measurement};
+use crate::fixtures::journey;
+use crate::journal::read;
+use crate::world::DeviceId;
 
-/// `main.rs`'s startup seed: the battery the journey's world contains, arriving
-/// as the event the daemon now journals it as.
-fn startup() -> Event {
-    Event::DeviceUpdate {
-        at: journey::clock_at(0),
-        id: DeviceId::new(journey::BATTERY_ID),
-        measurement: Measurement::Battery(BatteryState::test_sample()),
-    }
-}
-
-/// The journey with that seed in front of it — the whole recorded stream, as a
-/// session actually produces it.
-fn session_events() -> Vec<Event> {
-    std::iter::once(startup())
-        .chain(journey::events())
-        .collect()
-}
+/// The fixture checked in at `tests/fixtures/journey.json`.
+///
+/// Strictly a **format** pin: a fixture exported by an older build has to stay
+/// readable, so renaming a field of `EngineState`, `SessionConfig`, `Event` or
+/// anything they contain fails here. Deliberately *not* a behaviour pin —
+/// `a_recording_replays_to_the_commands_it_recorded` owns that, records and
+/// replays in one process and so can never go stale, whereas a golden that
+/// pinned behaviour would fail on any deliberate change with "regenerate me" as
+/// the documented fix, which erases the signal it just gave.
+///
+/// Regenerate with `cargo test regenerate_the_checked_in_fixture -- --ignored`.
+const CHECKED_IN: &str = include_str!("../tests/fixtures/journey.json");
 
 fn config() -> SessionConfig {
     SessionConfig::test_default()
 }
 
-/// What `main.rs` builds at startup: a controller with no history, from the
-/// tuning alone. Deliberately not `Controller::test_default`, whose invented
-/// history no daemon ever has — a recording made against it could not be
-/// replayed from the start, because the state it began in was never recorded
-/// anywhere.
-fn engine() -> Engine {
-    Engine::new(
-        Controller::from_session(&config(), &journey::clock_at(0)),
-        World::new(),
-        Duration::from_secs(config().mqtt_timeout_secs),
-    )
-}
-
-/// Everything `main.rs`'s loop does to the journal, minus the I/O.
-///
-/// Journal the event, step, then journal the decision with the state *after*
-/// the step and one outcome per directive — in that order, because that
-/// ordering is what `seq` alignment depends on and a test that wrote them in
-/// any other order would be testing a daemon that does not exist.
-async fn record(path: &std::path::Path, events: &[Event]) {
-    let (j, writer) = Journal::open(
-        path,
-        RetentionDays::new(3650).unwrap(),
-        "0.0.0-test",
-        &config(),
-    );
-    let writer = writer.expect("journal opens in a temp dir");
-    let mut engine = engine();
-
-    for event in events {
-        j.event(event);
-        let step = engine.step(event);
-        if let Some(decision) = step.decision {
-            let outcomes: Vec<Outcome> = step
-                .directives
-                .iter()
-                .map(|d| Outcome {
-                    device: d.device().clone(),
-                    command: d.describe(),
-                    applied: Applied::Ok,
-                    error: None,
-                })
-                .collect();
-            j.decision(
-                event.at(),
-                ControlPath::Objective,
-                &decision,
-                &engine.state(),
-                &outcomes,
-            );
-        }
-    }
-
-    drop(j);
-    writer.await.expect("writer panicked");
-}
-
-/// The fixture checked in at `tests/fixtures/journey.json`, which is the
-/// on-disk format itself under test: renaming a field of `EngineState` or
-/// `SessionConfig` would make this file unreadable, and a fixture exported
-/// today has to stay readable by tomorrow's build. Regenerate with
-/// `cargo test regenerate_the_checked_in_fixture -- --ignored`.
-const CHECKED_IN: &str = include_str!("../tests/fixtures/journey.json");
-
-#[tokio::test]
-#[ignore = "rewrites tests/fixtures/journey.json"]
-async fn regenerate_the_checked_in_fixture() {
-    let dir = tempfile::tempdir().unwrap();
+/// A fixture built the way `export` builds one, from a recorded journey.
+async fn recorded_fixture(dir: &tempfile::TempDir, from: Timestamp, to: Timestamp) -> Fixture {
     let path = dir.path().join("journal.db");
-    record(&path, &session_events()).await;
-    let fixture = from_slice(journal::read_range(&path, start(), end()).unwrap()).unwrap();
-    std::fs::write(
-        "tests/fixtures/journey.json",
-        serde_json::to_string_pretty(&fixture).unwrap() + "\n",
-    )
-    .unwrap();
+    if !path.exists() {
+        crate::journal::testing::record(&path, &journey::session()).await;
+    }
+    let recording = read::read_range(&path, from, to).unwrap();
+    from_recording(recording).unwrap().0
 }
 
-/// A fixture written by an earlier build still replays, and still agrees with
-/// what that build recorded. This is the only test that would fail on a change
-/// to the *format* rather than to the fold.
-#[test]
-fn the_checked_in_fixture_still_replays_and_verifies() {
-    let fixture: Fixture = serde_json::from_str(CHECKED_IN).expect("fixture format changed");
-    let frames = run(&fixture, &[]).unwrap();
-    verify(&fixture, &frames).expect("the fold changed, or the fixture is stale");
+fn start() -> Timestamp {
+    Timestamp::from_millis(journey::NOW_MS - 1)
+}
+
+fn end() -> Timestamp {
+    Timestamp::from_millis(journey::NOW_MS + 1_000_000)
 }
 
 fn frame(at_ms: i64, commands: &[(&str, Command)]) -> Frame {
@@ -138,7 +57,10 @@ fn frame(at_ms: i64, commands: &[(&str, Command)]) -> Frame {
 fn render_names_the_device_on_every_command() {
     let frames = vec![frame(
         1000,
-        &[("SN1", Command::SetDischarge(Setpoint::new(145)))],
+        &[(
+            "SN1",
+            Command::SetDischarge(crate::units::Setpoint::new(145)),
+        )],
     )];
     assert_eq!(render(&frames), "1000ms: SN1 set_discharge(145W)");
 }
@@ -147,12 +69,15 @@ fn render_names_the_device_on_every_command() {
 /// it, a setpoint reaching only the primary and a setpoint reaching both would
 /// render identically.
 #[test]
-fn render_lists_every_device_a_step_commanded() {
+fn render_lists_every_device_a_step_commanded_in_order() {
     let frames = vec![frame(
         7,
-        &[("SN1", Command::SetIdle), ("SN2", Command::SetIdle)],
+        &[
+            ("a-first", Command::SetIdle),
+            ("b-second", Command::SetIdle),
+        ],
     )];
-    assert_eq!(render(&frames), "7ms: SN1 set_idle, SN2 set_idle");
+    assert_eq!(render(&frames), "7ms: a-first set_idle, b-second set_idle");
 }
 
 /// An event that decided nothing is a fact about the fold. Rendering it as a
@@ -162,10 +87,31 @@ fn render_marks_a_step_that_commanded_nothing() {
     assert_eq!(render(&[frame(42, &[])]), "42ms: —");
 }
 
+/// A replayed `Directive` and a recorded pair of text columns have to render
+/// identically or `--verify` diverges on every frame that commanded anything.
+/// They go through one function; this is the test that says so.
+#[test]
+fn a_replayed_directive_and_a_recorded_row_render_the_same() {
+    let device = DeviceId::new("SN1");
+    let directive = Directive::Battery {
+        device: device.clone(),
+        command: Command::SetIdle,
+    };
+    assert_eq!(
+        addressed(directive.device(), &directive.describe()),
+        addressed(&device, &"set_idle")
+    );
+}
+
 #[test]
 fn replay_produces_one_frame_per_event_including_empty_ones() {
-    let events = session_events();
-    let frames = replay(&mut engine(), &events);
+    let events = journey::session();
+    let mut engine = Engine::new(
+        Controller::from_session(&config(), &journey::clock_at(0)),
+        World::new(),
+        Duration::from_secs(config().mqtt_timeout_secs),
+    );
+    let frames = replay(&mut engine, &events);
 
     assert_eq!(frames.len(), events.len());
     for (frame, event) in frames.iter().zip(&events) {
@@ -181,22 +127,12 @@ fn replay_produces_one_frame_per_event_including_empty_ones() {
 #[tokio::test]
 async fn a_fixture_round_trips_through_json() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("journal.db");
-    record(&path, &session_events()).await;
+    let fixture = recorded_fixture(&dir, start(), end()).await;
 
-    let fixture = from_slice(journal::read_range(&path, start(), end()).unwrap()).unwrap();
     let json = serde_json::to_string(&fixture).unwrap();
     let back: Fixture = serde_json::from_str(&json).unwrap();
 
     assert_eq!(back, fixture);
-}
-
-fn start() -> Timestamp {
-    Timestamp::from_millis(journey::NOW_MS - 1)
-}
-
-fn end() -> Timestamp {
-    Timestamp::from_millis(journey::NOW_MS + 1_000_000)
 }
 
 /// **The property step 8 exists for.** Record a run, export it, replay it, and
@@ -205,10 +141,7 @@ fn end() -> Timestamp {
 #[tokio::test]
 async fn a_recording_replays_to_the_commands_it_recorded() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("journal.db");
-    record(&path, &session_events()).await;
-
-    let fixture = from_slice(journal::read_range(&path, start(), end()).unwrap()).unwrap();
+    let fixture = recorded_fixture(&dir, start(), end()).await;
     let frames = run(&fixture, &[]).unwrap();
 
     verify(&fixture, &frames).expect("a replay of a recording must match it");
@@ -222,34 +155,34 @@ async fn a_recording_replays_to_the_commands_it_recorded() {
     );
 }
 
-/// The anti-vacuity guard, mirroring `the_same_journey_diverges_without_the_snapshot`.
-///
-/// A `--verify` that quietly ignored the seed and started from a fresh engine
-/// would still pass every test above, because the journey begins at a moment a
-/// fresh controller can reach. Replacing the seed with a fresh engine's state
-/// has to change the answer, or the seed is not under test.
+/// The anti-vacuity guard. It is *not* redundant with
+/// `engine.rs`'s `the_same_journey_diverges_without_the_snapshot`: that one
+/// proves `EngineState` carries enough to resume, this one proves `run`
+/// actually consults `fixture.seed`. A `run` that ignored the seed entirely
+/// would pass every other test in this file.
 #[tokio::test]
 async fn a_fixture_seeded_from_a_fresh_engine_replays_differently() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("journal.db");
 
-    // Record the whole journey, then export only its tail, so the fixture's
-    // seed carries history a fresh engine could not have. The tail opens on a
-    // discharge, which is the sharpest case: a controller that just started
-    // holds `last_idle_start`, so `min_idle_before_discharge` blocks it, while
-    // one that was already charging is free to turn around.
-    let events = session_events();
-    record(&path, &events).await;
-    let tail = events[2].at();
-    let fixture = from_slice(journal::read_range(&path, tail, end()).unwrap()).unwrap();
+    // Export only the tail, so the seed carries history a fresh engine could
+    // not have. The tail opens on a discharge-shaped reading, which is the
+    // sharpest case: a controller that just started holds `last_idle_start`, so
+    // `min_idle_before_discharge` suppresses it to idle, while one that was
+    // already charging is free to turn around.
+    let events = journey::session();
+    let fixture = recorded_fixture(&dir, events[2].at(), end()).await;
 
     let seeded = run(&fixture, &[]).unwrap();
     verify(&fixture, &seeded).expect("the tail must verify from its own seed");
 
     let fresh = Fixture {
         seed: Seed {
-            at_ms: fixture.seed.at_ms,
-            state: engine().state(),
+            at: fixture.seed.at,
+            state: EngineState {
+                world: World::new(),
+                controller: Controller::from_session(&config(), &journey::clock_at(0)).state(),
+                mqtt_timed_out: false,
+            },
         },
         ..fixture.clone()
     };
@@ -262,17 +195,52 @@ async fn a_fixture_seeded_from_a_fresh_engine_replays_differently() {
     );
 }
 
-#[tokio::test]
-async fn an_unsupported_format_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("journal.db");
-    record(&path, &session_events()).await;
+/// Built literally rather than through a recorded journey: changing one integer
+/// does not need a temp database and nine journalled events.
+fn bare_fixture() -> Fixture {
+    Fixture {
+        format: FORMAT,
+        session: SessionMeta {
+            started_at: Timestamp::from_millis(journey::NOW_MS),
+            version: "0.0.0-test".to_string(),
+            config: config(),
+        },
+        seed: Seed {
+            at: Timestamp::from_millis(journey::NOW_MS),
+            state: EngineState {
+                world: World::new(),
+                controller: Controller::from_session(&config(), &journey::clock_at(0)).state(),
+                mqtt_timed_out: false,
+            },
+        },
+        events: vec![Event::MqttTimeout {
+            at: journey::clock_at(0),
+        }],
+        expected: vec![format!("{}ms: {NOTHING}", journey::NOW_MS)],
+    }
+}
 
-    let mut fixture = from_slice(journal::read_range(&path, start(), end()).unwrap()).unwrap();
-    fixture.format = FORMAT + 1;
-
+#[test]
+fn an_unsupported_format_is_refused() {
+    let fixture = Fixture {
+        format: FORMAT + 1,
+        ..bare_fixture()
+    };
     let err = run(&fixture, &[]).unwrap_err();
     assert!(err.contains("format"), "{err}");
+}
+
+/// A fixture whose `expected` and events disagree in length is a corrupt
+/// fixture, and saying so beats comparing the frames that happen to line up.
+#[test]
+fn verify_rejects_a_recording_of_a_different_length() {
+    let fixture = Fixture {
+        expected: vec!["0ms: —".to_string(), "1ms: —".to_string()],
+        ..bare_fixture()
+    };
+    let frames = run(&fixture, &[]).unwrap();
+    let err = verify(&fixture, &frames).unwrap_err();
+    assert!(err.contains("frames"), "{err}");
 }
 
 /// A typo that silently changed nothing would let a what-if quietly answer the
@@ -298,21 +266,48 @@ fn an_override_replaces_exactly_one_knob() {
     );
 }
 
-/// A value the knob's type cannot hold is rejected rather than coerced.
+/// A value the knob's *type* cannot hold is rejected.
 #[test]
-fn an_override_that_does_not_fit_its_knob_is_refused() {
+fn an_override_of_the_wrong_type_is_refused() {
     assert!(apply_overrides(&config(), &[("min_soc".into(), "later".into())]).is_err());
+    assert!(apply_overrides(&config(), &[("min_soc".into(), "-5".into())]).is_err());
+    assert!(apply_overrides(&config(), &[("balance_weekday".into(), "Funday".into())]).is_err());
 }
 
-/// The point of `--set`: the same events, different tuning, a visibly different
-/// answer. `max_soc` at 0 blocks charging outright, and the journey charges.
+/// A value the knob's type *can* hold but its domain cannot is clamped by the
+/// constructor, not waved through.
+///
+/// This is the case the old test's name claimed and did not cover: `1000` is a
+/// perfectly good `u32`, and `Soc`'s derived `Deserialize` used to write it
+/// straight into the field. `min_soc = Soc(1000)` makes `soc > min_soc` false
+/// forever, so a replay answering "why did it never discharge?" answered about
+/// a controller that cannot exist.
+#[test]
+fn an_override_outside_a_knobs_domain_is_clamped_by_its_constructor() {
+    let clamped = apply_overrides(&config(), &[("min_soc".into(), "1000".into())]).unwrap();
+    assert_eq!(clamped.min_soc, crate::units::Soc::FULL);
+
+    // And the one that inverts a guard rather than saturating it: the README
+    // documents a negative solar threshold as "disables the guard", which holds
+    // only because the constructor clamps it to the `0` sentinel.
+    let off = apply_overrides(
+        &config(),
+        &[("solar_discharge_block_threshold".into(), "-500".into())],
+    )
+    .unwrap();
+    assert_eq!(
+        off.solar_discharge_block_threshold,
+        crate::units::SolarPower::ZERO
+    );
+}
+
+/// `--set` and `--verify` cannot be combined — `cli` rejects that pairing — but
+/// `--set` alone has to visibly change the answer or it is doing nothing.
 #[tokio::test]
 async fn an_override_changes_what_the_replay_decides() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("journal.db");
-    record(&path, &session_events()).await;
+    let fixture = recorded_fixture(&dir, start(), end()).await;
 
-    let fixture = from_slice(journal::read_range(&path, start(), end()).unwrap()).unwrap();
     let before = run(&fixture, &[]).unwrap();
     let after = run(&fixture, &[("max_soc".into(), "0".into())]).unwrap();
 
@@ -325,83 +320,65 @@ async fn an_override_changes_what_the_replay_decides() {
 async fn an_empty_range_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("journal.db");
-    record(&path, &session_events()).await;
+    crate::journal::testing::record(&path, &journey::session()).await;
 
-    let before_everything = Timestamp::from_millis(journey::NOW_MS - 10_000);
-    let slice = journal::read_range(&path, before_everything, before_everything).unwrap();
-    assert!(from_slice(slice).is_err());
+    let before = Timestamp::from_millis(journey::NOW_MS - 10_000);
+    let recording = read::read_range(&path, before, before).unwrap();
+    assert!(from_recording(recording).is_err());
 }
 
-/// The seed comes from a decision row, so the exported range starts at that
-/// decision and not at `--from`. Asking from the middle of the journey has to
-/// produce a fixture whose first event is at or before the requested start.
+/// The reader's warnings reach the caller rather than being printed from
+/// inside a library function that tests call.
 #[tokio::test]
-async fn a_range_is_anchored_to_the_last_decision_before_it() {
+async fn warnings_are_returned_not_printed() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("journal.db");
-    let events = session_events();
-    record(&path, &events).await;
+    crate::journal::testing::record(&path, &journey::session()).await;
 
-    let from = events[7].at();
-    let fixture = from_slice(journal::read_range(&path, from, end()).unwrap()).unwrap();
-
+    // A range opening before any decision takes the no-seed path.
+    let recording = read::read_range(&path, start(), end()).unwrap();
+    let (_, warnings) = from_recording(recording).unwrap();
     assert!(
-        fixture.seed.at_ms <= from.as_millis(),
-        "seeded at {}ms, asked from {}ms",
-        fixture.seed.at_ms,
-        from.as_millis()
+        warnings.iter().any(|w| w.contains("starting fresh")),
+        "{warnings:?}"
     );
-    assert_eq!(fixture.events.first().map(Event::at), Some(events[8].at()));
 }
 
-/// A fixture whose `expected` and events disagree in length is a corrupt
-/// fixture, and saying so beats comparing the frames that happen to line up.
-#[test]
-fn verify_rejects_a_recording_of_a_different_length() {
-    let fixture = Fixture {
-        format: FORMAT,
-        session: SessionMeta {
-            started_at_ms: 0,
-            version: "0.0.0-test".to_string(),
-            config: config(),
-        },
-        seed: Seed {
-            at_ms: 0,
-            state: engine().state(),
-        },
-        events: vec![Event::MqttTimeout {
-            at: Clock::test_at(journey::NOW_MS),
-        }],
-        expected: vec!["0ms: —".to_string(), "1ms: —".to_string()],
-    };
+#[tokio::test]
+#[ignore = "rewrites tests/fixtures/journey.json"]
+async fn regenerate_the_checked_in_fixture() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("journal.db");
+    crate::journal::testing::record(&path, &journey::session()).await;
 
-    let frames = run(&fixture, &[]).unwrap();
-    let err = verify(&fixture, &frames).unwrap_err();
-    assert!(err.contains("frames"), "{err}");
+    // Through `export`, so the golden is produced by the path a user runs, and
+    // from a *seeded* range so the seed carries a populated world and a
+    // controller with history rather than two defaults.
+    let events = journey::session();
+    crate::commands::export(
+        &path,
+        events[2].at(),
+        end(),
+        Some(std::path::Path::new("tests/fixtures/journey.json")),
+    )
+    .unwrap();
 }
 
-/// Allocation order follows the world's device order, which is sorted by id —
-/// so the same fixture renders the same lines in the same sequence every run,
-/// which is what makes a diff meaningful.
+/// A fixture written by an earlier build still parses into today's types. The
+/// format assertion is part of it: without it, bumping `FORMAT` and
+/// regenerating would keep this green while every fixture in the wild broke.
 #[test]
-fn a_multi_device_step_renders_in_a_stable_order() {
-    let mut world = World::new();
-    for id in ["b-second", "a-first"] {
-        world.observe_device(
-            DeviceId::new(id),
-            Measurement::Battery(BatteryState::test_sample()),
-        );
-    }
-    let decision = ControlDecision {
-        mode: crate::models::ControlMode::Idle,
-        power_watts: Setpoint::ZERO,
-        reason: "test".to_string(),
-        grid_power: crate::units::GridPower::ZERO,
-    };
+fn the_checked_in_fixture_still_parses() {
+    let fixture: Fixture = serde_json::from_str(CHECKED_IN).expect("fixture format changed");
 
-    let frames = vec![Frame {
-        at: Timestamp::from_millis(5),
-        directives: allocate(&decision, &world),
-    }];
-    assert_eq!(render(&frames), "5ms: a-first set_idle, b-second set_idle");
+    assert_eq!(fixture.format, FORMAT);
+    assert!(!fixture.events.is_empty());
+    assert_eq!(fixture.expected.len(), fixture.events.len());
+
+    // The seed has to carry a populated world, or renaming a field inside
+    // `Measurement` would not be caught here.
+    assert!(
+        fixture.seed.state.world.battery().is_some(),
+        "the golden was exported without a seeded world"
+    );
 }

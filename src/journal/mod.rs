@@ -3,17 +3,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Utc;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 use serde::Serialize;
 use serde::de::IgnoredAny;
 use tokio::sync::mpsc;
 
-use crate::config::SessionConfig;
 use crate::device::{ControlPath, Outcome};
 use crate::engine::EngineState;
 use crate::event::Event;
 use crate::models::ControlDecision;
 use crate::units::{RetentionDays, Timestamp};
+
+pub mod read;
 
 /// How many records may be in flight before the control loop starts dropping
 /// them. At roughly one meter reading a second plus a poll and a decision, this
@@ -208,7 +209,7 @@ impl Journal {
             // differ by the few milliseconds between receiving a payload and
             // folding it in. `seq` is the strict order if you need one, and it
             // spans both tables where `events.id` only orders this one.
-            at: Timestamp::from_millis(Utc::now().timestamp_millis()),
+            at: Utc::now().into(),
             kind,
             payload_json,
         });
@@ -288,188 +289,6 @@ impl Journal {
             }
         }
     }
-}
-
-/// The kinds of `events` row the engine can fold. The other two — `shelly` and
-/// `zendure_poll` — are captured upstream of the engine, before anything parsed
-/// them, and are not inputs to the fold. Feeding them to a replay would be
-/// feeding it the same reading twice, in two shapes.
-const FOLDABLE: [&str; 3] = ["meter", "device_update", "mqtt_timeout"];
-
-/// A contiguous run of the journal, ready to become a replay fixture.
-///
-/// "Contiguous" is the whole point, and is what `seq` buys: the events start
-/// exactly where the seed's snapshot was taken, with nothing between them.
-pub struct Slice {
-    /// The version that wrote the seed's session, for the fixture's provenance.
-    pub version: String,
-    /// The tuning those rows were decided under.
-    pub config: SessionConfig,
-    /// `None` when no decision was recorded at or before `from` — an empty
-    /// journal, or a range that starts before the first decision. The caller
-    /// decides what to do about it; this module will not invent a snapshot it
-    /// did not record.
-    pub seed: Option<Seed>,
-    pub events: Vec<SeqEvent>,
-    pub decisions: Vec<RecordedDecision>,
-    /// True when the events span a restart. The fixture carries one session's
-    /// tuning, so a range crossing a config change would replay part of itself
-    /// under the wrong knobs.
-    pub spans_sessions: bool,
-}
-
-/// The state a replay resumes from, and where in the file it came from.
-pub struct Seed {
-    pub at: Timestamp,
-    pub state: EngineState,
-}
-
-pub struct SeqEvent {
-    pub seq: i64,
-    pub event: Event,
-}
-
-/// What the daemon actually commanded, reduced to the two columns a replay can
-/// be diffed against.
-///
-/// `outcome` is deliberately absent: it records whether an HTTP write landed,
-/// and a replay performs no writes. Comparing it would mean comparing a replay
-/// against something it structurally cannot produce.
-pub struct RecordedDecision {
-    pub seq: i64,
-    pub device: Option<String>,
-    pub command: Option<String>,
-}
-
-/// Read everything needed to replay the run between two instants.
-///
-/// The range is anchored to a *decision*, not to `from`: a replay has to resume
-/// from a recorded snapshot, and the only snapshots are on decision rows. So the
-/// slice starts at the last decision at or before `from` and runs to `to`,
-/// which means it can begin earlier than asked. That is the honest boundary —
-/// starting at `from` with the state from some other moment would replay
-/// plausible nonsense.
-pub fn read_range(path: &Path, from: Timestamp, to: Timestamp) -> rusqlite::Result<Slice> {
-    let conn = Connection::open(path)?;
-
-    let seed = conn
-        .query_row(
-            "SELECT seq, ts_ms, state_json, session_id FROM decisions
-             WHERE ts_ms <= ?1 ORDER BY seq DESC LIMIT 1",
-            [from.as_millis()],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                ))
-            },
-        )
-        .optional()?;
-
-    // Without a seed there is nothing before `from` to resume from, so the
-    // slice is just the range itself and the caller has to build a starting
-    // state. With one, the events are everything the engine folded after the
-    // snapshot was taken — including any between the seed and `from`, which are
-    // how the run got from one to the other.
-    let (seed_seq, lower_ts) = match &seed {
-        Some((seq, ..)) => (*seq, i64::MIN),
-        None => (0, from.as_millis()),
-    };
-
-    let mut stmt = conn.prepare(&format!(
-        "SELECT seq, payload_json, session_id FROM events
-         WHERE seq > ?1 AND ts_ms >= ?2 AND ts_ms <= ?3 AND kind IN ({})
-         ORDER BY seq",
-        FOLDABLE.map(|_| "?").join(", ")
-    ))?;
-    let mut sessions = std::collections::BTreeSet::new();
-    let mut events = Vec::new();
-    let mut rows = stmt.query(rusqlite::params_from_iter(
-        [seed_seq, lower_ts, to.as_millis()]
-            .map(rusqlite::types::Value::from)
-            .into_iter()
-            .chain(FOLDABLE.map(|k| rusqlite::types::Value::from(k.to_string()))),
-    ))?;
-    while let Some(row) = rows.next()? {
-        let payload: String = row.get(1)?;
-        match serde_json::from_str(&payload) {
-            Ok(event) => events.push(SeqEvent {
-                seq: row.get(0)?,
-                event,
-            }),
-            // A row this build cannot parse is a row from another build. Loud
-            // and skipped beats aborting the whole export over one of them.
-            Err(e) => eprintln!(
-                "skipping unreadable event at seq {}: {e}",
-                row.get::<_, i64>(0)?
-            ),
-        }
-        sessions.insert(row.get::<_, i64>(2)?);
-    }
-    drop(rows);
-    drop(stmt);
-
-    let mut stmt = conn.prepare(
-        "SELECT seq, device, command FROM decisions
-         WHERE seq > ?1 AND ts_ms >= ?2 AND ts_ms <= ?3 ORDER BY seq",
-    )?;
-    let decisions = stmt
-        .query_map([seed_seq, lower_ts, to.as_millis()], |row| {
-            Ok(RecordedDecision {
-                seq: row.get(0)?,
-                device: row.get(1)?,
-                command: row.get(2)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(stmt);
-
-    // The session that governs the fixture is the one the seed was written in;
-    // without a seed, the one the first event belongs to. With neither — an
-    // empty range — any session will do, because the caller is about to be told
-    // there is nothing to replay and the tuning will never be used.
-    let session_id = match &seed {
-        Some((.., session_id)) => Some(*session_id),
-        None => sessions.iter().next().copied(),
-    };
-    let (version, config_json) = match session_id {
-        Some(id) => conn.query_row(
-            "SELECT version, config_json FROM sessions WHERE id = ?1",
-            [id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        ),
-        None => conn.query_row(
-            "SELECT version, config_json FROM sessions ORDER BY id DESC LIMIT 1",
-            [],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        ),
-    }?;
-    let config: SessionConfig = serde_json::from_str(&config_json).map_err(|e| {
-        rusqlite::Error::InvalidParameterName(format!("session config unreadable: {e}"))
-    })?;
-
-    let seed = seed
-        .map(|(_, at, state_json, _)| {
-            serde_json::from_str(&state_json).map(|state| Seed {
-                at: Timestamp::from_millis(at),
-                state,
-            })
-        })
-        .transpose()
-        .map_err(|e| {
-            rusqlite::Error::InvalidParameterName(format!("seed state unreadable: {e}"))
-        })?;
-
-    Ok(Slice {
-        version,
-        config,
-        seed,
-        events,
-        decisions,
-        spans_sessions: sessions.len() > 1,
-    })
 }
 
 /// Serialize one value for a column, naming it if that fails.
@@ -559,10 +378,22 @@ fn prepare(conn: &Connection, version: &str, config_json: &str) -> rusqlite::Res
          );
          CREATE INDEX IF NOT EXISTS events_ts        ON events (ts_ms);
          CREATE INDEX IF NOT EXISTS events_kind      ON events (kind);
-         CREATE INDEX IF NOT EXISTS events_seq       ON events (seq);
+         -- UNIQUE, because `seq` is an ordering and a duplicate silently
+         -- destroys it. One writer per process cannot collide with itself, but
+         -- two processes opening the same journal seed their counters from the
+         -- same `max(seq)` and hand out the same numbers — a misconfiguration
+         -- rather than a supported mode. This turns most of that into failed
+         -- inserts, which degrade journalling and never control.
+         --
+         -- Partial, and deliberately so: the two indexes are per-table, so one
+         -- process's event and another's decision can still share a number.
+         -- Closing that needs a sequence table both writers take a row lock on,
+         -- which is a transaction per record on the control path's behalf —
+         -- far too much for a case systemd cannot produce.
+         CREATE UNIQUE INDEX IF NOT EXISTS events_seq       ON events (seq);
          CREATE INDEX IF NOT EXISTS decisions_ts     ON decisions (ts_ms);
          CREATE INDEX IF NOT EXISTS decisions_device ON decisions (device);
-         CREATE INDEX IF NOT EXISTS decisions_seq    ON decisions (seq);",
+         CREATE UNIQUE INDEX IF NOT EXISTS decisions_seq    ON decisions (seq);",
     )?;
 
     // Stamped so a future column addition has somewhere to branch on. Without
@@ -622,7 +453,7 @@ fn writer(
         mut next_seq,
     } = prepared;
     let mut last_prune = Utc::now().date_naive();
-    prune(&conn, retention);
+    prune(&conn, retention, session_id);
 
     // Counted, not just logged. A writer failing *every* insert drains the
     // queue faster than a healthy one, so the queue never fills and the dropped
@@ -656,7 +487,7 @@ fn writer(
         let today = Utc::now().date_naive();
         if today != last_prune {
             last_prune = today;
-            prune(&conn, retention);
+            prune(&conn, retention, session_id);
         }
     }
 
@@ -702,7 +533,7 @@ fn write(conn: &Connection, session_id: i64, seq: i64, record: &Record) -> rusql
 
 /// The ring buffer. Retention is the only thing keeping this file bounded, since
 /// nothing else ever deletes a row.
-fn prune(conn: &Connection, retention: RetentionDays) {
+fn prune(conn: &Connection, retention: RetentionDays, keep_session: i64) {
     let cutoff = retention.cutoff(Utc::now()).as_millis();
     let mut removed = 0usize;
     // `sessions` is in the list because the doc below claims retention is the
@@ -712,14 +543,29 @@ fn prune(conn: &Connection, retention: RetentionDays) {
     // `continue`, not `return`: failing on the first table used to skip
     // `decisions` — the larger one, the one retention exists to bound — and the
     // vacuum with it, until the next midnight.
-    for (table, column) in [
-        ("events", "ts_ms"),
-        ("decisions", "ts_ms"),
-        ("sessions", "started_ms"),
+    // The running session is exempt from its own prune. A session row is dated
+    // at *process start* while its events and decisions are dated individually,
+    // so a daemon whose uptime exceeds the retention window — months, for an
+    // unattended controller with a 30-day window — deleted the row describing
+    // it and carried on writing rows that pointed at nothing. Nothing read
+    // `sessions` back until the replay tool did, at which point every export of
+    // a long-running process failed outright.
+    for (table, column, spare_running) in [
+        ("events", "ts_ms", false),
+        ("decisions", "ts_ms", false),
+        ("sessions", "started_ms", true),
     ] {
+        // Bound to match the statement. Handing two parameters to a one-
+        // parameter `DELETE` is an error rusqlite raises and this loop's
+        // `warn!` swallows, which is a quiet way to stop pruning entirely.
+        let (extra, params) = if spare_running {
+            (" AND id != ?2", vec![cutoff, keep_session])
+        } else {
+            ("", vec![cutoff])
+        };
         match conn.execute(
-            &format!("DELETE FROM {table} WHERE {column} < ?1"),
-            [cutoff],
+            &format!("DELETE FROM {table} WHERE {column} < ?1{extra}"),
+            rusqlite::params_from_iter(params),
         ) {
             Ok(n) => removed += n,
             Err(e) => tracing::warn!("Journal: cannot prune {table}: {e}"),
@@ -733,6 +579,116 @@ fn prune(conn: &Connection, retention: RetentionDays) {
         if let Err(e) = conn.execute_batch("PRAGMA incremental_vacuum") {
             tracing::debug!("Journal: incremental_vacuum failed: {e}");
         }
+    }
+}
+
+/// Helpers every test that writes a journal needs.
+///
+/// At module scope and `pub(crate)`, not inside this file's own `mod tests`,
+/// because the reader's tests and the replay tests write journals too and were
+/// otherwise reduced to re-inlining `Journal::open` plus the drop-and-await
+/// dance — down to the same `expect("writer panicked")` string on both sides.
+/// `backdate` below already set the precedent.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+
+    /// Open a journal in a temp dir. The caller drops it to end the writer.
+    pub(crate) fn open<T: Serialize>(
+        dir: &tempfile::TempDir,
+        config: &T,
+    ) -> (Journal, Writer, std::path::PathBuf) {
+        let path = dir.path().join("journal.db");
+        let (journal, writer) = Journal::open(&path, days(3650), "0.0.0-test", config);
+        let writer = writer.expect("journal opens in a temp dir");
+        (journal, writer, path)
+    }
+
+    /// Close the sender and *wait for the writer to finish*, then reopen for
+    /// reading. Sleeping instead would make every test here a race that happens
+    /// to pass on a fast machine.
+    pub(crate) async fn drain(journal: Journal, writer: Writer, path: &Path) -> Connection {
+        drop(journal);
+        writer.await.expect("writer panicked");
+        Connection::open(path).unwrap()
+    }
+
+    /// Drop the journal and wait, without reopening — for callers that will
+    /// read through `read_range` rather than a raw connection.
+    pub(crate) async fn close(journal: Journal, writer: Writer) {
+        drop(journal);
+        writer.await.expect("writer panicked");
+    }
+
+    pub(crate) fn days(n: i64) -> RetentionDays {
+        RetentionDays::new(n).unwrap()
+    }
+
+    pub(crate) fn count(conn: &Connection, sql: &str) -> i64 {
+        conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    /// Everything `main.rs`'s loop does to the journal, minus the I/O: journal
+    /// the event, step, then journal the decision with the state *after* the
+    /// step. That order is what `seq` alignment depends on, so a helper writing
+    /// them any other way would be exercising a daemon that does not exist.
+    ///
+    /// The outcomes come from `device::actuate` against a recording double
+    /// rather than being built here, so the `command` column is filled by the
+    /// same code that fills it in production. Hand-building them made a
+    /// recorded column and a replayed render two expressions of one local
+    /// variable, which is a comparison that cannot fail.
+    ///
+    /// `raw_after` injects a pre-parse capture after the nth event — what the
+    /// subscriber task does from another task in production, and the thing
+    /// `seq` exists to survive.
+    pub(crate) async fn record_with(
+        path: &Path,
+        events: &[Event],
+        raw_after: Option<usize>,
+    ) -> crate::config::SessionConfig {
+        use crate::config::SessionConfig;
+        use crate::controller::Controller;
+        use crate::device::{RecordingBattery, actuate};
+        use crate::engine::Engine;
+        use crate::fixtures::journey;
+        use crate::world::World;
+
+        let config = SessionConfig::test_default();
+        let (j, writer) = Journal::open(path, days(3650), "0.0.0-test", &config);
+        let writer = writer.expect("journal opens in a temp dir");
+        let mut engine = Engine::new(
+            Controller::from_session(&config, &journey::clock_at(0)),
+            World::new(),
+            std::time::Duration::from_secs(config.mqtt_timeout_secs),
+        );
+        let battery = RecordingBattery::new(journey::BATTERY_ID);
+
+        for (i, event) in events.iter().enumerate() {
+            j.event(event);
+            let step = engine.step(event);
+
+            if raw_after == Some(i) {
+                j.raw("shelly", r#"{"total_act_power":0}"#);
+            }
+
+            if let Some(decision) = step.decision {
+                let outcomes = actuate(&battery, &step.directives, ControlPath::Objective).await;
+                j.decision(
+                    event.at(),
+                    ControlPath::Objective,
+                    &decision,
+                    &engine.state(),
+                    &outcomes,
+                );
+            }
+        }
+        close(j, writer).await;
+        config
+    }
+
+    pub(crate) async fn record(path: &Path, events: &[Event]) -> crate::config::SessionConfig {
+        record_with(path, events, None).await
     }
 }
 
@@ -751,6 +707,7 @@ fn backdate(conn: &Connection, days: i64) {
 
 #[cfg(test)]
 mod tests {
+    use super::testing::{count, days, drain};
     use super::*;
     use crate::battery::BatteryState;
     use crate::clock::Clock;
@@ -818,31 +775,10 @@ mod tests {
         }
     }
 
-    /// Opens a journal in a temp dir and returns it with a connection for
-    /// reading back. The journal is dropped by the caller to end the writer.
+    /// This file's journals carry a stand-in config; the reader's tests use a
+    /// real `SessionConfig` because they read it back.
     fn open(dir: &tempfile::TempDir) -> (Journal, Writer, std::path::PathBuf) {
-        let path = dir.path().join("journal.db");
-        let (journal, writer) =
-            Journal::open(&path, days(90), "0.0.0-test", &serde_json::json!({"k": 1}));
-        let writer = writer.expect("journal opens in a temp dir");
-        (journal, writer, path)
-    }
-
-    /// Closes the sender and *waits for the writer to finish*, then reopens the
-    /// file for reading. Sleeping instead would make every test here a race
-    /// that happens to pass on a fast machine.
-    async fn drain(journal: Journal, writer: Writer, path: &Path) -> Connection {
-        drop(journal);
-        writer.await.expect("writer panicked");
-        Connection::open(path).unwrap()
-    }
-
-    fn days(n: i64) -> RetentionDays {
-        RetentionDays::new(n).unwrap()
-    }
-
-    fn count(conn: &Connection, sql: &str) -> i64 {
-        conn.query_row(sql, [], |r| r.get(0)).unwrap()
+        testing::open(dir, &serde_json::json!({"k": 1}))
     }
 
     /// Every row in the file, both tables, in `seq` order.
@@ -1307,13 +1243,42 @@ mod tests {
         assert_eq!(count(&conn, "SELECT count(*) FROM decisions"), 1);
 
         backdate(&conn, 100);
-        prune(&conn, days(90));
+        // Pruning on behalf of some *other* session, so the exemption below is
+        // not what is being measured here.
+        prune(&conn, days(90), 999);
         // All three tables, not just `events`: a prune that forgot `decisions`
         // — the table holding the large rows, the one retention exists to bound
         // — used to pass this test.
         assert_eq!(count(&conn, "SELECT count(*) FROM events"), 0);
         assert_eq!(count(&conn, "SELECT count(*) FROM decisions"), 0);
         assert_eq!(count(&conn, "SELECT count(*) FROM sessions"), 0);
+    }
+
+    /// A session row is dated at *process start* while its events and decisions
+    /// are dated individually, so a daemon whose uptime exceeds the retention
+    /// window would delete the row describing itself and go on writing rows
+    /// pointing at nothing. Nothing read `sessions` back until the replay tool
+    /// did, at which point every export of a long-running process failed
+    /// outright with `QueryReturnedNoRows`.
+    #[tokio::test]
+    async fn prune_spares_the_running_sessions_own_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (journal, writer, path) = open(&dir);
+        journal.raw("shelly", r#"{"old":true}"#);
+        let conn = drain(journal, writer, &path).await;
+
+        let session: i64 = conn
+            .query_row("SELECT id FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        backdate(&conn, 100);
+        prune(&conn, days(90), session);
+
+        assert_eq!(count(&conn, "SELECT count(*) FROM events"), 0);
+        assert_eq!(
+            count(&conn, "SELECT count(*) FROM sessions"),
+            1,
+            "the running session deleted the row describing itself"
+        );
     }
 
     /// **The property the whole architecture exists for**, and it had no test.
@@ -1355,7 +1320,7 @@ mod tests {
         let conn = drain(journal, writer, &path).await;
 
         backdate(&conn, 10);
-        prune(&conn, days(90));
+        prune(&conn, days(90), 1);
         assert_eq!(count(&conn, "SELECT count(*) FROM events"), 1);
     }
 

@@ -12,9 +12,15 @@ use serde::{Deserialize, Serialize};
 use crate::source::shelly::SolarPhase;
 use crate::units::{GridPower, PowerMargin, RetentionDays, Soc, SolarPower};
 
-/// Where the journal lives unless `JOURNAL_PATH` says otherwise. Named because
-/// the export tool has to default to the same file the daemon writes, and two
-/// copies of a path string would eventually stop being the same path.
+/// Where the journal lives unless `JOURNAL_PATH` says otherwise.
+///
+/// Named so the daemon's default and `export --db`'s default are one string
+/// rather than two copies that drift. It is *only* a default, not the effective
+/// path: `export` reads no environment at all — that is what makes a fixture
+/// reproducible from a copied database — so a deployment that sets
+/// `JOURNAL_PATH` has to pass `--db` as well. The alternative, having the tool
+/// read one variable, would make "reads no configuration" a claim with an
+/// exception in it.
 pub const DEFAULT_JOURNAL_PATH: &str = "/var/lib/zendure/journal.db";
 
 fn parse_weekday(s: &str) -> Result<Weekday, String> {

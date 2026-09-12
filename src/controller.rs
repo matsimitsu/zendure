@@ -66,16 +66,20 @@ impl Controller {
         Self::from_session(&config.session(), clock)
     }
 
-    /// Build from the tuning half alone — the same thirteen knobs, taken from
-    /// the shape the journal records and a fixture carries.
+    /// Build from the tuning half alone — thirteen of `SessionConfig`'s
+    /// fourteen fields, taken from the shape the journal records and a fixture
+    /// carries. The fourteenth, `mqtt_timeout_secs`, belongs to `Engine` rather
+    /// than here.
     ///
-    /// This is what makes "a fixture is hermetic" true rather than asserted. A
-    /// replay has no `Config` and must not need one: `SessionConfig` is
-    /// *defined* as the fields a decision depends on, so if the controller can
-    /// be built from it, nothing outside it can be reaching the decision. Going
-    /// through here from `from_config` as well means the two can't drift —
-    /// there is one list, and `Config::session` already makes adding to it a
-    /// compile error.
+    /// This is what makes "a fixture is hermetic" true rather than asserted: a
+    /// replay has no `Config` and must not need one, and a controller that can
+    /// be *constructed* from the fixture's own tuning cannot be secretly
+    /// reading a connection setting. It does not make the controller pure —
+    /// `decide` still reads a `World` and a `Clock`, both of which arrive with
+    /// the events. What keeps the knob list honest is `Config::session`'s
+    /// exhaustive destructure, which turns a new field into a compile error
+    /// there; routing `from_config` through here means there is one list rather
+    /// than two that have to agree.
     pub fn from_session(session: &SessionConfig, clock: &Clock) -> Self {
         let min_mode_duration = Duration::from_secs(session.min_mode_duration_secs);
         let min_decision_interval = Duration::from_secs(session.min_decision_interval_secs);
@@ -140,9 +144,10 @@ impl Controller {
         };
         // Through `from_session` so the knobs come from the one list a fixture
         // would also carry. Only the history differs from a freshly started
-        // controller, and it differs deliberately: an hour of slack on both
-        // cooldowns and no idle start, so a test's first event is never
-        // suppressed by timing it did not ask about.
+        // controller, and it differs deliberately: a minute of slack on both
+        // cooldowns — comfortably past `min_mode_duration` and
+        // `min_decision_interval` — and no idle start, so a test's first event
+        // is never suppressed by timing it did not ask about.
         let mut controller = Self::from_session(&SessionConfig::test_default(), &clock);
         controller.state.last_mode_change = now - Elapsed::of(Duration::from_secs(60));
         controller.state.last_decision = now - Elapsed::of(Duration::from_secs(60));

@@ -237,69 +237,78 @@ pub async fn actuate<B: BatteryController>(
     outcomes
 }
 
+/// A battery that records what it was asked to do, and can be told to fail
+/// on the nth call.
+///
+/// At module scope and `pub(crate)` because the journal's tests need a device
+/// to actuate against: routing their recorded `command` column through
+/// `actuate` rather than hand-building `Outcome`s is what stops a
+/// replay-versus-recording comparison from being two expressions of one local
+/// variable.
+///
+/// Three halves: the order the commands arrived in is the property under test,
+/// a failure has to be injectable at a position other than the last one to
+/// prove the loop keeps going, and it answers for one device id so a directive
+/// addressed elsewhere has somewhere to not go.
+#[cfg(test)]
+pub(crate) struct RecordingBattery {
+    id: DeviceId,
+    applied: std::sync::Mutex<Vec<Command>>,
+    fails_at: Option<usize>,
+}
+
+#[cfg(test)]
+impl RecordingBattery {
+    pub(crate) fn new(id: &str) -> Self {
+        RecordingBattery {
+            id: DeviceId::new(id),
+            applied: std::sync::Mutex::new(Vec::new()),
+            fails_at: None,
+        }
+    }
+
+    pub(crate) fn failing_at(id: &str, index: usize) -> Self {
+        RecordingBattery {
+            id: DeviceId::new(id),
+            applied: std::sync::Mutex::new(Vec::new()),
+            fails_at: Some(index),
+        }
+    }
+
+    pub(crate) fn applied(&self) -> Vec<Command> {
+        self.applied.lock().unwrap().clone()
+    }
+}
+
+#[cfg(test)]
+impl BatteryController for RecordingBattery {
+    type Error = String;
+
+    fn id(&self) -> &DeviceId {
+        &self.id
+    }
+
+    async fn apply(&self, command: &Command) -> Result<(), String> {
+        // The guard is scoped and dropped before the function's implicit
+        // await point for the same reason `ZendureClient::apply_command`
+        // scopes its: a `MutexGuard` alive across an await would cost the
+        // future its `Send`, and the trait demands it.
+        let index = {
+            let mut applied = self.applied.lock().unwrap();
+            applied.push(*command);
+            applied.len() - 1
+        };
+
+        if self.fails_at == Some(index) {
+            return Err("device unreachable".to_string());
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::units::Setpoint;
-    use std::sync::Mutex;
-
-    /// Records what it was asked to do, and can be told to fail on the nth
-    /// call. Three halves now: the order the commands arrived in is the
-    /// property under test, a failure has to be injectable at a position other
-    /// than the last one to prove the loop keeps going, and it answers for one
-    /// device id so a directive addressed elsewhere has somewhere to not go.
-    struct RecordingBattery {
-        id: DeviceId,
-        applied: Mutex<Vec<Command>>,
-        fails_at: Option<usize>,
-    }
-
-    impl RecordingBattery {
-        fn new(id: &str) -> Self {
-            RecordingBattery {
-                id: DeviceId::new(id),
-                applied: Mutex::new(Vec::new()),
-                fails_at: None,
-            }
-        }
-
-        fn failing_at(id: &str, index: usize) -> Self {
-            RecordingBattery {
-                id: DeviceId::new(id),
-                applied: Mutex::new(Vec::new()),
-                fails_at: Some(index),
-            }
-        }
-
-        fn applied(&self) -> Vec<Command> {
-            self.applied.lock().unwrap().clone()
-        }
-    }
-
-    impl BatteryController for RecordingBattery {
-        type Error = String;
-
-        fn id(&self) -> &DeviceId {
-            &self.id
-        }
-
-        async fn apply(&self, command: &Command) -> Result<(), String> {
-            // The guard is scoped and dropped before the function's implicit
-            // await point for the same reason `ZendureClient::apply_command`
-            // scopes its: a `MutexGuard` alive across an await would cost the
-            // future its `Send`, and the trait demands it.
-            let index = {
-                let mut applied = self.applied.lock().unwrap();
-                applied.push(*command);
-                applied.len() - 1
-            };
-
-            if self.fails_at == Some(index) {
-                return Err("device unreachable".to_string());
-            }
-            Ok(())
-        }
-    }
 
     fn directive(device: &str, command: Command) -> Directive {
         Directive::Battery {
@@ -308,11 +317,8 @@ mod tests {
         }
     }
 
-    /// Every directive is applied, not just the first — the regression the old
-    /// `commands.first()` actuation shipped. A single adapter answers for a
-    /// single device, so the multi-directive list it can be handed is two
-    /// commands to the same box; the second device's half of the seam is the
-    /// routing test below, and step 9's second adapter.
+    use crate::units::Setpoint;
+
     #[tokio::test]
     async fn applies_every_directive_in_order() {
         let battery = RecordingBattery::new("battery-a");

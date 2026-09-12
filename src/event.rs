@@ -30,6 +30,18 @@ pub enum Event {
 }
 
 impl Event {
+    /// Every string `kind` can return.
+    ///
+    /// The journal's `events` table also holds rows that are *not* `Event`s —
+    /// the pre-parse `shelly` and `zendure_poll` captures — so a reader
+    /// rebuilding the fold has to select on kind, and needs this list. Keeping
+    /// it here rather than in the reader is what lets a test pin it against the
+    /// enum: a variant added to `Event` without an entry here would otherwise be
+    /// journalled, be replayable, and be silently dropped from every fixture —
+    /// and because `expected` is derived from the events that survive the
+    /// filter, `--verify` would keep passing on a replay missing its inputs.
+    pub const KINDS: [&'static str; 3] = ["meter", "device_update", "mqtt_timeout"];
+
     /// The whole clock the event was captured with — hour, weekday and day
     /// ordinal as well as the instant.
     ///
@@ -60,64 +72,6 @@ impl Event {
             Event::DeviceUpdate { .. } => "device_update",
             Event::MqttTimeout { .. } => "mqtt_timeout",
         }
-    }
-}
-
-/// A shared event stream for tests that need a *run* rather than one event.
-///
-/// Lives next to `Event` for the same reason `Clock::test_at` lives next to
-/// `Clock`: two modules need the same journey and a second copy would be a
-/// second thing to keep in step. Its constants are public for the same reason —
-/// a caller building the world this journey is folded into has to agree with it
-/// on the device id and the day, or the midnight reset fires on the first step.
-#[cfg(test)]
-pub(crate) mod journey {
-    use super::*;
-    use crate::battery::BatteryState;
-    use crate::units::{GridPower, Soc};
-
-    pub(crate) const NOW_MS: i64 = 1_000_000_000;
-    pub(crate) const DAY: u32 = 100;
-    pub(crate) const BATTERY_ID: &str = "test-battery";
-
-    pub(crate) fn clock_at(secs: i64) -> Clock {
-        Clock {
-            day_ordinal: DAY,
-            ..Clock::test_at(NOW_MS + secs * 1000)
-        }
-    }
-
-    /// A sequence chosen to write every field of the engine's snapshot: swings
-    /// across both start thresholds (mode changes, cooldown stamps, transition
-    /// counters), a device update, and a timeout/resume pair, so a snapshot
-    /// taken between them has to carry `mqtt_timed_out` too.
-    pub(crate) fn events() -> Vec<Event> {
-        let meter_at = |secs, total| Event::Meter {
-            at: clock_at(secs),
-            grid: MeterReading::total_only(GridPower(total)),
-            solar: SolarPower::new(0.0),
-        };
-        vec![
-            meter_at(0, -500.0),
-            meter_at(20, -800.0),
-            meter_at(40, 300.0),
-            // Deliberately *not* the same battery a fixture world starts with:
-            // an update that changes nothing leaves a restored world
-            // indistinguishable from a fresh one, and the snapshot's `world`
-            // stops being under test.
-            Event::DeviceUpdate {
-                at: clock_at(60),
-                id: DeviceId::new(BATTERY_ID),
-                measurement: Measurement::Battery(BatteryState {
-                    soc: Soc::new(81),
-                    ..BatteryState::test_sample()
-                }),
-            },
-            Event::MqttTimeout { at: clock_at(80) },
-            meter_at(100, 250.0),
-            meter_at(120, -600.0),
-            meter_at(140, 400.0),
-        ]
     }
 }
 
@@ -194,6 +148,26 @@ mod tests {
         assert_eq!(meter().kind(), "meter");
         assert_eq!(device_update().kind(), "device_update");
         assert_eq!(Event::MqttTimeout { at: clock() }.kind(), "mqtt_timeout");
+    }
+
+    /// `KINDS` is what a journal reader selects on to separate foldable events
+    /// from the raw pre-parse captures sharing the table. A variant missing
+    /// from it is dropped from every fixture silently — and silently is the
+    /// operative word, since `expected` is derived from whatever survives the
+    /// filter, so `--verify` would keep passing against a replay missing its
+    /// inputs. Both directions: nothing absent, nothing stale.
+    #[test]
+    fn kinds_lists_every_variant_and_nothing_else() {
+        let produced: Vec<&str> = every_variant().iter().map(|e| e.kind()).collect();
+        for kind in Event::KINDS {
+            assert!(
+                produced.contains(&kind),
+                "{kind} is in KINDS but unreachable"
+            );
+        }
+        for kind in produced {
+            assert!(Event::KINDS.contains(&kind), "{kind} is missing from KINDS");
+        }
     }
 
     /// `at()` reads through to the clock on every variant — it is what fills the

@@ -34,7 +34,10 @@ zendure export --from <when> --to <when> [--db <path>] [--out <file>]
 zendure replay <fixture> [--verify] [--set <knob>=<value>]...
 ```
 
-`<when>` is unix milliseconds or RFC 3339. See [Replay](#replay) below.
+`<when>` is unix milliseconds or RFC 3339. `--db` defaults to
+`/var/lib/zendure/journal.db` and does **not** read `JOURNAL_PATH` — these
+subcommands read no environment at all, so a deployment that moves the journal
+has to say `--db` too. See [Replay](#replay) below.
 
 ## Configuration
 
@@ -119,7 +122,7 @@ failsafe latch — so a single decision row is enough to seed a replay. Every ro
 carries the `session_id` of the process that wrote it, which is what joins it to
 the `config_json` that governed it.
 
-`seq` orders the whole file. The two row tables have independent `id`
+`seq` orders the whole file, and `export` is the reason it exists. The two row tables have independent `id`
 sequences, so `seq` is the only way to ask "what happened after this row?"
 across both — which is what seeding a replay from a decision and then feeding it
 the events that followed requires. It is assigned by the single writer thread in
@@ -128,9 +131,12 @@ restarting per session, and leaves gaps where a write failed or a prune deleted.
 
 `events.kind` is one of `shelly` and `zendure_poll` (payloads captured verbatim,
 *before* parsing) or `meter`, `device_update` and `mqtt_timeout` (the engine's
-own events, replayable). The first row of every session is a `device_update`
-carrying the startup poll, so the world a replay rebuilds from events is the same
-world the controller decided against from its first reading.
+own events, replayable). The first *foldable* event of every session is a
+`device_update` carrying the startup poll, so the world a replay rebuilds from
+events is the same world the controller decided against from its first reading.
+It is not necessarily the first row: the MQTT subscriber starts a moment earlier
+and writes its raw `shelly` captures from its own task, so one of those often
+lands first. Those are not fold inputs, which is why it does not matter.
 
 `decisions.kind` is `decision` or `failsafe`, with one
 row per device actuated — one today, more once a second battery or a charger
@@ -194,8 +200,11 @@ look like one that was commanded fully.
 
 `--set <knob>=<value>` changes one tuning knob before replaying, for asking what
 a different setting would have done — `zendure replay incident.json --set
-min_soc=40`. The knobs are the ones in `sessions.config_json`, and an unknown
-name is an error rather than a silent no-op.
+min_soc=40`. The knobs are the ones in `sessions.config_json`; an unknown name is
+an error rather than a silent no-op, and a value outside a knob's range is
+clamped by the same constructor the daemon uses rather than waved through.
+It cannot be combined with `--verify`, which would compare two differently tuned
+controllers and report a divergence by construction.
 
 **A fixture is hermetic.** It carries the tuning it was decided under, the engine
 snapshot to resume from, and the events — and nothing about how to reach a broker

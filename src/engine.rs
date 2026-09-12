@@ -185,18 +185,16 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::command::Command;
-    use crate::event::journey::{BATTERY_ID, DAY, NOW_MS};
+    use crate::fixtures::journey::{self, BATTERY_ID, DAY, NOW_MS};
     use crate::units::{GridPower, Soc, SolarPower};
     use crate::world::{DeviceId, Measurement};
 
+    /// The journey's own starting instant. Shared rather than rebuilt here: the
+    /// day ordinal has to match what `Controller::test_default(NOW_MS, DAY)` is
+    /// given, or the midnight reset fires on the first step — and two copies
+    /// that must agree is exactly what moving the fixture out was for.
     fn clock() -> Clock {
-        // `DAY` spelled out rather than relying on the shared fixture happening
-        // to use the same ordinal: `Controller::test_default(NOW_MS, DAY)` below
-        // has to agree with it, or the midnight reset fires on the first step.
-        Clock {
-            day_ordinal: DAY,
-            ..Clock::test_at(NOW_MS)
-        }
+        journey::clock_at(0)
     }
 
     fn battery() -> BatteryState {
@@ -385,9 +383,6 @@ mod tests {
         assert_eq!(steps_a, steps_b);
     }
 
-    /// A clock `secs` after `NOW_MS`, so a sequence can actually advance the
-    /// controller's timers. `clock()` alone holds time still, which is fine for
-    /// single-step tests and useless for a fold.
     /// Split after the timeout, so the second half opens with the engine
     /// latched into the failsafe and the first meter reading after the boundary
     /// has to produce the `"operational"` transition.
@@ -405,7 +400,7 @@ mod tests {
     /// is what proves `mqtt_timed_out` came across with everything else.
     #[test]
     fn a_restored_engine_resumes_the_fold_exactly() {
-        let events = crate::event::journey::events();
+        let events = crate::fixtures::journey::events();
 
         let mut continuous = engine();
         let expected: Vec<Step> = events.iter().map(|e| continuous.step(e)).collect();
@@ -442,7 +437,7 @@ mod tests {
     /// exercising any state and the equivalence would be vacuous.
     #[test]
     fn the_same_journey_diverges_without_the_snapshot() {
-        let events = crate::event::journey::events();
+        let events = crate::fixtures::journey::events();
 
         let mut continuous = engine();
         let expected: Vec<Step> = events.iter().map(|e| continuous.step(e)).collect();

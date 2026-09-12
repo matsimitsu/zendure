@@ -3,11 +3,14 @@ mod battery;
 mod cli;
 mod clock;
 mod command;
+mod commands;
 mod config;
 mod controller;
 mod device;
 mod engine;
 mod event;
+#[cfg(test)]
+mod fixtures;
 mod journal;
 mod models;
 mod mqtt;
@@ -139,79 +142,50 @@ async fn publish_poll_telemetry(
     rte_tracker.save();
 }
 
-/// `zendure export` — a slice of the journal as a replay fixture.
-///
-/// Reads no configuration: a fixture carries the tuning it was decided under,
-/// recorded in the journal's own session row, and nothing about how to reach a
-/// device. That is what makes this runnable against a copied database on a
-/// laptop with no broker in sight.
-fn export(
-    db: &std::path::Path,
-    from: units::Timestamp,
-    to: units::Timestamp,
-    out: Option<&std::path::Path>,
+/// End a subcommand, printing any failure as a message rather than as a
+/// `Debug`-formatted error struct.
+fn finish(
+    result: Result<(), Box<dyn std::error::Error>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let slice = journal::read_range(db, from, to)?;
-    let fixture = replay::from_slice(slice)?;
-    let json = serde_json::to_string_pretty(&fixture)?;
-
-    match out {
-        Some(path) => {
-            std::fs::write(path, json + "\n")?;
-            eprintln!(
-                "wrote {} events to {} (seeded at {}ms)",
-                fixture.events.len(),
-                path.display(),
-                fixture.seed.at_ms
-            );
-        }
-        None => println!("{json}"),
-    }
-    Ok(())
-}
-
-/// `zendure replay` — the same events through the same fold, printed.
-fn run_replay(
-    path: &std::path::Path,
-    verify: bool,
-    overrides: &[(String, String)],
-) -> Result<(), Box<dyn std::error::Error>> {
-    let fixture: replay::Fixture = serde_json::from_str(&std::fs::read_to_string(path)?)?;
-    let frames = replay::run(&fixture, overrides)?;
-
-    println!("{}", replay::render(&frames));
-
-    if verify {
-        if !overrides.is_empty() {
-            // Verifying an overridden replay asks whether a controller tuned
-            // differently would have done the same thing, which is not what
-            // --verify means and is nearly always "no".
-            eprintln!("warning: --verify against --set overrides compares different tuning");
-        }
-        replay::verify(&fixture, &frames)?;
-        eprintln!("verified: {} frames match the recording", frames.len());
+    if let Err(e) = result {
+        eprintln!("{e}");
+        std::process::exit(1);
     }
     Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    match cli::parse(std::env::args().skip(1))? {
+    // `args_os` rather than `args`, which panics on argv that is not UTF-8 —
+    // the parser has a clean error for an argument it does not understand, and
+    // a panic is not it.
+    let args = std::env::args_os()
+        .skip(1)
+        .map(|a| a.to_string_lossy().into_owned());
+
+    match cli::parse(args) {
         // Falls through to the controller below. No arguments has always meant
         // "run", and that is how the service invokes it.
-        cli::Invocation::Daemon => {}
-        cli::Invocation::Help => {
+        Ok(cli::Invocation::Daemon) => {}
+        Ok(cli::Invocation::Help) => {
             print!("{}", cli::HELP);
             return Ok(());
         }
-        cli::Invocation::Export { from, to, db, out } => {
-            return export(&db, from, to, out.as_deref());
+        Ok(cli::Invocation::Export { from, to, db, out }) => {
+            return finish(commands::export(&db, from, to, out.as_deref()));
         }
-        cli::Invocation::Replay {
+        Ok(cli::Invocation::Replay {
             fixture,
             verify,
             overrides,
-        } => return run_replay(&fixture, verify, &overrides),
+        }) => return finish(commands::replay_fixture(&fixture, verify, &overrides)),
+        Err(message) => {
+            // Printed and exited rather than returned. `main` renders an `Err`
+            // with `Debug`, which turns a multi-line usage message into one
+            // quoted line full of `\n`.
+            eprintln!("{message}");
+            std::process::exit(2);
+        }
     }
 
     // `RUST_LOG` wins outright when it is set. It used to be merged with a

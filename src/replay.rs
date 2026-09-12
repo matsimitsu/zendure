@@ -21,6 +21,7 @@
 //! device), the snapshot to resume from, and the events. No environment, no
 //! network, no clock — `Engine::step` reads none of them.
 
+use std::fmt::Display;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -30,12 +31,17 @@ use crate::config::SessionConfig;
 use crate::controller::Controller;
 use crate::engine::{Engine, EngineState};
 use crate::event::Event;
-use crate::journal::{RecordedDecision, SeqEvent, Slice};
+use crate::journal::read::Recording;
 use crate::units::Timestamp;
-use crate::world::World;
+use crate::world::{DeviceId, World};
 
-/// Bumped only for a change that an older build would mis-read. New fields
-/// arrive with `serde(default)` and do not move it.
+/// The fixture format this build reads and writes.
+///
+/// Checked exactly, not as a floor: a fixture from a *newer* build may carry
+/// fields that change what its events mean, and one from an older build was
+/// written before some invariant this build relies on. Additive changes keep
+/// the number and arrive with `serde(default)`; anything that would make either
+/// side read the other wrong moves it.
 const FORMAT: u32 = 1;
 
 /// Rendered in place of a command list when a step produced none. A blank would
@@ -58,7 +64,11 @@ pub struct Fixture {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMeta {
-    pub started_at_ms: i64,
+    /// When the recording session started — the journal's own `sessions` row,
+    /// not the seed's timestamp. The two answer different questions, and
+    /// holding the second under the first's name made a fixture quietly claim a
+    /// session began whenever the range happened to be anchored.
+    pub started_at: Timestamp,
     pub version: String,
     pub config: SessionConfig,
 }
@@ -68,7 +78,7 @@ pub struct SessionMeta {
 /// column, and splitting it is how `mqtt_timed_out` got lost once already.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Seed {
-    pub at_ms: i64,
+    pub at: Timestamp,
     pub state: EngineState,
 }
 
@@ -92,6 +102,19 @@ pub fn replay(engine: &mut Engine, events: &[Event]) -> Vec<Frame> {
         .collect()
 }
 
+/// One commanded device, as both a replay and a recording render it.
+///
+/// The only place this format exists. A replayed step holds a `Directive` and a
+/// recording holds two text columns, and if the two rendered differently by so
+/// much as a space, `--verify` would report a divergence on every frame that
+/// commanded anything — so it is one function rather than two `format!` calls
+/// that happen to agree today. `Directive` deliberately has no `Display` of its
+/// own: `Command`'s `Display` is the journal's wire format and a device serial
+/// has no business in it, which is exactly why the id rides on the `Directive`.
+fn addressed(device: &DeviceId, command: &dyn Display) -> String {
+    format!("{device} {command}")
+}
+
 /// `<at_ms>ms: <device> <command>`, one line per frame, no trailing newline.
 ///
 /// The device id is on every line even though there is one battery today. The
@@ -99,100 +122,85 @@ pub fn replay(engine: &mut Engine, events: &[Event]) -> Vec<Frame> {
 /// exists (`allocate`), so a render that showed only commands would hide
 /// exactly the thing that fence was built to make loud.
 pub fn render(frames: &[Frame]) -> String {
+    lines(frames).join("\n")
+}
+
+fn lines(frames: &[Frame]) -> Vec<String> {
     frames
         .iter()
         .map(|frame| {
-            let body = frame
-                .directives
-                .iter()
-                .map(|d| format!("{} {}", d.device(), d.describe()))
-                .collect::<Vec<_>>();
-            line(frame.at.as_millis(), body)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn line(at_ms: i64, body: Vec<String>) -> String {
-    if body.is_empty() {
-        format!("{at_ms}ms: {NOTHING}")
-    } else {
-        format!("{at_ms}ms: {}", body.join(", "))
-    }
-}
-
-/// What the daemon commanded, in `render`'s format, aligned to the events.
-///
-/// Alignment is by `seq`, not by timestamp. A decision row carries the same
-/// millisecond as the event that produced it, so timestamps cannot separate two
-/// events that shared one — and the raw `shelly` capture is written from a
-/// different task, so it can land between an event and its decision and make
-/// "the next row" the wrong row. `seq` is assigned by the single writer in
-/// arrival order, which makes "the decision rows after this event and before
-/// the next" exact.
-fn recorded_lines(events: &[SeqEvent], decisions: &[RecordedDecision]) -> Vec<String> {
-    events
-        .iter()
-        .enumerate()
-        .map(|(i, event)| {
-            let until = events.get(i + 1).map(|next| next.seq).unwrap_or(i64::MAX);
-            let body = decisions
-                .iter()
-                .filter(|d| d.seq > event.seq && d.seq < until)
-                .filter_map(|d| match (&d.device, &d.command) {
-                    // A decision that commanded nothing still gets a row, with
-                    // both columns null. That is an empty command list, not a
-                    // missing one.
-                    (Some(device), Some(command)) => Some(format!("{device} {command}")),
-                    _ => None,
-                })
-                .collect();
-            line(event.event.at().as_millis(), body)
+            line(
+                frame.at,
+                frame
+                    .directives
+                    .iter()
+                    .map(|d| addressed(d.device(), &d.describe())),
+            )
         })
         .collect()
 }
 
-/// Turn a slice of the journal into a fixture.
-pub fn from_slice(slice: Slice) -> Result<Fixture, String> {
-    let Slice {
+fn line(at: Timestamp, body: impl Iterator<Item = String>) -> String {
+    let body: Vec<String> = body.collect();
+    let at = at.as_millis();
+    if body.is_empty() {
+        format!("{at}ms: {NOTHING}")
+    } else {
+        format!("{at}ms: {}", body.join(", "))
+    }
+}
+
+/// Turn a recorded run into a fixture.
+///
+/// Returns the reader's warnings along with its own for the caller to print.
+/// This module has no business deciding how loud to be, and a function that
+/// prints cannot be called from a test without making noise in the suite.
+pub fn from_recording(recording: Recording) -> Result<(Fixture, Vec<String>), String> {
+    let Recording {
         version,
+        started_at,
         config,
         seed,
-        events,
-        decisions,
-        spans_sessions,
-    } = slice;
+        frames,
+        mut warnings,
+    } = recording;
 
-    if events.is_empty() {
+    if frames.is_empty() {
         return Err("no replayable events in that range".to_string());
     }
-    if spans_sessions {
-        eprintln!(
-            "warning: this range spans a restart; the fixture carries one session's tuning, \
-             so part of it may replay under knobs it was not decided with"
-        );
-    }
 
-    let expected = recorded_lines(&events, &decisions);
+    let expected = frames
+        .iter()
+        .map(|f| {
+            line(
+                f.event.at(),
+                f.commands
+                    .iter()
+                    .map(|(device, cmd)| addressed(device, cmd)),
+            )
+        })
+        .collect();
 
     // Without a recorded snapshot there is nothing to resume from, so the seed
     // is what a controller starting just before the first event would hold. The
-    // day ordinal has to come from that event's own clock — it is the only
-    // place in a fixture that knows one, and the midnight reset reads it.
+    // day ordinal has to come from that event's own clock — it is the only place
+    // in a fixture that knows one, and the midnight reset reads it.
     let seed = match seed {
         Some(seed) => Seed {
-            at_ms: seed.at.as_millis(),
+            at: seed.at,
             state: seed.state,
         },
         None => {
-            let first = events[0].event.clock();
-            eprintln!(
-                "warning: no decision recorded at or before the start of this range; \
-                 seeding from a fresh controller at {}ms",
+            let first = frames[0].event.clock();
+            warnings.push(format!(
+                "no decision was recorded at or before the start of this range, so the seed is a \
+                 controller starting fresh at {}ms with an empty world. Unless the range opens on \
+                 the session's own startup event, the replay has no battery to decide about and \
+                 will diverge at every frame",
                 first.now.as_millis()
-            );
+            ));
             Seed {
-                at_ms: first.now.as_millis(),
+                at: first.now,
                 state: EngineState {
                     world: World::new(),
                     controller: Controller::from_session(&config, first).state(),
@@ -202,17 +210,20 @@ pub fn from_slice(slice: Slice) -> Result<Fixture, String> {
         }
     };
 
-    Ok(Fixture {
-        format: FORMAT,
-        session: SessionMeta {
-            started_at_ms: seed.at_ms,
-            version,
-            config,
+    Ok((
+        Fixture {
+            format: FORMAT,
+            session: SessionMeta {
+                started_at,
+                version,
+                config,
+            },
+            seed,
+            events: frames.into_iter().map(|f| f.event).collect(),
+            expected,
         },
-        seed,
-        events: events.into_iter().map(|e| e.event).collect(),
-        expected,
-    })
+        warnings,
+    ))
 }
 
 /// Replace one tuning knob by name.
@@ -222,6 +233,12 @@ pub fn from_slice(slice: Slice) -> Result<Fixture, String> {
 /// already writes. A key that is not already present is an error: a typo that
 /// silently changed nothing would make a what-if quietly answer the original
 /// question.
+///
+/// A value still has to survive its knob's own constructor —
+/// `--set min_soc=1000` clamps to 100 rather than producing an SOC no battery
+/// can reach — because the clamping newtypes deserialize through it. That is
+/// not this function's doing, and it has to stay true: see
+/// `validating_deserialize` in `units.rs`.
 pub fn apply_overrides(
     config: &SessionConfig,
     overrides: &[(String, String)],
@@ -233,14 +250,12 @@ pub fn apply_overrides(
 
     for (key, raw) in overrides {
         if !map.contains_key(key) {
-            let mut known: Vec<&String> = map.keys().collect();
-            known.sort();
-            let known = known
-                .iter()
-                .map(|k| k.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(format!("unknown tuning knob `{key}`; known knobs: {known}"));
+            let mut known: Vec<&str> = map.keys().map(String::as_str).collect();
+            known.sort_unstable();
+            return Err(format!(
+                "unknown tuning knob `{key}`; known knobs: {}",
+                known.join(", ")
+            ));
         }
         // Parsed as JSON so numbers stay numbers and `null` reaches an
         // `Option`; anything else is taken as a string, which is what
@@ -284,11 +299,10 @@ pub fn run(fixture: &Fixture, overrides: &[(String, String)]) -> Result<Vec<Fram
 
 /// Diff a replay against what was recorded. `Ok(())` when they agree.
 pub fn verify(fixture: &Fixture, frames: &[Frame]) -> Result<(), String> {
-    let actual: Vec<String> = render(frames).lines().map(str::to_string).collect();
-
     if fixture.expected.is_empty() {
         return Err("fixture has no `expected` to verify against".to_string());
     }
+    let actual = lines(frames);
     if fixture.expected.len() != actual.len() {
         return Err(format!(
             "replay produced {} frames, the recording has {}",

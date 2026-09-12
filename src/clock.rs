@@ -52,7 +52,7 @@ impl Clock {
         let utc = Utc::now();
         let local = utc.with_timezone(&tz);
         Self {
-            now: Timestamp::from_millis(utc.timestamp_millis()),
+            now: utc.into(),
             hour: local.hour(),
             day_ordinal: local.ordinal(),
             weekday: local.weekday(),

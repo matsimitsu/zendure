@@ -54,6 +54,33 @@ macro_rules! forward_display {
 // behaviour by naming it rather than by remembering to reproduce it.
 pub(crate) use forward_display;
 
+/// `Deserialize` for a newtype whose constructor enforces an invariant, routing
+/// the wire value through that constructor instead of writing the field
+/// directly.
+///
+/// `#[serde(transparent)]` derives *both* halves, and the derived `Deserialize`
+/// builds the struct field-by-field — so every clamp in this module was
+/// bypassed by anything that read a value back. That did not matter while the
+/// only reader was the journal reading its own writes, because everything
+/// written had already been through a constructor. It started mattering the
+/// moment a person could hand us a number: `replay --set min_soc=1000` produced
+/// `Soc(1000)`, and a hand-edited fixture could put any SOC in the world.
+/// CLAUDE.md's rule is that validation lives in the constructor and no call
+/// site re-checks; a derived `Deserialize` is a call site that skips it.
+///
+/// Serialization stays `transparent`, so the wire format — MQTT, HA discovery,
+/// the journal, a fixture — is unchanged in both directions for any value that
+/// was valid to begin with.
+macro_rules! validating_deserialize {
+    ($t:ty, $inner:ty, $ctor:expr) => {
+        impl<'de> Deserialize<'de> for $t {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                <$inner as Deserialize<'de>>::deserialize(d).map($ctor)
+            }
+        }
+    };
+}
+
 // --- Watts: the integer-watt arithmetic unit -------------------------------
 
 /// Integer watts. The unit the device speaks and the controller computes in —
@@ -158,9 +185,11 @@ impl Add<BatteryPower> for GridPower {
 
 /// Solar inverter production on the configured meter phase, in watts. Never
 /// negative — production, not a net flow.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct SolarPower(f64);
+
+validating_deserialize!(SolarPower, f64, SolarPower::new);
 
 forward_display!(SolarPower, f64);
 
@@ -267,9 +296,11 @@ impl PowerCap {
 
 /// A commanded power setpoint, in watts. Never negative — the direction comes
 /// from [`ControlMode`](crate::models::ControlMode), not from the sign.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct Setpoint(i32);
+
+validating_deserialize!(Setpoint, i32, Setpoint::new);
 
 forward_display!(Setpoint, i32);
 
@@ -325,9 +356,11 @@ impl PowerMargin {
 
 /// State of charge, as whole percent. Clamped to 0–100 on construction, so no
 /// call site re-checks the range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct Soc(u32);
+
+validating_deserialize!(Soc, u32, Soc::new);
 
 forward_display!(Soc, u32);
 
@@ -453,6 +486,19 @@ impl Timestamp {
     }
 }
 
+/// The one place a `chrono` instant becomes ours.
+///
+/// It was open-coded as `Timestamp::from_millis(dt.timestamp_millis())` at four
+/// sites — the clock, the journal's raw capture, retention's cutoff, and the
+/// CLI's argument parser. CLAUDE.md's rule is that a quantity crossing a
+/// boundary is one named call, not a conversion spelled out wherever it is
+/// needed.
+impl<Tz: chrono::TimeZone> From<chrono::DateTime<Tz>> for Timestamp {
+    fn from(dt: chrono::DateTime<Tz>) -> Self {
+        Timestamp(dt.timestamp_millis())
+    }
+}
+
 /// A signed span between two [`Timestamp`]s, in milliseconds.
 ///
 /// Signed, and deliberately not a `Duration`: a backwards NTP step makes a span
@@ -553,7 +599,7 @@ impl RetentionDays {
     /// Takes `now` rather than reading the clock, so the boundary is testable
     /// without waiting a day — the same reason the controller takes a `Clock`.
     pub fn cutoff(self, now: chrono::DateTime<chrono::Utc>) -> Timestamp {
-        Timestamp((now - chrono::Duration::days(self.0)).timestamp_millis())
+        (now - chrono::Duration::days(self.0)).into()
     }
 }
 

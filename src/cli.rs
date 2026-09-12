@@ -59,7 +59,7 @@ pub enum Invocation {
 
 /// `args` is everything after the program name.
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Invocation, String> {
-    let mut args = args.into_iter().peekable();
+    let mut args = args.into_iter();
 
     let Some(first) = args.next() else {
         return Ok(Invocation::Daemon);
@@ -126,6 +126,19 @@ fn parse_replay<I: Iterator<Item = String>>(mut args: I) -> Result<Invocation, S
         }
     }
 
+    // Rejected here rather than warned about later: `--verify` asks whether the
+    // engine still decides what it decided, and `--set` changes what it is
+    // deciding with, so together they compare two different controllers and the
+    // answer is "they differ" almost by construction. It is an argument
+    // combination, and every other argument error already lives in this file.
+    if verify && !overrides.is_empty() {
+        return Err(
+            "replay: --verify compares a replay against what was recorded, so it cannot be \
+             combined with --set, which replays under different tuning"
+                .to_string(),
+        );
+    }
+
     Ok(Invocation::Replay {
         fixture: fixture.ok_or("replay: a fixture path is required")?,
         verify,
@@ -144,6 +157,12 @@ fn value<I: Iterator<Item = String>>(args: &mut I, flag: &str) -> Result<String,
 /// date. Digits are unambiguous — no RFC 3339 instant is all digits — so the
 /// two can share one argument without a flag to say which.
 fn instant(raw: &str) -> Result<Timestamp, String> {
+    if raw.is_empty() {
+        return Err("a timestamp is required, as unix milliseconds or RFC 3339".to_string());
+    }
+    // `all` on an empty string is vacuously true, which is why the emptiness
+    // check above comes first — otherwise `--from ""` reported that an empty
+    // string was too large to be milliseconds.
     if raw.chars().all(|c| c.is_ascii_digit()) {
         return raw
             .parse()
@@ -151,7 +170,7 @@ fn instant(raw: &str) -> Result<Timestamp, String> {
             .map_err(|_| format!("`{raw}` is too large to be unix milliseconds"));
     }
     DateTime::parse_from_rfc3339(raw)
-        .map(|dt| Timestamp::from_millis(dt.timestamp_millis()))
+        .map(Timestamp::from)
         .map_err(|e| format!("`{raw}` is neither unix milliseconds nor RFC 3339: {e}"))
 }
 
@@ -207,13 +226,46 @@ mod tests {
     #[test]
     fn replay_collects_overrides() {
         assert_eq!(
-            parse_args(&["replay", "f.json", "--verify", "--set", "min_soc=40"]),
+            parse_args(&[
+                "replay",
+                "f.json",
+                "--set",
+                "min_soc=40",
+                "--set",
+                "max_soc=90"
+            ]),
+            Ok(Invocation::Replay {
+                fixture: PathBuf::from("f.json"),
+                verify: false,
+                overrides: vec![
+                    ("min_soc".to_string(), "40".to_string()),
+                    ("max_soc".to_string(), "90".to_string()),
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn replay_takes_verify_on_its_own() {
+        assert_eq!(
+            parse_args(&["replay", "f.json", "--verify"]),
             Ok(Invocation::Replay {
                 fixture: PathBuf::from("f.json"),
                 verify: true,
-                overrides: vec![("min_soc".to_string(), "40".to_string())],
+                overrides: vec![],
             })
         );
+    }
+
+    /// `--verify` asks whether the engine still decides what it decided, and
+    /// `--set` changes what it is deciding with — together they compare two
+    /// different controllers and answer "they differ" by construction. Rejected
+    /// at parse time rather than warned about after the work is done.
+    #[test]
+    fn replay_refuses_to_verify_against_changed_tuning() {
+        let err = parse_args(&["replay", "f.json", "--verify", "--set", "min_soc=40"]).unwrap_err();
+        assert!(err.contains("--verify"), "{err}");
+        assert!(err.contains("--set"), "{err}");
     }
 
     /// `--set` without an `=` is a typo, and guessing at it would silently
