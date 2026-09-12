@@ -7,6 +7,7 @@ use crate::clock::Clock;
 use crate::config::Config;
 use crate::models::{ControlDecision, ControlMode, CycleCounts};
 use crate::units::{Elapsed, GridPower, PowerMargin, Setpoint, Soc, SolarPower, Timestamp};
+use crate::world::World;
 
 const RAMP_FACTOR: f64 = 0.75;
 
@@ -108,32 +109,36 @@ impl Controller {
         }
     }
 
-    /// Returns `None` if the minimum decision interval hasn't elapsed yet.
-    ///
-    /// `solar_power` is the solar inverter's production, read as the export
-    /// on the configured solar phase.
-    pub fn decide(
-        &mut self,
-        grid_power: GridPower,
-        solar_power: SolarPower,
-        battery: &BatteryState,
-        clock: &Clock,
-    ) -> Option<ControlDecision> {
+    /// Returns `None` if the minimum decision interval hasn't elapsed, or if there
+    /// is no battery to control.
+    pub fn decide_world(&mut self, world: &World, clock: &Clock) -> Option<ControlDecision> {
         if clock.now - self.last_decision < self.min_decision_interval {
             return None;
         }
 
-        Some(self.decide_at(grid_power, solar_power, battery, clock))
+        // Unreachable in production — main.rs seeds the world from the startup
+        // poll, which fails startup if it fails — but the device map makes it
+        // representable, and "no decision this tick" is already a state every
+        // caller handles.
+        let battery = world.battery()?;
+
+        Some(self.decide_at_world(world, battery, clock))
     }
 
-    pub(crate) fn decide_at(
+    /// `battery` is resolved by the caller rather than looked up here: this
+    /// objective is written for exactly one battery, and saying so at the
+    /// signature is more honest than hiding a `.next()` inside the pipeline.
+    /// When a second one lands, that resolution moves into the allocator, not
+    /// here.
+    pub(crate) fn decide_at_world(
         &mut self,
-        grid_power: GridPower,
-        solar_power: SolarPower,
+        world: &World,
         battery: &BatteryState,
         clock: &Clock,
     ) -> ControlDecision {
         self.last_decision = clock.now;
+
+        let grid_power = world.grid.total;
 
         // 0. SOC calibration — reported SOC is unreliable, stay idle
         if battery.soc_calibrating {
@@ -164,7 +169,7 @@ impl Controller {
         }
 
         // 1. What mode should we be in?
-        let mode = self.target_mode(grid_power, solar_power, battery, clock);
+        let mode = self.target_mode(world, battery, clock);
 
         // 2. At what power level?
         let power = self.target_power(mode, grid_power, battery);
@@ -189,16 +194,10 @@ impl Controller {
     /// aggressive than the threshold to *keep* doing so. This prevents
     /// oscillation when the battery's own grid effect pushes the meter reading
     /// close to the start threshold.
-    fn target_mode(
-        &self,
-        grid_power: GridPower,
-        solar_power: SolarPower,
-        battery: &BatteryState,
-        clock: &Clock,
-    ) -> ControlMode {
+    fn target_mode(&self, world: &World, battery: &BatteryState, clock: &Clock) -> ControlMode {
         // Adjust for battery's own grid effect: the meter reading includes
         // the battery's consumption (charging) or production (discharging).
-        let underlying_grid = grid_power + battery.current_power;
+        let underlying_grid = world.underlying_grid();
 
         // Hysteresis: once charging, keep going as long as we're still exporting (< 0W).
         // Only require the full start threshold to *begin* charging.
@@ -239,7 +238,7 @@ impl Controller {
         // Solar production guard: while the solar inverter is exporting at or
         // above the configured threshold, skip discharge so large loads (e.g. an
         // EV charger) pull from grid+solar instead of draining the home battery.
-        let solar_below_block = self.solar_below_block(solar_power);
+        let solar_below_block = self.solar_below_block(world.solar);
 
         // Importing from grid and battery above min SOC → discharge
         if idle_long_enough
@@ -436,6 +435,58 @@ fn is_opposing_switch(prev: ControlMode, next: ControlMode) -> bool {
         (ControlMode::Charge, ControlMode::Discharge)
             | (ControlMode::Discharge, ControlMode::Charge)
     )
+}
+
+/// Pass-A adapter, deleted once the tests below move to the `World` shape.
+///
+/// The 84 tests in this module were written against four positional
+/// parameters. Rebuilding those arguments into a one-battery `World` and
+/// calling straight through means a green run proves behaviour preservation
+/// with no noise on the test side at all — they are literally untouched.
+#[cfg(test)]
+impl Controller {
+    pub(crate) fn decide(
+        &mut self,
+        grid_power: GridPower,
+        solar_power: SolarPower,
+        battery: &BatteryState,
+        clock: &Clock,
+    ) -> Option<ControlDecision> {
+        self.decide_world(&one_battery_world(grid_power, solar_power, battery), clock)
+    }
+
+    pub(crate) fn decide_at(
+        &mut self,
+        grid_power: GridPower,
+        solar_power: SolarPower,
+        battery: &BatteryState,
+        clock: &Clock,
+    ) -> ControlDecision {
+        // Straight to `decide_at_world`, bypassing the interval guard exactly
+        // as the old `decide_at` did.
+        let world = one_battery_world(grid_power, solar_power, battery);
+        self.decide_at_world(&world, battery, clock)
+    }
+}
+
+/// `MeterReading::total_only` zeroes the phases, which is exact rather than
+/// approximate: nothing in the objective reads a phase, so there is no value
+/// these fixtures could be said to be withholding.
+#[cfg(test)]
+fn one_battery_world(
+    grid_power: GridPower,
+    solar_power: SolarPower,
+    battery: &BatteryState,
+) -> World {
+    use crate::world::{DeviceId, Measurement, MeterReading};
+
+    let mut world = World::new();
+    world.observe_meter(MeterReading::total_only(grid_power), solar_power);
+    world.observe_device(
+        DeviceId::new("test-battery"),
+        Measurement::Battery(battery.clone()),
+    );
+    world
 }
 
 #[cfg(test)]

@@ -207,6 +207,19 @@ impl BatteryPower {
     }
 }
 
+/// The combined flow of several batteries, which is what the world's meter
+/// correction is made of. Saturating, exactly as `Watts`'s `Add` is: two packs
+/// cannot come near `i32::MAX` watts, so the saturation is there for a corrupt
+/// reading rather than an expected sum — and a corrupt reading must not panic a
+/// debug build in the decision path.
+impl std::iter::Sum for BatteryPower {
+    fn sum<I: Iterator<Item = BatteryPower>>(iter: I) -> BatteryPower {
+        iter.fold(BatteryPower::ZERO, |acc, p| {
+            BatteryPower(acc.0.saturating_add(p.0))
+        })
+    }
+}
+
 /// A non-negative power limit, in watts — what the device will accept, or what
 /// the controller will not exceed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

@@ -11,6 +11,7 @@ mod mqtt;
 mod rawlog;
 mod rte;
 mod units;
+mod world;
 mod zendure;
 
 use clock::Clock;
@@ -22,6 +23,7 @@ use mqtt::MqttEvent;
 use rawlog::RawLog;
 use tokio::sync::mpsc;
 use units::{GridPower, Soc, SolarPower, WattHours, Watts};
+use world::{DeviceId, Measurement, MeterReading, World};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -34,6 +36,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = Config::from_env()?;
     tracing::info!("Starting Zendure controller for {}", config.zendure_sn);
+
+    // The battery's identity in the world, fixed for the life of the process.
+    // The serial is what a journal reader would recognise it by, and it is
+    // stable across restarts in a way an index into a list would not be.
+    let device_id = DeviceId::new(config.zendure_sn.clone());
 
     let zendure_client = zendure::ZendureClient::new(&config.zendure_ip, config.zendure_sn.clone());
     let initial_report = zendure_client
@@ -126,10 +133,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await;
     });
 
+    // Seed the world from the startup poll, so the first meter reading already
+    // has a battery to decide about. A failure to read it fails startup above,
+    // which is why `decide_world`'s `None` branch is unreachable in production.
+    let mut world = World::new();
+    world.observe_device(device_id.clone(), Measurement::Battery(battery_state));
+
     let mqtt_timeout = config.mqtt_timeout;
     let mut engine = Engine::new(
         controller::Controller::from_config(&config, &Clock::now(config.timezone)),
-        battery_state,
+        world,
         mqtt_timeout,
     );
 
@@ -179,9 +192,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
 
                 let clock = Clock::now(config.timezone);
-                let step = engine.step(&Event::GridPower {
+                let step = engine.step(&Event::Meter {
                     at: clock,
-                    total: net_grid_power,
+                    grid: MeterReading::new(
+                        net_grid_power,
+                        [
+                            GridPower(reading.a_act_power),
+                            GridPower(reading.b_act_power),
+                            GridPower(reading.c_act_power),
+                        ],
+                    ),
                     solar: solar_power,
                 });
 
@@ -191,18 +211,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 if let Some(decision) = step.decision {
-                    tracing::info!(
-                        "Decision: {} at {}W — {} (net_grid={:.0}W, battery: SOC={}%, max_charge={}W, max_discharge={}W, current={}W, soc_limit={})",
-                        decision.mode,
-                        decision.power_watts,
-                        decision.reason,
-                        net_grid_power,
-                        engine.battery().soc,
-                        engine.battery().max_charge_power,
-                        engine.battery().max_discharge_power,
-                        engine.battery().current_power,
-                        engine.battery().soc_limit_reached,
-                    );
+                    if let Some(battery) = engine.battery() {
+                        tracing::info!(
+                            "Decision: {} at {}W — {} (net_grid={:.0}W, battery: SOC={}%, max_charge={}W, max_discharge={}W, current={}W, soc_limit={})",
+                            decision.mode,
+                            decision.power_watts,
+                            decision.reason,
+                            net_grid_power,
+                            battery.soc,
+                            battery.max_charge_power,
+                            battery.max_discharge_power,
+                            battery.current_power,
+                            battery.soc_limit_reached,
+                        );
+                    }
 
                     let mut outcome = "no_command";
                     let mut error = None;
@@ -376,9 +398,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Persist RTE state periodically (every poll)
                         rte_tracker.save();
 
-                        engine.step(&Event::BatteryUpdate {
+                        engine.step(&Event::DeviceUpdate {
                             at: Clock::now(config.timezone),
-                            state,
+                            id: device_id.clone(),
+                            measurement: Measurement::Battery(state),
                         });
                     }
                     Err(e) => {

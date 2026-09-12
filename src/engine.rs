@@ -7,14 +7,15 @@ use crate::controller::Controller;
 use crate::event::Event;
 use crate::models::{ControlDecision, ControlMode, CycleCounts};
 use crate::units::{GridPower, Setpoint, SolarPower};
+use crate::world::{MeterReading, World};
 
 /// The event-driven fold at the heart of the controller. Owns exactly the
 /// state that used to live as locals in `main.rs`'s coordinator loop: the
-/// latest battery reading, and whether we're currently standing down on an
+/// latest view of the world, and whether we're currently standing down on an
 /// MQTT timeout.
 pub struct Engine {
     controller: Controller,
-    battery: BatteryState,
+    world: World,
     mqtt_timed_out: bool,
     mqtt_timeout: Duration,
 }
@@ -32,19 +33,28 @@ pub struct Step {
 }
 
 impl Engine {
-    pub fn new(controller: Controller, battery: BatteryState, mqtt_timeout: Duration) -> Self {
+    pub fn new(controller: Controller, world: World, mqtt_timeout: Duration) -> Self {
         Self {
             controller,
-            battery,
+            world,
             mqtt_timed_out: false,
             mqtt_timeout,
         }
     }
 
     /// The battery state the engine is currently deciding against, for
-    /// callers that just want to log it (e.g. alongside a decision).
-    pub fn battery(&self) -> &BatteryState {
-        &self.battery
+    /// callers that just want to log it (e.g. alongside a decision). `None`
+    /// once the world can hold something other than exactly one battery.
+    pub fn battery(&self) -> Option<&BatteryState> {
+        self.world.battery()
+    }
+
+    /// The whole projection, for the caller that wants to record it. Step 7
+    /// writes this alongside each decision as `world_json`; nothing reads it
+    /// yet, which is the only reason for the attribute.
+    #[allow(dead_code)]
+    pub fn world(&self) -> &World {
+        &self.world
     }
 
     pub fn cycle_counts(&self) -> CycleCounts {
@@ -53,23 +63,30 @@ impl Engine {
 
     pub fn step(&mut self, event: &Event) -> Step {
         match event {
-            Event::GridPower { at, total, solar } => self.step_grid_power(at, *total, *solar),
-            Event::BatteryUpdate { state, .. } => {
-                self.battery = state.clone();
+            Event::Meter { at, grid, solar } => self.step_meter(at, *grid, *solar),
+            Event::DeviceUpdate {
+                id, measurement, ..
+            } => {
+                self.world.observe_device(id.clone(), measurement.clone());
                 Step::default()
             }
             Event::MqttTimeout { .. } => self.step_mqtt_timeout(),
         }
     }
 
-    fn step_grid_power(&mut self, at: &Clock, total: GridPower, solar: SolarPower) -> Step {
+    fn step_meter(&mut self, at: &Clock, grid: MeterReading, solar: SolarPower) -> Step {
         let mut status = None;
         if self.mqtt_timed_out {
             self.mqtt_timed_out = false;
             status = Some("operational");
         }
 
-        let decision = self.controller.decide(total, solar, &self.battery, at);
+        // Fold before deciding, not as an argument to the decision: the meter
+        // reading has to outlive this step so a `DeviceUpdate` arriving in
+        // between doesn't leave the world with a stale grid figure.
+        self.world.observe_meter(grid, solar);
+
+        let decision = self.controller.decide_world(&self.world, at);
         let commands = decision.iter().map(Command::from).collect();
 
         Step {
@@ -116,10 +133,12 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::units::{BatteryPower, GridPower, PowerCap, Soc, SolarPower, Timestamp};
+    use crate::world::{DeviceId, Measurement};
     use chrono::Weekday;
 
     const NOW_MS: i64 = 1_000_000_000;
     const DAY: u32 = 100;
+    const BATTERY_ID: &str = "test-battery";
 
     fn clock() -> Clock {
         Clock {
@@ -142,10 +161,20 @@ mod tests {
         }
     }
 
+    fn world() -> World {
+        let mut world = World::new();
+        world.observe_device(DeviceId::new(BATTERY_ID), Measurement::Battery(battery()));
+        world
+    }
+
+    fn meter(total: f64) -> MeterReading {
+        MeterReading::total_only(GridPower(total))
+    }
+
     fn engine() -> Engine {
         Engine::new(
             Controller::test_default(NOW_MS, DAY),
-            battery(),
+            world(),
             Duration::from_secs(120),
         )
     }
@@ -188,9 +217,9 @@ mod tests {
         let mut engine = engine();
         engine.step(&Event::MqttTimeout { at: clock() });
         engine.step(&Event::MqttTimeout { at: clock() });
-        engine.step(&Event::GridPower {
+        engine.step(&Event::Meter {
             at: clock(),
-            total: GridPower(500.0),
+            grid: meter(500.0),
             solar: SolarPower::new(0.0),
         });
 
@@ -204,9 +233,9 @@ mod tests {
         let mut engine = engine();
         engine.step(&Event::MqttTimeout { at: clock() });
 
-        let step = engine.step(&Event::GridPower {
+        let step = engine.step(&Event::Meter {
             at: clock(),
-            total: GridPower(500.0),
+            grid: meter(500.0),
             solar: SolarPower::new(0.0),
         });
 
@@ -216,9 +245,9 @@ mod tests {
     #[test]
     fn grid_reading_without_prior_timeout_has_no_status() {
         let mut engine = engine();
-        let step = engine.step(&Event::GridPower {
+        let step = engine.step(&Event::Meter {
             at: clock(),
-            total: GridPower(500.0),
+            grid: meter(500.0),
             solar: SolarPower::new(0.0),
         });
 
@@ -231,14 +260,15 @@ mod tests {
         let mut updated = battery();
         updated.soc = Soc::new(80);
 
-        let step = engine.step(&Event::BatteryUpdate {
+        let step = engine.step(&Event::DeviceUpdate {
             at: clock(),
-            state: updated,
+            id: DeviceId::new(BATTERY_ID),
+            measurement: Measurement::Battery(updated),
         });
 
         assert!(step.commands.is_empty());
         assert!(step.decision.is_none());
         assert!(step.status.is_none());
-        assert_eq!(engine.battery().soc, Soc::new(80));
+        assert_eq!(engine.battery().unwrap().soc, Soc::new(80));
     }
 }

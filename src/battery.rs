@@ -1,9 +1,16 @@
+use serde::{Deserialize, Serialize};
+
 use crate::device::BatterySpec;
 use crate::models::ZendureProperties;
 use crate::units::{BatteryPower, PowerCap, Soc, Watts};
 
 /// Current battery state, used by the controller to make decisions.
-#[derive(Debug, Clone)]
+///
+/// `Serialize`/`Deserialize` because this is a `Measurement` in the `World`,
+/// and the world is what step 7 records per decision; `PartialEq` so two
+/// recorded worlds can be compared. Every field is already a `#[serde(transparent)]`
+/// newtype or a `bool`, so the JSON is the bare numbers and flags.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BatteryState {
     /// State of charge, 0–100%.
     pub soc: Soc,

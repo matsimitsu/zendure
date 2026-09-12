@@ -1,6 +1,6 @@
-use crate::battery::BatteryState;
 use crate::clock::Clock;
-use crate::units::{GridPower, SolarPower, Timestamp};
+use crate::units::{SolarPower, Timestamp};
+use crate::world::{DeviceId, Measurement, MeterReading};
 
 /// Everything the engine can react to, each stamped with the `Clock` in
 /// effect when it was observed. Carrying the full clock (not just Gleam's
@@ -8,14 +8,18 @@ use crate::units::{GridPower, SolarPower, Timestamp};
 /// are journaled (step 5).
 #[derive(Debug, Clone)]
 pub enum Event {
-    GridPower {
+    Meter {
         at: Clock,
-        total: GridPower,
+        grid: MeterReading,
         solar: SolarPower,
     },
-    BatteryUpdate {
+    /// A device told us about itself. Addressed by `id` rather than implied by
+    /// the variant, so a second battery — or the first charger — is a new entry
+    /// in the world's device map and not a new arm in this enum.
+    DeviceUpdate {
         at: Clock,
-        state: BatteryState,
+        id: DeviceId,
+        measurement: Measurement,
     },
     MqttTimeout {
         at: Clock,
@@ -28,8 +32,8 @@ impl Event {
     #[allow(dead_code)]
     pub fn at(&self) -> Timestamp {
         match self {
-            Event::GridPower { at, .. } => at.now,
-            Event::BatteryUpdate { at, .. } => at.now,
+            Event::Meter { at, .. } => at.now,
+            Event::DeviceUpdate { at, .. } => at.now,
             Event::MqttTimeout { at } => at.now,
         }
     }
@@ -37,8 +41,8 @@ impl Event {
     #[allow(dead_code)]
     pub fn kind(&self) -> &'static str {
         match self {
-            Event::GridPower { .. } => "grid_power",
-            Event::BatteryUpdate { .. } => "battery_update",
+            Event::Meter { .. } => "meter",
+            Event::DeviceUpdate { .. } => "device_update",
             Event::MqttTimeout { .. } => "mqtt_timeout",
         }
     }
