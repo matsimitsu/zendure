@@ -86,7 +86,7 @@ impl Engine {
         // between doesn't leave the world with a stale grid figure.
         self.world.observe_meter(grid, solar);
 
-        let decision = self.controller.decide_world(&self.world, at);
+        let decision = self.controller.decide(&self.world, at);
         // Allocated here rather than by the caller: how many devices a decision
         // touches is the world's business, and `main.rs` actuating whatever
         // list it is handed is what keeps the dropped-command bug from coming

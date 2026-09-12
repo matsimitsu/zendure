@@ -141,7 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Seed the world from the startup poll, so the first meter reading already
     // has a battery to decide about. A failure to read it fails startup above,
-    // which is why `decide_world`'s `None` branch is unreachable in production.
+    // which is why `decide`'s `None` branch is unreachable in production.
     let mut world = World::new();
     world.observe_device(device_id.clone(), Measurement::Battery(battery_state));
 
