@@ -202,7 +202,7 @@ pub enum StorageMode {
 }
 
 /// What the controller wants the battery to do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControlMode {
     Charge,
     Discharge,

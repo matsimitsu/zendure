@@ -11,7 +11,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-chrono = "0.4"
+# `serde` is needed for `Weekday`, which rides inside every journaled `Clock`.
+chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 # `bundled` compiles the SQLite amalgamation into the binary. The release ships a
 # static musl build to a box with no libsqlite3.so, so linking the system library

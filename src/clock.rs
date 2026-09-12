@@ -1,5 +1,6 @@
 use chrono::{Datelike, Timelike, Utc, Weekday};
 use chrono_tz::Tz;
+use serde::{Deserialize, Serialize};
 
 use crate::units::Timestamp;
 
@@ -12,7 +13,7 @@ use crate::units::Timestamp;
 /// process-relative counter can't do. The cost is NTP sensitivity: a backwards
 /// step makes an elapsed comparison read as "not yet elapsed", delaying a mode
 /// change until time catches up. A forward step permits one slightly early.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Clock {
     /// Wall-clock instant.
     pub now: Timestamp,
