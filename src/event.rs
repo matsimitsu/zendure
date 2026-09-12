@@ -55,15 +55,15 @@ impl Event {
 mod tests {
     use super::*;
     use crate::battery::BatteryState;
-    use crate::units::{BatteryPower, GridPower, PowerCap, Soc};
-    use chrono::Weekday;
+    use crate::units::{BatteryPower, GridPower};
+
+    const NOW_MS: i64 = 1_757_000_000_000;
 
     fn clock() -> Clock {
         Clock {
-            now: Timestamp::from_millis(1_757_000_000_000),
             hour: 19,
             day_ordinal: 255,
-            weekday: Weekday::Wed,
+            ..Clock::test_at(NOW_MS)
         }
     }
 
@@ -83,13 +83,8 @@ mod tests {
             at: clock(),
             id: DeviceId::new("SN123"),
             measurement: Measurement::Battery(BatteryState {
-                soc: Soc::new(50),
-                max_discharge_power: PowerCap::new(800),
-                max_charge_power: PowerCap::new(2400),
                 current_power: BatteryPower(-300),
-                soc_calibrating: false,
-                soc_limit_reached: false,
-                fault: false,
+                ..BatteryState::test_sample()
             }),
         }
     }
@@ -136,7 +131,7 @@ mod tests {
     #[test]
     fn at_reads_the_clock_for_every_variant() {
         for event in every_variant() {
-            assert_eq!(event.at(), Timestamp::from_millis(1_757_000_000_000));
+            assert_eq!(event.at(), Timestamp::from_millis(NOW_MS));
         }
     }
 

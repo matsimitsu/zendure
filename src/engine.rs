@@ -185,33 +185,25 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::command::Command;
-    use crate::units::{BatteryPower, GridPower, PowerCap, Soc, SolarPower, Timestamp};
+    use crate::units::{GridPower, Soc, SolarPower};
     use crate::world::{DeviceId, Measurement};
-    use chrono::Weekday;
 
     const NOW_MS: i64 = 1_000_000_000;
     const DAY: u32 = 100;
     const BATTERY_ID: &str = "test-battery";
 
     fn clock() -> Clock {
+        // `DAY` spelled out rather than relying on the shared fixture happening
+        // to use the same ordinal: `Controller::test_default(NOW_MS, DAY)` below
+        // has to agree with it, or the midnight reset fires on the first step.
         Clock {
-            now: Timestamp::from_millis(NOW_MS),
-            hour: 12,
             day_ordinal: DAY,
-            weekday: Weekday::Wed,
+            ..Clock::test_at(NOW_MS)
         }
     }
 
     fn battery() -> BatteryState {
-        BatteryState {
-            soc: Soc::new(50),
-            max_discharge_power: PowerCap::new(800),
-            max_charge_power: PowerCap::new(2400),
-            current_power: BatteryPower(0),
-            soc_calibrating: false,
-            soc_limit_reached: false,
-            fault: false,
-        }
+        BatteryState::test_sample()
     }
 
     fn world() -> World {
@@ -343,13 +335,16 @@ mod tests {
     /// run to completion before the other starts, must produce identical
     /// steps at every position. `step` takes `&mut self` and a borrowed event
     /// and nothing else — no `Clock::now` call, no `static mut`, no
-    /// thread-local — so running the two runs back to back rather than
-    /// interleaved gives real wall-clock time to elapse between them; an
-    /// engine secretly reading ambient time would see a different clock on
-    /// its second run and diverge from its first. Interleaving the two loops
-    /// microseconds apart would not exercise this: `step` never reads a
-    /// clock itself, so there is nothing that stepping two engines together
-    /// would catch that stepping them apart does not.
+    /// thread-local — so the only thing that can vary between the runs is state
+    /// the engine is carrying that it should not be.
+    ///
+    /// It does **not** catch an engine that secretly reads ambient time, and an
+    /// earlier version of this comment claimed it did. The two runs are five
+    /// `step` calls apart — microseconds — while `Clock` has millisecond
+    /// resolution, so a hidden `Utc::now()` would very likely read the same
+    /// value twice and pass. Making that true would need a deliberate sleep,
+    /// which is not worth a second of test time; what rules it out is that
+    /// `step`'s signature gives it nothing to read.
     ///
     /// Comparing whole `Step`s (via `Step`'s and `ControlDecision`'s derived
     /// `PartialEq`) rather than picking out individual fields means a field
@@ -398,10 +393,8 @@ mod tests {
     /// single-step tests and useless for a fold.
     fn clock_at(secs: i64) -> Clock {
         Clock {
-            now: Timestamp::from_millis(NOW_MS + secs * 1000),
-            hour: 12,
             day_ordinal: DAY,
-            weekday: Weekday::Wed,
+            ..Clock::test_at(NOW_MS + secs * 1000)
         }
     }
 

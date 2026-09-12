@@ -502,9 +502,8 @@ mod tests {
     use crate::device::Applied;
     use crate::engine::Engine;
     use crate::models::ControlMode;
-    use crate::units::{BatteryPower, GridPower, PowerCap, Setpoint, Soc, SolarPower, Timestamp};
+    use crate::units::{BatteryPower, GridPower, Setpoint, SolarPower, Timestamp};
     use crate::world::{DeviceId, Measurement, MeterReading, World};
-    use chrono::Weekday;
 
     const NOW_MS: i64 = 1_757_000_000_000;
 
@@ -514,22 +513,16 @@ mod tests {
 
     fn clock() -> Clock {
         Clock {
-            now: Timestamp::from_millis(NOW_MS),
             hour: 19,
             day_ordinal: 255,
-            weekday: Weekday::Wed,
+            ..Clock::test_at(NOW_MS)
         }
     }
 
     fn battery() -> BatteryState {
         BatteryState {
-            soc: Soc::new(50),
-            max_discharge_power: PowerCap::new(800),
-            max_charge_power: PowerCap::new(2400),
             current_power: BatteryPower(-300),
-            soc_calibrating: false,
-            soc_limit_reached: false,
-            fault: false,
+            ..BatteryState::test_sample()
         }
     }
 
@@ -853,6 +846,43 @@ mod tests {
 
         // 150.5 grid + (-300) battery: what the house drew without the battery.
         assert_eq!(pre_net, -149.5);
+    }
+
+    /// A row reads back as the types that wrote it.
+    ///
+    /// `ControlDecision`, `Outcome` and `Applied` were `Serialize`-only, so
+    /// `payload_json` and `outcome` could be written and never parsed — while a
+    /// commit message claimed everything stored was reachable through them. The
+    /// replay tool this journal exists to feed cannot work against write-only
+    /// columns, and the format is append-only, so the rows being readable is a
+    /// property of the rows, not of the tool that comes later.
+    #[tokio::test]
+    async fn a_decision_row_reads_back_as_the_types_that_wrote_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (journal, writer, path) = open(&dir);
+        journal.decision(
+            at(),
+            ControlPath::Objective,
+            &decision(),
+            &engine_state(),
+            &[outcome("SN123", Applied::Error, Some("boom"))],
+        );
+        let conn = drain(journal, writer, &path).await;
+
+        let (payload, applied): (String, String) = conn
+            .query_row("SELECT payload_json, outcome FROM decisions", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<ControlDecision>(&payload).unwrap(),
+            decision()
+        );
+        assert_eq!(
+            serde_json::from_str::<Applied>(&format!("\"{applied}\"")).unwrap(),
+            Applied::Error
+        );
     }
 
     /// Every row is stamped with the session that wrote it, so `config_json`

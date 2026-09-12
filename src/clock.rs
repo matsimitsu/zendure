@@ -28,6 +28,24 @@ pub struct Clock {
 }
 
 impl Clock {
+    /// A clock fixed at `now_ms`, for tests.
+    ///
+    /// `pub(crate)` and living next to the type for the same reason
+    /// `Controller::test_default` does: four test modules were each writing this
+    /// literal out, and two of them byte-identically. Tests that care about a
+    /// particular hour or weekday say so with struct update syntax —
+    /// `Clock { hour: 19, ..Clock::test_at(ms) }` — which also makes it obvious
+    /// which field a given test is actually about.
+    #[cfg(test)]
+    pub(crate) fn test_at(now_ms: i64) -> Self {
+        Self {
+            now: Timestamp::from_millis(now_ms),
+            hour: 12,
+            day_ordinal: 100,
+            weekday: chrono::Weekday::Wed,
+        }
+    }
+
     /// Read the real clock. Called only at the edges — the MQTT handler and the
     /// failsafe timeout — never below them.
     pub fn now(tz: Tz) -> Self {
