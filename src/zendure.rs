@@ -2,14 +2,24 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::command::Command;
-use crate::device::{AC2400_PLUS, BatteryController};
+use crate::device::{AC2400_PLUS, BatteryController, BatterySpec};
 use crate::models::{StorageMode, ZendureReport, ZendureWriteRequest};
+use crate::world::DeviceId;
 
 #[allow(dead_code)]
 pub struct ZendureClient {
     http: reqwest::Client,
     base_url: String,
-    sn: String,
+    /// The serial, which is also this device's identity in the world — one
+    /// field, not a `sn: String` next to a `DeviceId` that could drift from it.
+    /// The write request wants it as a bare string and gets it through
+    /// `Display`.
+    id: DeviceId,
+    /// What model is on the other end of `base_url`. The adapter is the thing
+    /// that knows: it was handed an address and a serial, and every caller that
+    /// needs the rated limits (startup's cap write, every `BatteryState`) can
+    /// ask it instead of naming a model of its own.
+    spec: BatterySpec,
     storage_mode: Mutex<StorageMode>,
     last_ac_mode: Mutex<Option<u32>>,
 }
@@ -24,10 +34,27 @@ impl ZendureClient {
         Self {
             http,
             base_url: format!("http://{ip}"),
-            sn,
+            id: DeviceId::new(sn),
+            // The one place the model is named. A second Zendure of a different
+            // model makes this a constructor argument (and `Config` the thing
+            // that says which), which is one edit here rather than one at every
+            // site that builds a `BatteryState`.
+            spec: AC2400_PLUS,
             storage_mode: Mutex::new(StorageMode::Ram),
             last_ac_mode: Mutex::new(None),
         }
+    }
+
+    /// This device's identity in the world — the key its `Measurement` is
+    /// filed under and the address its directives carry.
+    pub fn id(&self) -> &DeviceId {
+        &self.id
+    }
+
+    /// The rated limits of the box on the other end, for the caller turning a
+    /// device report into a `BatteryState`.
+    pub fn spec(&self) -> &BatterySpec {
+        &self.spec
     }
 
     pub async fn get_properties(&self) -> Result<ZendureReport, reqwest::Error> {
@@ -79,8 +106,8 @@ impl ZendureClient {
     pub async fn write_power_caps(&self) -> Result<(), reqwest::Error> {
         self.ensure_ram_mode().await?;
         self.write_properties(serde_json::json!({
-            "chargeMaxLimit": AC2400_PLUS.max_charge_power,
-            "inverseMaxPower": AC2400_PLUS.max_discharge_power,
+            "chargeMaxLimit": self.spec.max_charge_power,
+            "inverseMaxPower": self.spec.max_discharge_power,
         }))
         .await
     }
@@ -152,7 +179,7 @@ impl ZendureClient {
     ) -> Result<(), reqwest::Error> {
         let url = format!("{}/properties/write", self.base_url);
         let body = ZendureWriteRequest {
-            sn: self.sn.clone(),
+            sn: self.id.to_string(),
             properties,
         };
         self.http.post(&url).json(&body).send().await?;
@@ -165,6 +192,10 @@ impl ZendureClient {
 /// This is the seam `actuate` drives, so the control loop never names a vendor.
 impl BatteryController for ZendureClient {
     type Error = reqwest::Error;
+
+    fn id(&self) -> &DeviceId {
+        &self.id
+    }
 
     async fn apply(&self, command: &Command) -> Result<(), reqwest::Error> {
         self.apply_command(command).await

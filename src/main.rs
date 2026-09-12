@@ -25,7 +25,7 @@ use mqtt::MqttEvent;
 use rawlog::RawLog;
 use tokio::sync::mpsc;
 use units::{Soc, WattHours, Watts};
-use world::{DeviceId, Measurement, World};
+use world::{Measurement, World};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -39,12 +39,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env()?;
     tracing::info!("Starting Zendure controller for {}", config.zendure_sn);
 
-    // The battery's identity in the world, fixed for the life of the process.
-    // The serial is what a journal reader would recognise it by, and it is
-    // stable across restarts in a way an index into a list would not be.
-    let device_id = DeviceId::new(config.zendure_sn.clone());
-
     let zendure_client = zendure::ZendureClient::new(&config.zendure_ip, config.zendure_sn.clone());
+
+    // The battery's identity in the world, fixed for the life of the process,
+    // and taken from the adapter that will answer for it — the world's key and
+    // the address on a directive have to be the same string the adapter matches
+    // against, so there is one source for it. The serial is what a journal
+    // reader would recognise it by, and it is stable across restarts in a way
+    // an index into a list would not be.
+    let device_id = zendure_client.id().clone();
     let initial_report = zendure_client
         .get_properties()
         .await
@@ -80,8 +83,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             initial_report.clone()
         }
     };
+    // The rated limits come from the adapter, which knows which box it is
+    // talking to. Naming a model here instead put a hardware fact in the
+    // coordinator, twice, where a second battery of another model would have
+    // been clamped to this one's rating.
     let battery_state =
-        battery::BatteryState::from_properties(&battery_report.properties, &device::AC2400_PLUS);
+        battery::BatteryState::from_properties(&battery_report.properties, zendure_client.spec());
 
     let mut pack_capacities = rte::pack_capacities(&initial_report.pack_data);
     let mut min_soc_percent: Soc = initial_report
@@ -175,77 +182,87 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         tokio::select! {
             event = rx.recv() => {
-                let Some(MqttEvent::Meter(obs)) = event else { break };
-                mqtt_deadline = tokio::time::Instant::now() + mqtt_timeout;
+                // A closed channel means the subscriber task is gone, which is
+                // not something this loop can recover from: stop.
+                let Some(event) = event else { break };
 
-                // Already normalized by the source adapter: whichever meter
-                // sent this, the loop sees a signed total, three phases and a
-                // production figure, and nothing about the wire format.
-                let net_grid_power = obs.grid.total;
+                // A real match, not a `let else`: the second variant step 9 adds
+                // would otherwise take the `else` arm, break this loop and exit
+                // the process cleanly and silently. Here it is a compile error.
+                match event {
+                    MqttEvent::Meter(obs) => {
+                        mqtt_deadline = tokio::time::Instant::now() + mqtt_timeout;
 
-                let clock = Clock::now(config.timezone);
-                let step = engine.step(&Event::Meter {
-                    at: clock,
-                    grid: obs.grid,
-                    solar: obs.solar,
-                });
+                        // Already normalized by the source adapter: whichever meter
+                        // sent this, the loop sees a signed total, three phases and a
+                        // production figure, and nothing about the wire format.
+                        let net_grid_power = obs.grid.total;
 
-                if let Some(status) = step.status {
-                    tracing::info!("MQTT updates resumed");
-                    mqtt::publish_status(&publisher_client, &ha_prefix, status).await;
-                }
+                        let clock = Clock::now(config.timezone);
+                        let step = engine.step(&Event::Meter {
+                            at: clock,
+                            grid: obs.grid,
+                            solar: obs.solar,
+                        });
 
-                if let Some(decision) = step.decision {
-                    if let Some(battery) = engine.battery() {
-                        tracing::info!(
-                            "Decision: {} at {}W — {} (net_grid={:.0}W, battery: SOC={}%, max_charge={}W, max_discharge={}W, current={}W, soc_limit={})",
-                            decision.mode,
-                            decision.power_watts,
-                            decision.reason,
-                            net_grid_power,
-                            battery.soc,
-                            battery.max_charge_power,
-                            battery.max_discharge_power,
-                            battery.current_power,
-                            battery.soc_limit_reached,
-                        );
+                        if let Some(status) = step.status {
+                            tracing::info!("MQTT updates resumed");
+                            mqtt::publish_status(&publisher_client, &ha_prefix, status).await;
+                        }
+
+                        if let Some(decision) = step.decision {
+                            if let Some(battery) = engine.battery() {
+                                tracing::info!(
+                                    "Decision: {} at {}W — {} (net_grid={:.0}W, battery: SOC={}%, max_charge={}W, max_discharge={}W, current={}W, soc_limit={})",
+                                    decision.mode,
+                                    decision.power_watts,
+                                    decision.reason,
+                                    net_grid_power,
+                                    battery.soc,
+                                    battery.max_charge_power,
+                                    battery.max_discharge_power,
+                                    battery.current_power,
+                                    battery.soc_limit_reached,
+                                );
+                            }
+
+                            // The whole list, not its first element: a step that means
+                            // "stop one box, start another" has to reach both devices.
+                            let outcomes = device::actuate(&zendure_client, &step.commands, "decision").await;
+                            let failed = outcomes.iter().any(|o| o.outcome == "error");
+
+                            // Once after the loop rather than once per command. With one
+                            // device that is the same single publish as before; with two
+                            // it stops the HA status flapping twice per decision. A
+                            // failure anywhere takes precedence: the fleet is degraded
+                            // even if some of it was commanded successfully.
+                            if !step.commands.is_empty() {
+                                let status = if failed { "zendure_api_error" } else { "operational" };
+                                mqtt::publish_status(&publisher_client, &ha_prefix, status).await;
+                            }
+
+                            // Recorded after actuation, so each outcome reflects whether
+                            // the write to that device actually landed — which is what you
+                            // want when reconstructing an incident. The world goes in
+                            // beside it so the line carries the inputs, not just the
+                            // conclusion.
+                            if let Some(log) = &raw_log {
+                                log.value("decision", &serde_json::json!({
+                                    "decision": &decision,
+                                    "world": engine.world(),
+                                    "commands": outcomes,
+                                }));
+                            }
+
+                            mqtt::publish_decision(&publisher_client, &ha_prefix, &decision).await;
+                            mqtt::publish_cycle_counts(
+                                &publisher_client,
+                                &ha_prefix,
+                                &engine.cycle_counts(),
+                            )
+                            .await;
+                        }
                     }
-
-                    // The whole list, not its first element: a step that means
-                    // "stop one box, start another" has to reach both devices.
-                    let outcomes = device::actuate(&zendure_client, &step.commands, "decision").await;
-                    let failed = outcomes.iter().any(|o| o.outcome == "error");
-
-                    // Once after the loop rather than once per command. With one
-                    // device that is the same single publish as before; with two
-                    // it stops the HA status flapping twice per decision. A
-                    // failure anywhere takes precedence: the fleet is degraded
-                    // even if some of it was commanded successfully.
-                    if !step.commands.is_empty() {
-                        let status = if failed { "zendure_api_error" } else { "operational" };
-                        mqtt::publish_status(&publisher_client, &ha_prefix, status).await;
-                    }
-
-                    // Recorded after actuation, so each outcome reflects whether
-                    // the write to that device actually landed — which is what you
-                    // want when reconstructing an incident. The world goes in
-                    // beside it so the line carries the inputs, not just the
-                    // conclusion.
-                    if let Some(log) = &raw_log {
-                        log.value("decision", &serde_json::json!({
-                            "decision": &decision,
-                            "world": engine.world(),
-                            "commands": outcomes,
-                        }));
-                    }
-
-                    mqtt::publish_decision(&publisher_client, &ha_prefix, &decision).await;
-                    mqtt::publish_cycle_counts(
-                        &publisher_client,
-                        &ha_prefix,
-                        &engine.cycle_counts(),
-                    )
-                    .await;
                 }
             }
             _ = tokio::time::sleep_until(mqtt_deadline) => {
@@ -298,7 +315,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 match fetched {
                     Ok(report) => {
-                        let state = battery::BatteryState::from_properties(&report.properties, &device::AC2400_PLUS);
+                        let state = battery::BatteryState::from_properties(&report.properties, zendure_client.spec());
                         tracing::debug!(
                             "Battery poll: SOC={}%, current_power={}W",
                             state.soc,

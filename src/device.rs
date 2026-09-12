@@ -61,6 +61,12 @@ pub const AC2400_PLUS: BatterySpec = BatterySpec {
 pub trait BatteryController {
     type Error: std::fmt::Display;
 
+    /// Which device this adapter writes to. `actuate` matches a directive's
+    /// address against it rather than assuming the only adapter it holds is
+    /// the right one — an `Outcome` that names a device must mean the write
+    /// actually went there.
+    fn id(&self) -> &DeviceId;
+
     fn apply(&self, command: &Command) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
@@ -87,6 +93,13 @@ pub struct Outcome {
 ///
 /// The `match` picks the controller for the class, so step 9 adds a `charger`
 /// parameter and one arm rather than reworking the loop.
+///
+/// Within a class the directive's address picks the adapter. One adapter per
+/// class today, so the match is `==` against its id rather than a lookup — but
+/// it is a match, because `Outcome.device` is journalled and a line reading
+/// `{"device":"battery-b","outcome":"ok"}` has to mean that box was written to.
+/// Handing `battery-b`'s setpoint to `battery-a`'s adapter and recording it as
+/// b's success is the failure mode this exists to make impossible.
 pub async fn actuate<B: BatteryController>(
     battery: &B,
     directives: &[Directive],
@@ -99,10 +112,25 @@ pub async fn actuate<B: BatteryController>(
         // concrete type across adapters with unrelated error types — and each
         // class logs the noun its operators would grep for.
         let result = match directive {
-            Directive::Battery { command, .. } => battery.apply(command).await.map_err(|e| {
-                tracing::error!("Failed to apply {what} to battery: {e}");
-                e.to_string()
-            }),
+            Directive::Battery { device, command } if device == battery.id() => {
+                battery.apply(command).await.map_err(|e| {
+                    tracing::error!("Failed to apply {what} to battery {device}: {e}");
+                    e.to_string()
+                })
+            }
+            // Unroutable, not applied: an allocation named a device this
+            // process does not drive. Reported as a failed outcome — so the
+            // journal shows the command never landed and the caller's status
+            // goes degraded — rather than dropped silently or sent to whoever
+            // happens to be holding the adapter.
+            Directive::Battery { device, .. } => {
+                tracing::error!(
+                    "Cannot apply {what} to {device}: no adapter for that device (this process \
+                     drives battery {})",
+                    battery.id(),
+                );
+                Err(format!("no adapter registered for device {device}"))
+            }
         };
 
         outcomes.push(Outcome {
@@ -123,24 +151,28 @@ mod tests {
     use std::sync::Mutex;
 
     /// Records what it was asked to do, and can be told to fail on the nth
-    /// call. Both halves matter: the order the commands arrived in is the
-    /// property under test, and a failure has to be injectable at a position
-    /// other than the last one to prove the loop keeps going.
+    /// call. Three halves now: the order the commands arrived in is the
+    /// property under test, a failure has to be injectable at a position other
+    /// than the last one to prove the loop keeps going, and it answers for one
+    /// device id so a directive addressed elsewhere has somewhere to not go.
     struct RecordingBattery {
+        id: DeviceId,
         applied: Mutex<Vec<Command>>,
         fails_at: Option<usize>,
     }
 
     impl RecordingBattery {
-        fn new() -> Self {
+        fn new(id: &str) -> Self {
             RecordingBattery {
+                id: DeviceId::new(id),
                 applied: Mutex::new(Vec::new()),
                 fails_at: None,
             }
         }
 
-        fn failing_at(index: usize) -> Self {
+        fn failing_at(id: &str, index: usize) -> Self {
             RecordingBattery {
+                id: DeviceId::new(id),
                 applied: Mutex::new(Vec::new()),
                 fails_at: Some(index),
             }
@@ -153,6 +185,10 @@ mod tests {
 
     impl BatteryController for RecordingBattery {
         type Error = String;
+
+        fn id(&self) -> &DeviceId {
+            &self.id
+        }
 
         async fn apply(&self, command: &Command) -> Result<(), String> {
             // The guard is scoped and dropped before the function's implicit
@@ -179,15 +215,17 @@ mod tests {
         }
     }
 
-    /// The two-directive case the seam exists for: one box stands down so
-    /// another can take the surplus. Against the old `commands.first()` this
-    /// applied the stop and never the start.
+    /// Every directive is applied, not just the first — the regression the old
+    /// `commands.first()` actuation shipped. A single adapter answers for a
+    /// single device, so the multi-directive list it can be handed is two
+    /// commands to the same box; the second device's half of the seam is the
+    /// routing test below, and step 9's second adapter.
     #[tokio::test]
     async fn applies_every_directive_in_order() {
-        let battery = RecordingBattery::new();
+        let battery = RecordingBattery::new("battery-a");
         let directives = [
             directive("battery-a", Command::SetIdle),
-            directive("battery-b", Command::SetCharge(Setpoint::new(1200))),
+            directive("battery-a", Command::SetCharge(Setpoint::new(1200))),
         ];
 
         let outcomes = actuate(&battery, &directives, "decision").await;
@@ -200,7 +238,7 @@ mod tests {
         assert_eq!(outcomes[0].device, DeviceId::new("battery-a"));
         assert_eq!(outcomes[0].command, "set_idle");
         assert_eq!(outcomes[0].outcome, "ok");
-        assert_eq!(outcomes[1].device, DeviceId::new("battery-b"));
+        assert_eq!(outcomes[1].device, DeviceId::new("battery-a"));
         assert_eq!(outcomes[1].command, "set_charge(1200W)");
         assert_eq!(outcomes[1].outcome, "ok");
     }
@@ -209,10 +247,10 @@ mod tests {
     /// recorded and the loop carries on.
     #[tokio::test]
     async fn a_failure_does_not_stop_the_rest() {
-        let battery = RecordingBattery::failing_at(0);
+        let battery = RecordingBattery::failing_at("battery-a", 0);
         let directives = [
             directive("battery-a", Command::SetIdle),
-            directive("battery-b", Command::SetCharge(Setpoint::new(1200))),
+            directive("battery-a", Command::SetCharge(Setpoint::new(1200))),
         ];
 
         let outcomes = actuate(&battery, &directives, "decision").await;
@@ -225,5 +263,33 @@ mod tests {
         assert_eq!(outcomes[0].error.as_deref(), Some("device unreachable"));
         assert_eq!(outcomes[1].outcome, "ok");
         assert_eq!(outcomes[1].error, None);
+    }
+
+    /// The routing half, which the id assertions above cannot prove because
+    /// they pass by construction: a directive for a device this process does
+    /// not drive must reach no adapter and must be reported as a failure. The
+    /// alternative — the shape before this test existed — was writing
+    /// `battery-b`'s setpoint into `battery-a` and journalling it as b's
+    /// success. The owned directive behind it still lands, for the same reason
+    /// an unreachable box does not stop the rest.
+    #[tokio::test]
+    async fn a_directive_for_another_device_is_an_error_and_is_not_applied() {
+        let battery = RecordingBattery::new("battery-a");
+        let directives = [
+            directive("battery-b", Command::SetCharge(Setpoint::new(1200))),
+            directive("battery-a", Command::SetIdle),
+        ];
+
+        let outcomes = actuate(&battery, &directives, "decision").await;
+
+        assert_eq!(battery.applied(), vec![Command::SetIdle]);
+        assert_eq!(outcomes[0].device, DeviceId::new("battery-b"));
+        assert_eq!(outcomes[0].outcome, "error");
+        assert_eq!(
+            outcomes[0].error.as_deref(),
+            Some("no adapter registered for device battery-b"),
+        );
+        assert_eq!(outcomes[1].device, DeviceId::new("battery-a"));
+        assert_eq!(outcomes[1].outcome, "ok");
     }
 }
