@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 // belongs to the adapter that reads them. Parsing `SOLAR_PHASE` is still this
 // file's job — reading the environment is what `Config` is for.
 use crate::source::shelly::SolarPhase;
-use crate::units::{GridPower, PowerMargin, RetentionDays, Soc, SolarPower};
+use crate::units::{
+    Efficiency, GridPower, PowerMargin, RetentionDays, Soc, SolarPower, WattHours, Watts,
+};
 
 /// Where the journal lives unless `JOURNAL_PATH` says otherwise.
 ///
@@ -231,6 +233,29 @@ impl Taker {
         }
     }
 
+    /// Whether a top-level table is present at all, without removing
+    /// anything from it — a presence check that runs *before* any field of
+    /// that table is read.
+    ///
+    /// `mqtt`, `shelly` and `meter` each need this: their presence, not a
+    /// flag inside them, is what selects a backend (a real broker, a real
+    /// Shelly, a synthetic house). `known_tables` (below) is a different
+    /// thing — a record of tables this reader has already walked *into* via
+    /// `take` — and cannot answer "is the table there at all" for one that
+    /// turns out to be entirely absent, which is exactly the case this exists
+    /// to distinguish from "present but empty."
+    ///
+    /// A key that is present but not a table is fatal, the same rule `take`
+    /// enforces for a nested path: `mqtt = "x"` is the "table that is not a
+    /// table" case `config.example.toml`'s header already names.
+    fn has_table(&self, name: &str) -> Result<bool, String> {
+        match self.root.get(name) {
+            None => Ok(false),
+            Some(toml::Value::Table(_)) => Ok(true),
+            Some(v) => Err(format!("{name} is not a table, found {}", v.type_str())),
+        }
+    }
+
     /// Turns whatever is left after every known key has been taken into one
     /// warning per surviving leaf, and returns them alongside every warning
     /// `lenient` already collected.
@@ -274,6 +299,111 @@ impl Taker {
     }
 }
 
+/// A single battery, as `[[device]]` describes it — before it becomes a live
+/// adapter. `registry::from_config` is the only place this turns into a
+/// [`crate::registry::Battery`]; every field here is exactly what that one
+/// conversion needs and nothing this file itself acts on.
+///
+/// Only two kinds exist, and the array this comes from is still checked for
+/// exactly one entry (see [`take_device`]) — a device *list* is a later
+/// commit's job, this one only ever hands back one battery.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeviceConfig {
+    Zendure {
+        ip: String,
+        sn: String,
+        poll_interval: Duration,
+    },
+    /// `simulation::VirtualBattery`'s constructor, minus the rated
+    /// [`crate::device::BatterySpec`] — a virtual device always simulates the
+    /// one real model this crate knows about (`AC2400_PLUS`), the same way a
+    /// `DeviceConfig::Zendure` never lets a config file pick a different
+    /// rating for hardware whose rating is a fact, not a setting.
+    Virtual {
+        id: String,
+        packs: Vec<WattHours>,
+        soc: Soc,
+        charge_efficiency: Efficiency,
+        discharge_efficiency: Efficiency,
+    },
+}
+
+impl DeviceConfig {
+    /// What `run.rs`'s startup log line calls this box: the identity it will
+    /// carry in the world, before `registry::from_config` has built anything.
+    pub fn identity(&self) -> &str {
+        match self {
+            DeviceConfig::Zendure { sn, .. } => sn,
+            DeviceConfig::Virtual { id, .. } => id,
+        }
+    }
+
+    /// How often `run.rs`'s poll timer fires. A `Virtual` device has no
+    /// `poll_interval_secs` field to read — there is no network round trip to
+    /// pace, only an in-process model — so this hands back a fixed cadence
+    /// close to a real Zendure's rather than inventing a config key nothing
+    /// needs to tune yet.
+    pub fn poll_interval(&self) -> Duration {
+        match self {
+            DeviceConfig::Zendure { poll_interval, .. } => *poll_interval,
+            DeviceConfig::Virtual { .. } => Duration::from_secs(10),
+        }
+    }
+}
+
+/// `[mqtt]`, present or not. Presence, not a flag inside it, is what selects
+/// the broker backend — see `Taker::has_table`'s doc comment — so this is an
+/// `Option<MqttConfig>` on `Config` rather than a `connected: bool` next to a
+/// host string that means nothing when it is `false`.
+#[derive(Clone, PartialEq)]
+pub struct MqttConfig {
+    pub host: String,
+    pub port: u16,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub client_id: String,
+}
+
+/// Hand-written for the reason `Config`'s own `Debug` is: a derived one would
+/// print `password` as `Some("hunter2")`, and this struct rides inside
+/// `Config`'s `Debug` output through its `mqtt` field.
+impl std::fmt::Debug for MqttConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MqttConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("client_id", &self.client_id)
+            .finish()
+    }
+}
+
+/// `[shelly]`, present or not. Required when [`MeterConfig::Shelly`] is in
+/// effect (the default), optional when the meter is synthetic — a synthetic
+/// house has no Shelly to configure.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShellyConfig {
+    pub topic: String,
+    pub solar_phase: SolarPhase,
+}
+
+/// Which meter feeds the engine its grid readings.
+///
+/// Defaults to `Shelly` — today's only real meter, and the one every
+/// deployed config still describes by leaving `[meter]` out entirely, per
+/// `config.example.toml`'s own comment. `Synthetic` is what
+/// `config.example.virtual.toml` selects instead, so a laptop with no Shelly
+/// and no broker in sight can still feed the engine something to decide
+/// against — see `source::synthetic`'s module doc comment for why a naive
+/// synthetic feed (one that never reads the battery's own flow back) would
+/// prove nothing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MeterConfig {
+    Shelly,
+    Synthetic { base_load: Watts, solar_peak: Watts },
+}
+
 /// Pulls the required `[[device]]` array out of the root table before
 /// `Taker` ever sees it.
 ///
@@ -283,10 +413,10 @@ impl Taker {
 /// states — a device that cannot be reached is the "cannot talk at all"
 /// case, not the "decides slightly differently" one.
 ///
-/// Only `kind = "zendure"` is accepted, and only one entry. A device *list*
-/// on `Config` is a later commit's job; this one only has one battery to
-/// hand back.
-fn take_device(root: &mut toml::Table) -> Result<(String, String, Duration), String> {
+/// `kind = "zendure"` or `kind = "virtual"` is accepted, and only one entry.
+/// A device *list* on `Config` is a later commit's job; this one only has one
+/// battery to hand back.
+fn take_device(root: &mut toml::Table) -> Result<DeviceConfig, String> {
     let value = root
         .remove("device")
         .ok_or_else(|| "device is required (at least one [[device]] entry)".to_string())?;
@@ -319,20 +449,43 @@ fn take_device(root: &mut toml::Table) -> Result<(String, String, Duration), Str
     };
 
     let kind = take_device_field(&mut table, "kind")?;
-    if kind != "zendure" {
-        return Err(format!(
-            "device.kind must be \"zendure\" (the only kind this build supports), found {kind:?}"
-        ));
-    }
-    let ip = take_device_field(&mut table, "ip")?;
-    let sn = take_device_field(&mut table, "sn")?;
-    let poll_interval_secs = take_device_secs(&mut table, "poll_interval_secs")?;
+    let device = match kind.as_str() {
+        "zendure" => {
+            let ip = take_device_field(&mut table, "ip")?;
+            let sn = take_device_field(&mut table, "sn")?;
+            let poll_interval_secs = take_device_secs(&mut table, "poll_interval_secs")?;
+            DeviceConfig::Zendure {
+                ip,
+                sn,
+                poll_interval: Duration::from_secs(poll_interval_secs),
+            }
+        }
+        "virtual" => {
+            let id = take_device_field(&mut table, "id")?;
+            let packs = take_device_packs(&mut table, "packs")?;
+            let soc = take_device_soc(&mut table, "soc")?;
+            let charge_efficiency = take_device_f64(&mut table, "charge_efficiency")?;
+            let discharge_efficiency = take_device_f64(&mut table, "discharge_efficiency")?;
+            DeviceConfig::Virtual {
+                id,
+                packs,
+                soc,
+                charge_efficiency: Efficiency::new(charge_efficiency),
+                discharge_efficiency: Efficiency::new(discharge_efficiency),
+            }
+        }
+        other => {
+            return Err(format!(
+                "device.kind must be \"zendure\" or \"virtual\", found {other:?}"
+            ));
+        }
+    };
 
     if let Some(key) = table.keys().next() {
         return Err(format!("device.{key} is not a recognised field"));
     }
 
-    Ok((ip, sn, Duration::from_secs(poll_interval_secs)))
+    Ok(device)
 }
 
 fn take_device_field(table: &mut toml::Table, key: &str) -> Result<String, String> {
@@ -358,18 +511,79 @@ fn take_device_secs(table: &mut toml::Table, key: &str) -> Result<u64, String> {
     }
 }
 
+/// A whole, non-negative percentage: `device.soc` on a `[[device]] kind =
+/// "virtual"` entry. `Soc::new` does the clamping every other reader of a
+/// percentage in this file already goes through.
+fn take_device_soc(table: &mut toml::Table, key: &str) -> Result<Soc, String> {
+    match table.remove(key) {
+        None => Err(format!("device.{key} is required")),
+        Some(toml::Value::Integer(n)) => u32::try_from(n)
+            .map(Soc::new)
+            .map_err(|_| format!("device.{key} must be a non-negative integer, found {n}")),
+        Some(v) => Err(format!(
+            "device.{key} must be an integer, found {}",
+            v.type_str()
+        )),
+    }
+}
+
+/// A bare `f64`, for `device.charge_efficiency` / `device.discharge_efficiency`
+/// — TOML distinguishes integers from floats, and a person writing `95` rather
+/// than `95.0` must not be met with a fatal type error over a distinction they
+/// had no reason to think mattered.
+fn take_device_f64(table: &mut toml::Table, key: &str) -> Result<f64, String> {
+    match table.remove(key) {
+        None => Err(format!("device.{key} is required")),
+        Some(toml::Value::Float(f)) => Ok(f),
+        Some(toml::Value::Integer(n)) => Ok(n as f64),
+        Some(v) => Err(format!(
+            "device.{key} must be a number, found {}",
+            v.type_str()
+        )),
+    }
+}
+
+/// `device.packs` on a virtual device: the capacity of each connected pack,
+/// in watt-hours. An array rather than a single total, mirroring
+/// `VirtualBattery`'s own field — see its doc comment for why a heterogeneous
+/// fleet is the reason this is a list at all.
+fn take_device_packs(table: &mut toml::Table, key: &str) -> Result<Vec<WattHours>, String> {
+    match table.remove(key) {
+        None => Err(format!("device.{key} is required")),
+        Some(toml::Value::Array(items)) => items
+            .into_iter()
+            .map(|v| match v {
+                toml::Value::Integer(n) => Ok(WattHours(n as f64)),
+                toml::Value::Float(f) => Ok(WattHours(f)),
+                other => Err(format!(
+                    "device.{key} entries must be numbers, found {}",
+                    other.type_str()
+                )),
+            })
+            .collect(),
+        Some(v) => Err(format!(
+            "device.{key} must be an array, found {}",
+            v.type_str()
+        )),
+    }
+}
+
 #[cfg_attr(test, derive(PartialEq))]
 pub struct Config {
-    pub mqtt_host: String,
-    pub mqtt_port: u16,
-    pub mqtt_username: Option<String>,
-    pub mqtt_password: Option<String>,
-    pub mqtt_client_id: String,
-    pub zendure_ip: String,
-    pub zendure_sn: String,
-    pub shelly_topic: String,
+    /// `None` when `[mqtt]` is absent from the file — brokerless, per
+    /// `run.rs`'s choice of a [`crate::publish::NullPublisher`] in that case.
+    /// It is the table's *presence* that selects the backend, not a flag
+    /// inside it: see `Taker::has_table`'s doc comment.
+    pub mqtt: Option<MqttConfig>,
+    pub device: DeviceConfig,
+    /// `None` when `[shelly]` is absent — only possible when
+    /// [`MeterConfig::Synthetic`] is in effect; `from_toml_str` refuses a
+    /// [`MeterConfig::Shelly`] with no `[shelly]` to configure it.
+    pub shelly: Option<ShellyConfig>,
+    /// Which meter feeds the engine. Defaults to `Shelly` when `[meter]` is
+    /// absent, matching every config written before this field existed.
+    pub meter: MeterConfig,
     pub ha_publish_prefix: String,
-    pub zendure_poll_interval: Duration,
     /// Safety margin subtracted from charge power to avoid grid import
     pub charge_margin: PowerMargin,
     /// Safety margin subtracted from discharge power
@@ -393,9 +607,7 @@ pub struct Config {
     /// Weekday on which `max_soc` is raised to 100% for a periodic cell-balancing
     /// full charge. `None` disables the override (default: Monday).
     pub balance_weekday: Option<Weekday>,
-    /// Which meter phase the solar inverter feeds into.
-    pub solar_phase: SolarPhase,
-    /// Solar inverter export on `solar_phase` at or above which discharge is
+    /// Solar inverter export on the Shelly's solar phase at or above which discharge is
     /// skipped, so large loads (e.g. EV charging) pull from grid+solar instead
     /// of draining the home battery. 0 disables the guard (default).
     pub solar_discharge_block_threshold: SolarPower,
@@ -426,19 +638,11 @@ pub struct Config {
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
-            .field("mqtt_host", &self.mqtt_host)
-            .field("mqtt_port", &self.mqtt_port)
-            .field("mqtt_username", &self.mqtt_username)
-            .field(
-                "mqtt_password",
-                &self.mqtt_password.as_ref().map(|_| "<redacted>"),
-            )
-            .field("mqtt_client_id", &self.mqtt_client_id)
-            .field("zendure_ip", &self.zendure_ip)
-            .field("zendure_sn", &self.zendure_sn)
-            .field("shelly_topic", &self.shelly_topic)
+            .field("mqtt", &self.mqtt)
+            .field("device", &self.device)
+            .field("shelly", &self.shelly)
+            .field("meter", &self.meter)
             .field("ha_publish_prefix", &self.ha_publish_prefix)
-            .field("zendure_poll_interval", &self.zendure_poll_interval)
             .field("charge_margin", &self.charge_margin)
             .field("discharge_margin", &self.discharge_margin)
             .field("charge_start_threshold", &self.charge_start_threshold)
@@ -450,7 +654,6 @@ impl std::fmt::Debug for Config {
             .field("min_soc", &self.min_soc)
             .field("max_soc", &self.max_soc)
             .field("balance_weekday", &self.balance_weekday)
-            .field("solar_phase", &self.solar_phase)
             .field(
                 "solar_discharge_block_threshold",
                 &self.solar_discharge_block_threshold,
@@ -538,23 +741,19 @@ impl Config {
     ///
     /// Everything bound to `_` is deliberate, and the rule is one line long:
     /// a fixture has to be hermetic, so nothing that says how to *reach* a
-    /// device belongs in it. `timezone` and `solar_phase` are the two that look
-    /// like tuning and are not — every journaled `Event` already carries a
-    /// resolved `Clock` and an already-normalised solar figure, so a replay
-    /// never re-derives either.
+    /// device belongs in it. `timezone` is the one that looks like tuning and
+    /// is not — every journaled `Event` already carries a resolved `Clock`, so
+    /// a replay never re-derives it. Solar phase went the same way when it
+    /// moved into `ShellyConfig`: it lives under `shelly`, which this already
+    /// excludes wholesale.
     pub fn session(&self) -> SessionConfig {
         let Config {
             // Connection settings: how to reach things, not what to decide.
-            mqtt_host: _,
-            mqtt_port: _,
-            mqtt_username: _,
-            mqtt_password: _,
-            mqtt_client_id: _,
-            zendure_ip: _,
-            zendure_sn: _,
-            shelly_topic: _,
+            mqtt: _,
+            device: _,
+            shelly: _,
+            meter: _,
             ha_publish_prefix: _,
-            zendure_poll_interval: _,
             journal_path: _,
             journal_retention_days: _,
             rte_state_path: _,
@@ -562,7 +761,6 @@ impl Config {
             log_filter: _,
             // Resolved into every event before it is journaled.
             timezone: _,
-            solar_phase: _,
             // The decision knobs.
             charge_margin,
             discharge_margin,
@@ -620,20 +818,90 @@ impl Config {
     pub fn from_toml_str(text: &str) -> Result<(Config, Vec<String>), String> {
         let mut root = text.parse::<toml::Table>().map_err(|e| e.to_string())?;
 
-        let (zendure_ip, zendure_sn, zendure_poll_interval) = take_device(&mut root)?;
+        let device = take_device(&mut root)?;
 
         let mut taker = Taker::new(root);
 
-        let mqtt_host = taker.required::<String>("mqtt.host")?;
-        let mqtt_port = taker.optional::<u16>("mqtt.port")?.unwrap_or(1883);
-        let mqtt_username = taker.optional::<String>("mqtt.username")?;
-        let mqtt_password = taker.optional::<String>("mqtt.password")?;
-        let mqtt_client_id = taker
-            .optional::<String>("mqtt.client_id")?
-            .unwrap_or_else(|| "zendure-controller".to_string());
+        // Presence, not a field inside it, is what selects the broker
+        // backend — see `Taker::has_table`'s doc comment. `run.rs` reads
+        // `mqtt.is_none()` to decide whether to build a real `AsyncClient` at
+        // all.
+        let mqtt = if taker.has_table("mqtt")? {
+            Some(MqttConfig {
+                host: taker.required::<String>("mqtt.host")?,
+                port: taker.optional::<u16>("mqtt.port")?.unwrap_or(1883),
+                username: taker.optional::<String>("mqtt.username")?,
+                password: taker.optional::<String>("mqtt.password")?,
+                client_id: taker
+                    .optional::<String>("mqtt.client_id")?
+                    .unwrap_or_else(|| "zendure-controller".to_string()),
+            })
+        } else {
+            None
+        };
 
-        let shelly_topic = taker.required::<String>("shelly.topic")?;
-        let solar_phase = taker.lenient::<SolarPhase>("shelly.solar_phase", SolarPhase::A)?;
+        let shelly = if taker.has_table("shelly")? {
+            Some(ShellyConfig {
+                topic: taker.required::<String>("shelly.topic")?,
+                solar_phase: taker.lenient::<SolarPhase>("shelly.solar_phase", SolarPhase::A)?,
+            })
+        } else {
+            None
+        };
+
+        // `[meter]` picks which source feeds the engine. Absent means
+        // `Shelly`, the only meter every config written before this table
+        // existed ever had — the same "presence selects a default" rule
+        // `[mqtt]` and `[shelly]` follow, in the other direction: those two
+        // default to *absent*, this one defaults to a *variant*, because
+        // "no meter at all" was never a coherent controller.
+        let meter = if taker.has_table("meter")? {
+            let kind = taker.required::<String>("meter.kind")?;
+            match kind.as_str() {
+                "shelly" => MeterConfig::Shelly,
+                "synthetic" => MeterConfig::Synthetic {
+                    base_load: taker.required::<Watts>("meter.base_load")?,
+                    solar_peak: taker.required::<Watts>("meter.solar_peak")?,
+                },
+                other => {
+                    return Err(format!(
+                        "meter.kind must be \"shelly\" or \"synthetic\", found {other:?}"
+                    ));
+                }
+            }
+        } else {
+            MeterConfig::Shelly
+        };
+
+        // Two coherence checks a per-field reader cannot express, because
+        // each is a relationship *between* tables rather than a property of
+        // one. Both fatal: getting either wrong means the controller cannot
+        // talk to the thing it was just told to use.
+        if matches!(meter, MeterConfig::Shelly) && mqtt.is_none() {
+            return Err(
+                "meter is Shelly (the default) but [mqtt] is absent — the Shelly reading \
+                 arrives over MQTT; add [mqtt], or set [meter] kind = \"synthetic\" to run \
+                 without a broker"
+                    .to_string(),
+            );
+        }
+        if matches!(meter, MeterConfig::Shelly) && shelly.is_none() {
+            return Err(
+                "meter is Shelly (the default) but [shelly] is absent — shelly.topic is \
+                 required; add [shelly], or set [meter] kind = \"synthetic\""
+                    .to_string(),
+            );
+        }
+        if matches!(meter, MeterConfig::Synthetic { .. })
+            && !matches!(device, DeviceConfig::Virtual { .. })
+        {
+            return Err(
+                "meter kind = \"synthetic\" requires [[device]] kind = \"virtual\" — the \
+                 synthetic meter feeds the battery's own simulated flow back into its reading, \
+                 which only a virtual battery can supply"
+                    .to_string(),
+            );
+        }
 
         let ha_publish_prefix =
             taker.lenient::<String>("homeassistant.publish_prefix", "zendure".to_string())?;
@@ -694,16 +962,11 @@ impl Config {
 
         Ok((
             Config {
-                mqtt_host,
-                mqtt_port,
-                mqtt_username,
-                mqtt_password,
-                mqtt_client_id,
-                zendure_ip,
-                zendure_sn,
-                shelly_topic,
+                mqtt,
+                device,
+                shelly,
+                meter,
                 ha_publish_prefix,
-                zendure_poll_interval,
                 charge_margin,
                 discharge_margin,
                 charge_start_threshold,
@@ -715,7 +978,6 @@ impl Config {
                 min_soc,
                 max_soc,
                 balance_weekday,
-                solar_phase,
                 solar_discharge_block_threshold,
                 min_idle_before_discharge,
                 timezone,

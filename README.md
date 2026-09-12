@@ -313,6 +313,26 @@ does it.
 cargo run -- --config ./config.example.toml
 ```
 
+### Running against the simulator
+
+No Zendure, no Shelly, no MQTT broker — `config.example.virtual.toml` runs
+the whole controller against a `VirtualBattery` (a real integrating energy
+model, not a stub that agrees with whatever it's told) fed by a synthetic
+house meter that folds the battery's own flow back into its readings. It
+works from a fresh clone with no setup:
+
+```bash
+cargo run -- --config config.example.virtual.toml
+```
+
+See that file for what each table means (and why `[mqtt]` and `[shelly]` are
+both absent from it); briefly, `[[device]] kind = "virtual"` picks the
+simulated battery and `[meter] kind = "synthetic"` picks the simulated house,
+in place of `kind = "zendure"` and a real Shelly subscription. With no
+`[mqtt]`, `run.rs` publishes through a `NullPublisher` instead of a real
+queued sink — decisions and telemetry are made exactly as they would be
+against real hardware, they just have nowhere to go over MQTT.
+
 ## HomeAssistant
 
 The controller publishes MQTT discovery config automatically. These sensors appear in HA:

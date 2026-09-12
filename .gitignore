@@ -1,2 +1,5 @@
 /target
 .claude/focus.md
+# Where config.example.virtual.toml points its journal and RTE state — created
+# automatically on first run against the simulator (see that file's comments).
+/local

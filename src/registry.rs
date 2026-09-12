@@ -55,45 +55,78 @@
 //! device fails in exactly the same case it did before.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::allocate::Directive;
 use crate::command::Command;
+use crate::config::{Config, DeviceConfig};
 #[cfg(test)]
-use crate::device::{AC2400_PLUS, RecordingBattery};
+use crate::device::RecordingBattery;
 use crate::device::{
-    Applied, BatteryController, BatteryMonitor, BatteryReading, BatterySpec, ControlPath, Outcome,
-    PollError,
+    AC2400_PLUS, Applied, BatteryController, BatteryMonitor, BatteryReading, BatterySpec,
+    ControlPath, Outcome, PollError,
 };
+use crate::simulation::VirtualBattery;
 use crate::world::DeviceId;
 use crate::zendure::ZendureClient;
 
 /// One battery adapter, in whichever shape it actually is.
 ///
-/// No `Virtual` variant yet: `simulation.rs` exists but nothing selects it at
-/// runtime, so adding the arm now would be a variant with no caller —
-/// dead code with extra steps. That is later work, when something builds a
-/// `Config` that can ask for it.
+/// `Virtual` holds an `Arc` rather than an owned `VirtualBattery`, unlike the
+/// other two arms: `run.rs`'s synthetic meter (`source::synthetic`) reads the
+/// same battery's `flow()` back into the meter reading it manufactures, which
+/// is the whole point of that module — a naive synthetic feed that never
+/// looks at the battery again just lies. `from_config`, below, is what shares
+/// one clone into this registry and another into the meter task.
 pub enum Battery {
     Zendure(ZendureClient),
+    Virtual(Arc<VirtualBattery>),
     #[cfg(test)]
     Recording(RecordingBattery),
 }
 
 impl Battery {
-    /// The one supported adapter, wired up here rather than in `run.rs`. This
-    /// is the only place a vendor is named when building the registry — the
+    /// The Zendure adapter, wired up here rather than in `run.rs`. This is
+    /// the only place that vendor is named when building the registry — the
     /// coordinator hands this a host and a serial and gets back an opaque
     /// `Battery`, the same way it already never sees `ZendureClient` once a
     /// directive is routed through `actuate`.
-    ///
-    /// Still a fixed choice, not a config-driven one: there is only the one
-    /// adapter, so this takes the same two arguments `ZendureClient::new`
-    /// does rather than a `Config` it would have to depend on. The `Virtual`
-    /// variant this module's doc comment anticipates is what turns this into
-    /// a real choice.
     pub fn zendure(ip: &str, sn: String) -> Self {
         Battery::Zendure(ZendureClient::new(ip, sn))
     }
+}
+
+/// Builds the registry `run.rs` drives, from configuration.
+///
+/// The one place a [`DeviceConfig`] becomes a live adapter — `run.rs` never
+/// matches on `DeviceConfig` itself, the same discipline `Battery::zendure`
+/// already kept for the vendor name. A virtual device always simulates the
+/// one real spec this crate knows (`AC2400_PLUS`): `DeviceConfig::Virtual`
+/// carries no rated limits of its own, the same way a real Zendure's rating
+/// is a fact about the hardware and not a config knob.
+///
+/// "Exactly one device" is still enforced upstream, in
+/// `config::take_device` — this only ever has the one `DeviceConfig` to
+/// convert.
+pub fn from_config(config: &Config) -> Devices {
+    let battery = match &config.device {
+        DeviceConfig::Zendure { ip, sn, .. } => Battery::zendure(ip, sn.clone()),
+        DeviceConfig::Virtual {
+            id,
+            packs,
+            soc,
+            charge_efficiency,
+            discharge_efficiency,
+        } => Battery::Virtual(Arc::new(VirtualBattery::new(
+            DeviceId::new(id.clone()),
+            AC2400_PLUS,
+            packs.clone(),
+            *soc,
+            *charge_efficiency,
+            *discharge_efficiency,
+        ))),
+    };
+    Devices::new([battery])
 }
 
 /// `Error = String`: each arm's own error type is stringified here, at
@@ -106,6 +139,7 @@ impl BatteryController for Battery {
     fn id(&self) -> &DeviceId {
         match self {
             Battery::Zendure(client) => client.id(),
+            Battery::Virtual(battery) => BatteryController::id(battery.as_ref()),
             #[cfg(test)]
             Battery::Recording(battery) => battery.id(),
         }
@@ -114,6 +148,13 @@ impl BatteryController for Battery {
     async fn apply(&self, command: &Command) -> Result<(), String> {
         match self {
             Battery::Zendure(client) => client.apply(command).await.map_err(|e| e.to_string()),
+            // `VirtualBattery::apply`'s error is `Infallible` — see that
+            // impl's own doc comment — so there is nothing to stringify,
+            // only the `Ok` to keep.
+            Battery::Virtual(battery) => {
+                battery.apply(command).await.unwrap();
+                Ok(())
+            }
             // Already `Result<(), String>` — no conversion needed, and
             // stringifying a `String` again would just clone it.
             #[cfg(test)]
@@ -138,6 +179,7 @@ impl BatteryMonitor for Battery {
     fn id(&self) -> &DeviceId {
         match self {
             Battery::Zendure(client) => client.id(),
+            Battery::Virtual(battery) => BatteryMonitor::id(battery.as_ref()),
             #[cfg(test)]
             Battery::Recording(battery) => battery.id(),
         }
@@ -146,6 +188,7 @@ impl BatteryMonitor for Battery {
     fn spec(&self) -> &BatterySpec {
         match self {
             Battery::Zendure(client) => client.spec(),
+            Battery::Virtual(battery) => battery.spec(),
             // `RecordingBattery` is the write-only double `actuate`'s tests
             // share (see its doc comment in `device.rs`) — it answers for a
             // device id and records commands, and was deliberately not
@@ -160,6 +203,7 @@ impl BatteryMonitor for Battery {
     async fn prepare(&self) -> Result<BatteryReading, PollError> {
         match self {
             Battery::Zendure(client) => client.prepare().await,
+            Battery::Virtual(battery) => battery.prepare().await,
             #[cfg(test)]
             Battery::Recording(battery) => Err(unreadable(battery.id())),
         }
@@ -168,6 +212,7 @@ impl BatteryMonitor for Battery {
     async fn poll(&self) -> Result<BatteryReading, PollError> {
         match self {
             Battery::Zendure(client) => client.poll().await,
+            Battery::Virtual(battery) => battery.poll().await,
             #[cfg(test)]
             Battery::Recording(battery) => Err(unreadable(battery.id())),
         }

@@ -7,7 +7,7 @@ use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS};
 use tokio::sync::mpsc;
 
 use crate::announce::Announcer;
-use crate::config::Config;
+use crate::config::MqttConfig;
 use crate::journal::Journal;
 use crate::publish::Publisher;
 use crate::source::MeterObservation;
@@ -24,10 +24,10 @@ pub enum MqttEvent {
     Meter(MeterObservation),
 }
 
-pub fn create_mqtt_client(config: &Config) -> (AsyncClient, EventLoop) {
-    let mut opts = MqttOptions::new(&config.mqtt_client_id, &config.mqtt_host, config.mqtt_port);
+pub fn create_mqtt_client(mqtt: &MqttConfig) -> (AsyncClient, EventLoop) {
+    let mut opts = MqttOptions::new(&mqtt.client_id, &mqtt.host, mqtt.port);
     opts.set_keep_alive(Duration::from_secs(30));
-    if let (Some(user), Some(pass)) = (&config.mqtt_username, &config.mqtt_password) {
+    if let (Some(user), Some(pass)) = (&mqtt.username, &mqtt.password) {
         opts.set_credentials(user, pass);
     }
     AsyncClient::new(opts, 50)

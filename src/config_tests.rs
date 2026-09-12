@@ -12,16 +12,24 @@ use super::*;
 /// a leak into `SessionConfig` is visible rather than plausible.
 fn config() -> Config {
     Config {
-        mqtt_host: "SECRET-HOST".to_string(),
-        mqtt_port: 1883,
-        mqtt_username: Some("SECRET-USER".to_string()),
-        mqtt_password: Some("SECRET-PASSWORD".to_string()),
-        mqtt_client_id: "SECRET-CLIENT".to_string(),
-        zendure_ip: "SECRET-IP".to_string(),
-        zendure_sn: "SECRET-SERIAL".to_string(),
-        shelly_topic: "SECRET-TOPIC".to_string(),
+        mqtt: Some(MqttConfig {
+            host: "SECRET-HOST".to_string(),
+            port: 1883,
+            username: Some("SECRET-USER".to_string()),
+            password: Some("SECRET-PASSWORD".to_string()),
+            client_id: "SECRET-CLIENT".to_string(),
+        }),
+        device: DeviceConfig::Zendure {
+            ip: "SECRET-IP".to_string(),
+            sn: "SECRET-SERIAL".to_string(),
+            poll_interval: Duration::from_secs(30),
+        },
+        shelly: Some(ShellyConfig {
+            topic: "SECRET-TOPIC".to_string(),
+            solar_phase: SolarPhase::A,
+        }),
+        meter: MeterConfig::Shelly,
         ha_publish_prefix: "SECRET-PREFIX".to_string(),
-        zendure_poll_interval: Duration::from_secs(30),
         charge_margin: PowerMargin::new(50),
         discharge_margin: PowerMargin::new(5),
         charge_start_threshold: GridPower(-100.0),
@@ -34,7 +42,6 @@ fn config() -> Config {
         max_soc: Soc::new(100),
         rte_state_path: PathBuf::from("/SECRET/rte_state.json"),
         balance_weekday: Some(Weekday::Mon),
-        solar_phase: SolarPhase::A,
         solar_discharge_block_threshold: SolarPower::new(0.0),
         min_idle_before_discharge: Duration::from_secs(300),
         timezone: Tz::UTC,
@@ -166,7 +173,11 @@ fn the_example_config_parses_with_zero_warnings() {
 
 #[test]
 fn missing_mqtt_host_is_fatal() {
+    // `[mqtt]` present (so the "absent" coherence check below does not fire
+    // first) but empty, so the field-level check is what's being pinned.
     let toml = r#"
+        [mqtt]
+
         [[device]]
         kind = "zendure"
         ip = "192.168.1.253"
@@ -178,6 +189,26 @@ fn missing_mqtt_host_is_fatal() {
     "#;
     let err = Config::from_toml_str(toml).unwrap_err();
     assert!(err.contains("mqtt.host"), "{err}");
+}
+
+/// The coherence check `missing_mqtt_host_is_fatal` deliberately routes
+/// around: no `[mqtt]` table at all, with the default (Shelly) meter, is
+/// fatal — the Shelly reading arrives over MQTT, so there is nothing for the
+/// engine to decide against without a broker.
+#[test]
+fn a_shelly_meter_with_no_mqtt_table_is_fatal() {
+    let toml = r#"
+        [[device]]
+        kind = "zendure"
+        ip = "192.168.1.253"
+        sn = "SN123"
+        poll_interval_secs = 10
+
+        [shelly]
+        topic = "x"
+    "#;
+    let err = Config::from_toml_str(toml).unwrap_err();
+    assert!(err.contains("[mqtt]"), "{err}");
 }
 
 #[test]
@@ -430,16 +461,24 @@ fn the_tuning_table_has_exactly_the_session_config_keys() {
 #[test]
 fn the_example_config_is_what_production_runs() {
     let production = Config {
-        mqtt_host: "127.0.0.1".to_string(),
-        mqtt_port: 1883,
-        mqtt_username: None,
-        mqtt_password: None,
-        mqtt_client_id: "odroid".to_string(),
-        zendure_ip: "192.168.1.253".to_string(),
-        zendure_sn: "HEC4NENCN490270".to_string(),
-        shelly_topic: "shellypro3em-a4f00fcfcc18/status/em:0".to_string(),
+        mqtt: Some(MqttConfig {
+            host: "127.0.0.1".to_string(),
+            port: 1883,
+            username: None,
+            password: None,
+            client_id: "odroid".to_string(),
+        }),
+        device: DeviceConfig::Zendure {
+            ip: "192.168.1.253".to_string(),
+            sn: "HEC4NENCN490270".to_string(),
+            poll_interval: Duration::from_secs(10),
+        },
+        shelly: Some(ShellyConfig {
+            topic: "shellypro3em-a4f00fcfcc18/status/em:0".to_string(),
+            solar_phase: SolarPhase::A,
+        }),
+        meter: MeterConfig::Shelly,
         ha_publish_prefix: "zendure".to_string(),
-        zendure_poll_interval: Duration::from_secs(10),
         charge_margin: PowerMargin::new(50),
         discharge_margin: PowerMargin::new(5),
         charge_start_threshold: GridPower(-100.0),
@@ -451,7 +490,6 @@ fn the_example_config_is_what_production_runs() {
         min_soc: Soc::new(10),
         max_soc: Soc::new(80),
         balance_weekday: Some(Weekday::Mon),
-        solar_phase: SolarPhase::A,
         solar_discharge_block_threshold: SolarPower::new(200.0),
         min_idle_before_discharge: Duration::from_secs(300),
         timezone: "Europe/Amsterdam".parse().unwrap(),
@@ -467,4 +505,128 @@ fn the_example_config_is_what_production_runs() {
 
     assert_eq!(warnings, Vec::<String>::new(), "{warnings:?}");
     assert_eq!(production, from_toml);
+}
+
+// --- brokerless / virtual / synthetic ---------------------------------------
+
+/// The smallest brokerless file: no `[mqtt]`, no `[shelly]`, a virtual device,
+/// a synthetic meter. The mirror image of `minimal_toml()` — every test below
+/// starts here and changes exactly one thing.
+fn minimal_virtual_toml() -> String {
+    r#"
+        [[device]]
+        kind = "virtual"
+        id = "sim"
+        packs = [10000.0]
+        soc = 50
+        charge_efficiency = 95.0
+        discharge_efficiency = 95.0
+
+        [meter]
+        kind = "synthetic"
+        base_load = 500
+        solar_peak = 3000
+    "#
+    .to_string()
+}
+
+#[test]
+fn a_brokerless_virtual_config_parses_with_zero_warnings() {
+    let (config, warnings) = Config::from_toml_str(&minimal_virtual_toml()).unwrap();
+    assert_eq!(warnings, Vec::<String>::new(), "{warnings:?}");
+    assert!(config.mqtt.is_none());
+    assert!(config.shelly.is_none());
+    assert_eq!(
+        config.meter,
+        MeterConfig::Synthetic {
+            base_load: Watts(500),
+            solar_peak: Watts(3000),
+        }
+    );
+    assert_eq!(
+        config.device,
+        DeviceConfig::Virtual {
+            id: "sim".to_string(),
+            packs: vec![WattHours(10_000.0)],
+            soc: Soc::new(50),
+            charge_efficiency: Efficiency::new(95.0),
+            discharge_efficiency: Efficiency::new(95.0),
+        }
+    );
+}
+
+#[test]
+fn a_synthetic_meter_with_a_zendure_device_is_fatal() {
+    let toml = r#"
+        [[device]]
+        kind = "zendure"
+        ip = "192.168.1.253"
+        sn = "SN123"
+        poll_interval_secs = 10
+
+        [meter]
+        kind = "synthetic"
+        base_load = 500
+        solar_peak = 3000
+    "#;
+    let err = Config::from_toml_str(toml).unwrap_err();
+    assert!(err.contains("synthetic"), "{err}");
+    assert!(err.contains("virtual"), "{err}");
+}
+
+#[test]
+fn an_unknown_meter_kind_is_fatal() {
+    let toml = format!("{}\n[meter]\nkind = \"telepathic\"\n", minimal_toml());
+    let err = Config::from_toml_str(&toml).unwrap_err();
+    assert!(err.contains("meter.kind"), "{err}");
+}
+
+#[test]
+fn missing_device_packs_is_fatal_for_a_virtual_device() {
+    let toml = r#"
+        [[device]]
+        kind = "virtual"
+        id = "sim"
+        soc = 50
+        charge_efficiency = 95.0
+        discharge_efficiency = 95.0
+
+        [meter]
+        kind = "synthetic"
+        base_load = 500
+        solar_peak = 3000
+    "#;
+    let err = Config::from_toml_str(toml).unwrap_err();
+    assert!(err.contains("device.packs"), "{err}");
+}
+
+#[test]
+fn an_unknown_device_kind_is_still_fatal() {
+    let toml = r#"
+        [[device]]
+        kind = "peblar"
+        ip = "x"
+        sn = "y"
+        poll_interval_secs = 10
+
+        [mqtt]
+        host = "127.0.0.1"
+
+        [shelly]
+        topic = "x"
+    "#;
+    let err = Config::from_toml_str(toml).unwrap_err();
+    assert!(err.contains("device.kind"), "{err}");
+}
+
+/// `[mqtt]` may still be configured for a synthetic meter — e.g. to publish
+/// over a real broker while simulating the battery — so long as the device is
+/// virtual. Only the *combination* "Shelly meter, no mqtt" and "synthetic
+/// meter, non-virtual device" are refused.
+#[test]
+fn mqtt_alongside_a_synthetic_meter_is_allowed() {
+    let toml = format!("[mqtt]\nhost = \"127.0.0.1\"\n\n{}", minimal_virtual_toml());
+    let (config, warnings) = Config::from_toml_str(&toml).unwrap();
+    assert_eq!(warnings, Vec::<String>::new(), "{warnings:?}");
+    assert!(config.mqtt.is_some());
 }

@@ -96,6 +96,31 @@ pub trait Publisher: Send + Sync {
     fn publish(&self, message: Message) -> Accepted;
 }
 
+/// The brokerless sink: `run.rs` reaches for this when `[mqtt]` is absent from
+/// configuration, so a laptop with no broker can still run the whole
+/// coordinator loop.
+///
+/// **Returns `Accepted::Queued`, never `Accepted::Dropped`.** That looks
+/// backwards for something that discards every message, but it is the whole
+/// reason this type is safe to substitute for a real sink: `Announcer::announce`
+/// (`announce.rs`) only marks an id announced once the sink reports `Queued`,
+/// specifically so a refused document is retried rather than silently given up
+/// on. Answering `Dropped` here would not mean "nothing was sent" — it would
+/// make every discovery document, every poll, look like a broker that is
+/// permanently full, and `Announcer` would rebuild and re-offer all of them,
+/// forever, on a hot loop that goes nowhere. `Queued` says "this sink took the
+/// message," which is the one thing actually true about a sink whose entire
+/// job is to take a message and do nothing with it. Do not "simplify" this to
+/// `Dropped` because nothing is being delivered — that reasoning is exactly
+/// the bug this comment exists to prevent.
+pub struct NullPublisher;
+
+impl Publisher for NullPublisher {
+    fn publish(&self, _message: Message) -> Accepted {
+        Accepted::Queued
+    }
+}
+
 #[cfg(test)]
 pub(crate) struct RecordingPublisher {
     sent: std::sync::Mutex<Vec<Message>>,
@@ -162,6 +187,22 @@ mod tests {
         assert!(!Delivery::Telemetry.retain());
 
         assert_eq!(Delivery::Discovery.qos(), QoS::AtLeastOnce);
+    }
+
+    /// The property `NullPublisher`'s doc comment argues at length: it must
+    /// report `Queued`, never `Dropped`, or `Announcer` would rebuild and
+    /// re-offer every discovery document on every poll, forever.
+    #[test]
+    fn the_null_publisher_reports_every_message_queued() {
+        let publisher = NullPublisher;
+        assert_eq!(
+            publisher.publish(Message::telemetry("x".to_string(), "1".to_string())),
+            Accepted::Queued,
+        );
+        assert_eq!(
+            publisher.publish(Message::discovery("y".to_string(), "{}".to_string())),
+            Accepted::Queued,
+        );
         assert!(Delivery::Discovery.retain());
     }
 }

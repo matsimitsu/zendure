@@ -29,14 +29,9 @@
 //! other way. That closed loop, not the bell curve or the phase split, is
 //! what makes a run against this file worth anything.
 //!
-//! Nothing here has a call site yet — the CLI flag or config option that
-//! would spawn [`run_synthetic_meter`] instead of the real
-//! `mqtt::run_subscriber` is later, out-of-scope work, same as
-//! `VirtualBattery` itself when it landed. That is speculative in the sense
-//! that nothing calls it yet, not in the sense that it lacks tests, which is
-//! the distinction `simulation.rs`'s own header draws — and why this file
-//! carries the same `#![allow(dead_code)]`.
-#![allow(dead_code)]
+//! `run.rs` spawns [`run_synthetic_meter`] instead of the real
+//! `mqtt::run_subscriber` when `[meter] kind = "synthetic"` is configured —
+//! see `config::MeterConfig` and `registry::from_config`.
 
 use std::sync::Arc;
 use std::time::Duration;

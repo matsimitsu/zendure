@@ -1,27 +1,28 @@
 //! The coordinator loop: the process's whole runtime, lifted out of `main`.
 //!
 //! `main` parses arguments, initialises logging, reads configuration and calls
-//! [`run`] — nothing else. The split exists because the loop below is the one
-//! part of this crate no test has ever driven, and both defects that reached
-//! production hid in exactly there: the MQTT-deadline spin (`c131b2f`) was found
-//! by measuring CPU on the hardware rather than by the suite, and a failing
-//! device write silently disarming the failsafe (`bfcf5ab`) was found by
-//! reading.
+//! [`run`] — nothing else. The split exists because the loop below was, for a
+//! long time, the one part of this crate no test had ever driven, and both
+//! defects that reached production hid in exactly there: the MQTT-deadline
+//! spin (`c131b2f`) was found by measuring CPU on the hardware rather than by
+//! the suite, and a failing device write silently disarming the failsafe
+//! (`bfcf5ab`) was found by reading.
 //!
-//! **The loop still has no test, and this module does not yet make one
-//! possible.** [`run`] takes its stop condition as a parameter, which is one of
-//! the two seams a test needs; the other is the device. Both directions are
-//! now behind traits — [`crate::device::BatteryController`] for writes,
-//! [`crate::device::BatteryMonitor`] for reads — so `registry::actuate` and
-//! this module's own startup and poll code both reach a device only through
-//! [`Devices`]. That is not the same as being testable: there is exactly one
-//! adapter, `run` builds it itself with `Battery::zendure`, and nothing yet
-//! lets a test hand `run` a fake in its place. Saying otherwise would be
-//! worse than saying nothing: the next person looking for a regression test
-//! for a `select!` defect would believe the seam is here and stop looking.
+//! **The loop now has a test.** [`run`] always took its stop condition as a
+//! parameter — one of the two seams a test needs — and the other, the device,
+//! closed once [`registry::from_config`] could build a
+//! [`crate::simulation::VirtualBattery`] from `[[device]] kind = "virtual"`
+//! instead of `run` reaching for `Battery::zendure` itself. Paired with a
+//! synthetic meter (`[meter] kind = "synthetic"`, `source::synthetic`) feeding
+//! the same `MqttEvent` channel a real Shelly subscriber would, and a
+//! [`crate::publish::NullPublisher`] standing in for a broker, `run` now runs
+//! entirely off configuration with nothing real on the other end of any of its
+//! three external seams — see `tests::run_drives_real_decisions_against_a_virtual_battery`.
+//! That test also carries its own honest limit: it uses real time, not
+//! paused, and says why.
 //!
-//! What is testable and is tested: [`shut_down`], whose ordering is the
-//! subtlest thing in the file.
+//! [`shut_down`]'s ordering — the subtlest thing in the file — is still
+//! covered separately, by its own unit test below.
 
 use std::future::Future;
 use std::time::Duration;
@@ -29,7 +30,7 @@ use std::time::Duration;
 use crate::allocate::Directive;
 use crate::announce::Announcer;
 use crate::clock::Clock;
-use crate::config::Config;
+use crate::config::{Config, MeterConfig};
 use crate::device::{Applied, BatteryMonitor, BatteryReading, ControlPath};
 use crate::engine::Engine;
 use crate::event::Event;
@@ -37,8 +38,10 @@ use crate::journal::Journal;
 use crate::journal::Writer;
 use crate::models::ControlDecision;
 use crate::mqtt::{self, MqttEvent, MqttPublisher, PublisherTask};
-use crate::publish::Publisher;
+use crate::publish::{NullPublisher, Publisher};
 use crate::registry::{self, Battery, Devices};
+use crate::source;
+use crate::source::shelly::SolarPhase;
 use crate::units::{Soc, Timestamp, WattHours};
 use crate::world::{Measurement, World};
 use crate::{controller, rte};
@@ -53,6 +56,12 @@ use tokio::sync::mpsc;
 /// behind. Two seconds is long enough for a healthy broker to take a full queue
 /// and short enough to be invisible in a `systemctl restart`.
 const DRAIN_DEADLINE: Duration = Duration::from_secs(2);
+
+/// The MQTT half of shutdown: the publisher `shut_down` drains, and the task
+/// draining it. `None` in brokerless mode — see `run`'s own construction of
+/// this and `shut_down`'s doc comment for why that half is then skipped
+/// rather than faked.
+type MqttDrain = (std::sync::Arc<MqttPublisher>, PublisherTask);
 
 /// Why the loop stopped.
 ///
@@ -272,34 +281,35 @@ impl PollTelemetry {
     }
 }
 
-/// Start the devices, the journal and the MQTT client, then fold events until
-/// `stop` resolves or the subscriber goes away.
+/// Start the devices, the journal, and whichever combination of a broker
+/// connection and a meter source `config` asks for, then fold events until
+/// `stop` resolves or every feeder task goes away.
 pub async fn run(
     config: Config,
     stop: impl Future<Output = StopReason>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    tracing::info!("Starting Zendure controller for {}", config.zendure_sn);
+    tracing::info!(
+        "Starting Zendure controller for {}",
+        config.device.identity()
+    );
 
-    // The one place a vendor is named while wiring up the registry. Every
-    // call site below reaches this device only through `Devices` and the
-    // `BatteryController`/`BatteryMonitor` traits it implements.
-    let battery = Battery::zendure(&config.zendure_ip, config.zendure_sn.clone());
+    // Built from configuration rather than a fixed `Battery::zendure` call —
+    // `registry::from_config` is the one place a `DeviceConfig` becomes a
+    // live adapter. Every call site below reaches this device only through
+    // `Devices` and the `BatteryController`/`BatteryMonitor` traits it
+    // implements.
+    let devices = registry::from_config(&config);
+
+    let Some((_, primary)) = devices.primary() else {
+        unreachable!("devices was just constructed with exactly the one battery above")
+    };
 
     // The battery's identity in the world, fixed for the life of the process,
     // and taken from the adapter that will answer for it — the world's key and
     // the address on a directive have to be the same string the adapter matches
-    // against, so there is one source for it. The serial is what a journal
-    // reader would recognise it by, and it is stable across restarts in a way
+    // against, so there is one source for it. Stable across restarts in a way
     // an index into a list would not be.
-    let device_id = battery.id().clone();
-
-    // One battery, held in the registry rather than as a bare local — the
-    // next device this process drives is a second entry here, not a second
-    // local variable threaded through every call site below.
-    let devices = Devices::new([battery]);
-    let Some((_, primary)) = devices.primary() else {
-        unreachable!("devices was just constructed with exactly the one battery above")
-    };
+    let device_id = primary.id().clone();
 
     // On by default: by the time you think to enable logging, the bug you
     // wanted it for has already happened. Any failure here disables the journal
@@ -346,39 +356,106 @@ pub async fn run(
         telemetry.pack_count(),
     );
 
-    let (mqtt_client, eventloop) = mqtt::create_mqtt_client(&config);
-    // The sink the decision path publishes through. Its task owns the only
-    // `await` against the broker; nothing below this line can block on one.
-    let (publisher, mut publisher_task) = MqttPublisher::open(mqtt_client.clone());
     // What Home Assistant has already been told about. Shared with the
-    // subscriber, which resets it on every ConnAck.
+    // subscriber, which resets it on every ConnAck. Built unconditionally:
+    // even a brokerless run announces into a sink that just discards it, and
+    // `NullPublisher`'s own doc comment is why that is safe.
     let announcer = std::sync::Arc::new(Announcer::new());
+    let ha_prefix = config.ha_publish_prefix.clone();
 
     let (tx, mut rx) = mpsc::channel::<MqttEvent>(64);
+    // Every task that can produce an `MqttEvent` — the real MQTT subscriber,
+    // the synthetic meter, both, or (impossible per `Config::from_toml_str`'s
+    // coherence checks) neither. `rx.recv()` returning `None` below means
+    // every sender is gone, which is only true once every feeder here has
+    // ended — the same "closed channel means stop" reading a single
+    // subscriber used to carry alone.
+    let mut feeders: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
-    let shelly_topic = config.shelly_topic.clone();
-    // The one place the configured phase is read: from here it belongs to the
-    // adapter that knows what a phase is.
-    let solar_phase = config.solar_phase;
-    let ha_prefix = config.ha_publish_prefix.clone();
-    let subscriber_journal = journal.clone();
-    let subscriber_prefix = ha_prefix.clone();
-    let subscriber_publisher: std::sync::Arc<dyn Publisher> = publisher.clone();
-    let subscriber_announcer = announcer.clone();
-    let subscriber = tokio::spawn(async move {
-        mqtt::run_subscriber(
-            mqtt_client,
-            eventloop,
-            shelly_topic,
-            solar_phase,
-            subscriber_prefix,
-            subscriber_publisher,
-            subscriber_announcer,
-            tx,
-            subscriber_journal,
-        )
-        .await;
-    });
+    // The publisher: a real, queued sink over MQTT if `[mqtt]` is configured,
+    // or `NullPublisher` if not. `mqtt_drain` is `Some` only in the first
+    // case — it is what `shut_down` drains, and its absence is how a
+    // brokerless run skips that half of shutdown entirely.
+    let (publisher, mut mqtt_drain): (std::sync::Arc<dyn Publisher>, Option<MqttDrain>) =
+        match &config.mqtt {
+            Some(mqtt_cfg) => {
+                let (mqtt_client, eventloop) = mqtt::create_mqtt_client(mqtt_cfg);
+                // The sink the decision path publishes through. Its task owns
+                // the only `await` against the broker; nothing below this line
+                // can block on one.
+                let (mqtt_publisher, publisher_task) = MqttPublisher::open(mqtt_client.clone());
+                let publisher: std::sync::Arc<dyn Publisher> = mqtt_publisher.clone();
+
+                // A synthetic meter has no Shelly topic to subscribe to, but this
+                // task still has to run — it is what drives the broker's
+                // eventloop, without which nothing this publisher queues ever
+                // reaches the socket. An empty topic never matches a real
+                // publish, so the subscribe-and-parse half of the loop below
+                // simply never fires.
+                let shelly_topic = config
+                    .shelly
+                    .as_ref()
+                    .map(|s| s.topic.clone())
+                    .unwrap_or_default();
+                let solar_phase = config
+                    .shelly
+                    .as_ref()
+                    .map(|s| s.solar_phase)
+                    .unwrap_or(SolarPhase::A);
+                let subscriber_journal = journal.clone();
+                let subscriber_prefix = ha_prefix.clone();
+                let subscriber_publisher = publisher.clone();
+                let subscriber_announcer = announcer.clone();
+                let feed_tx = tx.clone();
+                feeders.push(tokio::spawn(async move {
+                    mqtt::run_subscriber(
+                        mqtt_client,
+                        eventloop,
+                        shelly_topic,
+                        solar_phase,
+                        subscriber_prefix,
+                        subscriber_publisher,
+                        subscriber_announcer,
+                        feed_tx,
+                        subscriber_journal,
+                    )
+                    .await;
+                }));
+
+                (publisher, Some((mqtt_publisher, publisher_task)))
+            }
+            None => {
+                tracing::info!("No [mqtt] configured — publishing through a null sink");
+                (std::sync::Arc::new(NullPublisher), None)
+            }
+        };
+
+    // The meter: a synthetic house feeding the same channel, when
+    // configured. `Config::from_toml_str` guarantees the primary device is
+    // `Battery::Virtual` whenever the meter is synthetic — see its coherence
+    // checks — so the match below never reaches its `unreachable!`.
+    if let MeterConfig::Synthetic {
+        base_load,
+        solar_peak,
+    } = &config.meter
+    {
+        let virtual_battery = match primary {
+            Battery::Virtual(battery) => battery.clone(),
+            _ => unreachable!(
+                "Config::from_toml_str requires a virtual device when the meter is synthetic"
+            ),
+        };
+        let profile = source::synthetic::HouseProfile::new(*base_load, *solar_peak);
+        let feed_tx = tx.clone();
+        let timezone = config.timezone;
+        feeders.push(tokio::spawn(async move {
+            source::synthetic::run_synthetic_meter(profile, virtual_battery, timezone, feed_tx)
+                .await;
+        }));
+    }
+
+    // Only the clones handed to the feeders above keep the channel open now.
+    drop(tx);
 
     let mqtt_timeout = config.mqtt_timeout;
     let mut engine = Engine::new(
@@ -406,7 +483,7 @@ pub async fn run(
     journal.event(&startup);
     engine.step(&startup);
 
-    let poll_interval = config.zendure_poll_interval;
+    let poll_interval = config.device.poll_interval();
     let mut poll_timer = tokio::time::interval(poll_interval);
     // Don't fire immediately — we just polled above
     poll_timer.tick().await;
@@ -573,9 +650,10 @@ pub async fn run(
     }
 
     shut_down(
-        &publisher,
-        &mut publisher_task,
-        subscriber,
+        mqtt_drain
+            .as_mut()
+            .map(|(publisher, task)| (&**publisher, task)),
+        feeders,
         journal,
         journal_writer,
     )
@@ -588,16 +666,21 @@ pub async fn run(
 ///
 /// Order matters, and it is not the order it looks like it should be.
 ///
-/// The publisher drains **first**, while the subscriber is still running,
-/// because the subscriber owns the MQTT eventloop and the eventloop is the only
-/// thing that actually moves bytes to the broker. Aborting it first would leave
-/// the publisher task awaiting a channel nobody drains, so every shutdown would
-/// stall for the full deadline and deliver nothing.
+/// The publisher drains **first**, while the feeders are still running,
+/// because the MQTT feeder owns the broker's eventloop and the eventloop is
+/// the only thing that actually moves bytes to the broker. Aborting it first
+/// would leave the publisher task awaiting a channel nobody drains, so every
+/// shutdown would stall for the full deadline and deliver nothing. `mqtt` is
+/// `None` in brokerless mode (no `[mqtt]` configured) — this whole half is
+/// then skipped, there being no broker connection to drain.
 ///
-/// Then the journal. Its writer stops when every sender is gone, and the
-/// subscriber task holds one, so the subscriber has to be finished before the
-/// last `Arc<Journal>` can drop. `abort` alone only schedules cancellation —
+/// Then the journal. Its writer stops when every sender is gone, and every
+/// feeder holds one, so every feeder has to be finished before the last
+/// `Arc<Journal>` can drop. `abort` alone only schedules cancellation —
 /// awaiting it is what guarantees the task and its captured clone are gone.
+/// **This half is unconditional**, whether or not `mqtt` was `Some`: the
+/// journal is the one thing this function exists to protect, brokerless or
+/// not.
 ///
 /// Both drains are bounded. The journal's was not, which made the deadline
 /// above argue for something the code did not do: an unbounded wait ends at
@@ -607,50 +690,53 @@ pub async fn run(
 /// What the MQTT half guarantees, precisely: **hand-off, not delivery.** The
 /// delivery task's `publish` returns once the request is in rumqttc's channel,
 /// so the task can finish with up to fifty messages still in front of the
-/// socket, and aborting the subscriber drops the eventloop that would have
-/// written them. In practice the subscriber is live throughout the window and
+/// socket, and aborting the MQTT feeder drops the eventloop that would have
+/// written them. In practice that feeder is live throughout the window and
 /// flushes most of it, which is why the ordering is what it is — but a tail can
 /// be lost, and the journal, not the broker, is the record that has to be
 /// right.
 async fn shut_down(
-    publisher: &MqttPublisher,
-    publisher_task: &mut PublisherTask,
-    subscriber: tokio::task::JoinHandle<()>,
+    mqtt: Option<(&MqttPublisher, &mut PublisherTask)>,
+    feeders: Vec<tokio::task::JoinHandle<()>>,
     journal: std::sync::Arc<Journal>,
     journal_writer: Option<Writer>,
 ) {
-    let queued = publisher.queued();
-    publisher.close();
+    if let Some((publisher, publisher_task)) = mqtt {
+        let queued = publisher.queued();
+        publisher.close();
 
-    // Matched rather than `.is_err()`, which sees only the timeout: a task that
-    // ended early resolves instantly to `Ok(Err(JoinError))`, and treating that
-    // as success reported a clean drain for a task that had been dead for
-    // hours.
-    match tokio::time::timeout(DRAIN_DEADLINE, &mut *publisher_task).await {
-        // Drained. The task logs its own closing summary.
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => tracing::warn!(
-            "MQTT delivery task ended early ({e}) — {} messages dropped this session",
-            publisher.dropped(),
-        ),
-        Err(_) => {
-            publisher_task.abort();
-            // The task prints this summary itself when it ends normally;
-            // aborting it is the one path where nobody would. `queued` is what
-            // was waiting when the drain began — some of it will have gone out
-            // since.
-            tracing::warn!(
-                "MQTT drain did not finish in {}s — {queued} messages were queued when it \
-                 began, {} dropped and {} failed this session",
-                DRAIN_DEADLINE.as_secs(),
+        // Matched rather than `.is_err()`, which sees only the timeout: a task
+        // that ended early resolves instantly to `Ok(Err(JoinError))`, and
+        // treating that as success reported a clean drain for a task that had
+        // been dead for hours.
+        match tokio::time::timeout(DRAIN_DEADLINE, &mut *publisher_task).await {
+            // Drained. The task logs its own closing summary.
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(
+                "MQTT delivery task ended early ({e}) — {} messages dropped this session",
                 publisher.dropped(),
-                publisher.failed(),
-            );
+            ),
+            Err(_) => {
+                publisher_task.abort();
+                // The task prints this summary itself when it ends normally;
+                // aborting it is the one path where nobody would. `queued` is
+                // what was waiting when the drain began — some of it will
+                // have gone out since.
+                tracing::warn!(
+                    "MQTT drain did not finish in {}s — {queued} messages were queued when it \
+                     began, {} dropped and {} failed this session",
+                    DRAIN_DEADLINE.as_secs(),
+                    publisher.dropped(),
+                    publisher.failed(),
+                );
+            }
         }
     }
 
-    subscriber.abort();
-    let _ = subscriber.await;
+    for feeder in feeders {
+        feeder.abort();
+        let _ = feeder.await;
+    }
     drop(journal);
 
     if let Some(writer) = journal_writer
@@ -666,9 +752,10 @@ async fn shut_down(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::SessionConfig;
+    use crate::config::{DeviceConfig, SessionConfig};
     use crate::fixtures;
     use crate::journal;
+    use crate::units::{Efficiency, GridPower, PowerMargin, RetentionDays, SolarPower, Watts};
 
     /// The two signal arms became one, so the wording an operator greps for is
     /// now produced by `Display`. Only the name is pinned here: retyping the
@@ -735,9 +822,8 @@ mod tests {
         tokio::time::timeout(
             DRAIN_DEADLINE * 4,
             shut_down(
-                &publisher,
-                &mut publisher_task,
-                subscriber,
+                Some((&publisher, &mut publisher_task)),
+                vec![subscriber],
                 journal,
                 Some(writer),
             ),
@@ -750,6 +836,123 @@ mod tests {
             journal::testing::count(&conn, "SELECT COUNT(*) FROM events"),
             events.len() as i64,
             "every row handed to the journal survived a drain that could not finish",
+        );
+    }
+
+    /// The end-to-end test: the real `run()`, with a virtual battery, a null
+    /// publisher and a synthetic meter — no network, no broker, no hardware.
+    /// This module's own doc comment used to say plainly that nothing drove
+    /// `run` end to end; this is what closes that gap.
+    ///
+    /// **Real time, bounded to a few ticks — not paused time.** Paused time
+    /// was tried first, and rejected for a specific, confirmed reason rather
+    /// than a vague "it didn't work": the journal's writer
+    /// (`journal::writer`) is a `spawn_blocking` task whose `blocking_recv`
+    /// loop only ends when every `Journal` sender is dropped, so for the
+    /// whole life of this test one such task is permanently alive. With
+    /// `#[tokio::test(start_paused = true)]`, tokio only auto-advances its
+    /// clock when the runtime is fully idle, and an outstanding
+    /// `spawn_blocking` task apparently keeps it from ever reaching that
+    /// state — confirmed by bisection: pointing `journal_path` at an
+    /// unwritable location (so `Journal::open` disables itself and spawns no
+    /// writer at all) let the very same test complete instantly under paused
+    /// time, and restoring a real journal reproduced an unconditional hang,
+    /// with no decisions logged past the first tick. Since the whole point of
+    /// this test is asserting against a *real* journal, disabling it to make
+    /// paused time work would have thrown away the thing being tested. Real
+    /// time it is instead: `run_synthetic_meter`'s ticks are 1s regardless, so
+    /// three real seconds is enough for several of them, and short enough not
+    /// to make the suite noticeably slower.
+    ///
+    /// Asserted against the **journal**, per the brief: not "it didn't
+    /// crash," but that a real decision was recorded, with the mode a
+    /// constant importing load and no solar can only produce (discharge) and
+    /// a non-zero commanded power.
+    #[tokio::test]
+    async fn run_drives_real_decisions_against_a_virtual_battery() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = Config {
+            mqtt: None,
+            device: DeviceConfig::Virtual {
+                id: "sim".to_string(),
+                packs: vec![WattHours(10_000.0)],
+                soc: Soc::new(50),
+                charge_efficiency: Efficiency::new(95.0),
+                discharge_efficiency: Efficiency::new(95.0),
+            },
+            shelly: None,
+            // A constant 2 kW load and no solar: the grid reading always
+            // imports solidly, so the objective has something unambiguous to
+            // discharge against instead of hovering near a threshold.
+            meter: MeterConfig::Synthetic {
+                base_load: Watts(2000),
+                solar_peak: Watts(0),
+            },
+            ha_publish_prefix: "test".to_string(),
+            charge_margin: PowerMargin::new(50),
+            discharge_margin: PowerMargin::new(5),
+            charge_start_threshold: GridPower(-100.0),
+            discharge_start_threshold: GridPower(0.0),
+            // No cooldowns: the tuning knobs a real deployment leans on to
+            // avoid chattering, turned down here so the test does not have
+            // to wait out a cooldown window to see a second decision within
+            // its few real seconds.
+            min_mode_duration: Duration::from_secs(0),
+            min_decision_interval: Duration::from_secs(0),
+            idle_timeout: Duration::from_secs(300),
+            cycle_warn_threshold: 200,
+            min_soc: Soc::new(10),
+            max_soc: Soc::new(100),
+            balance_weekday: None,
+            solar_discharge_block_threshold: SolarPower::ZERO,
+            min_idle_before_discharge: Duration::from_secs(0),
+            timezone: chrono_tz::Tz::UTC,
+            mqtt_timeout: Duration::from_secs(60),
+            journal_path: dir.path().join("journal.db"),
+            journal_retention_days: RetentionDays::new(90).unwrap(),
+            rte_state_path: dir.path().join("rte_state.json"),
+            log_filter: "zendure=off".to_string(),
+        };
+        let journal_path = config.journal_path.clone();
+
+        // A few real ticks of the 1s synthetic meter, and nowhere near the
+        // virtual device's 10s poll interval — this test's decisions all come
+        // from meter events, not from a poll.
+        let stop = async {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            StopReason::Sigterm
+        };
+
+        run(config, stop).await.expect("run must exit cleanly");
+
+        let conn = rusqlite::Connection::open(&journal_path).unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT command FROM decisions \
+                 WHERE kind = 'decision' AND command IS NOT NULL",
+            )
+            .unwrap();
+        let commands: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+
+        assert!(
+            !commands.is_empty(),
+            "the objective must have recorded at least one real decision"
+        );
+        assert!(
+            commands
+                .iter()
+                .all(|c| c.starts_with("set_discharge(") || c.starts_with("set_idle")),
+            "a constant importing load with no solar must never charge, got {commands:?}",
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|c| c.starts_with("set_discharge(") && c != "set_discharge(0W)"),
+            "at least one discharge decision must carry non-zero power, got {commands:?}",
         );
     }
 }

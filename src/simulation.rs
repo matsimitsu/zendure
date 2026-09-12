@@ -11,16 +11,10 @@
 //! able to discharge. That is what makes it useful for testing the objective
 //! rather than just the plumbing around it.
 //!
-//! Not yet selectable or wired into anything — this file only has to be an
-//! honest [`BatteryController`], not a running mode. That is later work.
-
-// `VirtualBattery`'s public API has no call site yet — the config flag or CLI
-// argument that picks it over `ZendureClient` is later work — so every
-// accessor here would otherwise be flagged as dead code in a non-test build.
-// `units.rs` carries the same attribute for the same reason: this is
-// speculative in the sense that nothing calls it yet, not in the sense that
-// it lacks tests, which is the distinction that module's header draws.
-#![allow(dead_code)]
+//! `registry::from_config` is what selects it: a `[[device]] kind = "virtual"`
+//! entry builds one of these instead of a `ZendureClient`, and from that point
+//! on `run.rs` reaches it only through [`BatteryController`] and
+//! [`BatteryMonitor`], the same as any real device.
 
 use std::sync::Mutex;
 
@@ -28,7 +22,9 @@ use tokio::time::Instant;
 
 use crate::battery::BatteryState;
 use crate::command::Command;
-use crate::device::{BatteryController, BatterySpec};
+use crate::device::{
+    BatteryController, BatteryMonitor, BatteryReading, BatterySpec, BatteryTelemetry, PollError,
+};
 use crate::sync::guard;
 use crate::units::{BatteryPower, Efficiency, Setpoint, Soc, WattHours, Watts};
 use crate::world::DeviceId;
@@ -283,6 +279,57 @@ impl BatteryController for VirtualBattery {
     async fn apply(&self, command: &Command) -> Result<(), Self::Error> {
         self.apply_at(Instant::now(), command);
         Ok(())
+    }
+}
+
+/// The read side. `prepare` and `poll` are the same call here — there is no
+/// wake-into-RAM-mode handshake to run once at startup, because there is no
+/// device to wake; a simulated pack is ready to report from the moment it is
+/// constructed.
+impl BatteryMonitor for VirtualBattery {
+    fn id(&self) -> &DeviceId {
+        &self.id
+    }
+
+    fn spec(&self) -> &BatterySpec {
+        &self.spec
+    }
+
+    async fn prepare(&self) -> Result<BatteryReading, PollError> {
+        Ok(self.reading_as_battery_reading())
+    }
+
+    async fn poll(&self) -> Result<BatteryReading, PollError> {
+        Ok(self.reading_as_battery_reading())
+    }
+}
+
+impl VirtualBattery {
+    /// Builds the [`BatteryReading`] `prepare`/`poll` hand back: the model's
+    /// state plus telemetry that is honest about what a simulated pack does
+    /// not have.
+    ///
+    /// `pack_capacities` is always `Some` — every tick, not only the first —
+    /// because unlike a real device this model never fails to report them;
+    /// `run.rs`'s "keep the last known set" fallback exists for a report that
+    /// *can* omit them, which this one never does. No temperatures (a
+    /// simulated pack generates none) and no `min_soc` (nothing here ever
+    /// floors it below zero), so both read as the caller's own defaults
+    /// rather than a fabricated number.
+    fn reading_as_battery_reading(&self) -> BatteryReading {
+        let state = self.reading();
+        BatteryReading {
+            telemetry: BatteryTelemetry {
+                charge: state.current_power.charging(),
+                discharge: state.current_power.discharging(),
+                pack_capacities: Some(self.packs.clone()),
+                pack_temps: Vec::new(),
+                enclosure_temp: None,
+                min_soc: None,
+            },
+            state,
+            raw: None,
+        }
     }
 }
 
