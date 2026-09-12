@@ -8,11 +8,11 @@ use serde::Serialize;
 use serde::de::IgnoredAny;
 use tokio::sync::mpsc;
 
-use crate::device::Outcome;
+use crate::device::{ControlPath, Outcome};
 use crate::engine::EngineState;
 use crate::event::Event;
 use crate::models::ControlDecision;
-use crate::units::RetentionDays;
+use crate::units::{RetentionDays, Timestamp};
 
 /// How many records may be in flight before the control loop starts dropping
 /// them. At roughly one meter reading a second plus a poll and a decision, this
@@ -49,7 +49,12 @@ const SCHEMA_VERSION: i64 = 1;
 /// is full the record is dropped and counted, because the decision path waiting
 /// on a logger is the one failure mode this design exists to rule out.
 pub struct Journal {
-    tx: mpsc::Sender<Record>,
+    /// `None` when the journal is disabled — an unusable path, a database that
+    /// would not open. Kept *inside* the type rather than handing callers an
+    /// `Option<Journal>`: every method here is `&self`, infallible and already
+    /// swallows its own errors, so "there is no journal" is this module's
+    /// business and not a conditional at seven call sites.
+    tx: Option<mpsc::Sender<Record>>,
     dropped: Arc<AtomicU64>,
 }
 
@@ -62,8 +67,8 @@ pub type Writer = tokio::task::JoinHandle<()>;
 /// malformed value costs the caller a `debug!` rather than killing the writer.
 enum Record {
     Event {
-        ts_ms: i64,
-        kind: String,
+        at: Timestamp,
+        kind: &'static str,
         payload_json: String,
     },
     Decision(Box<DecisionRow>),
@@ -71,7 +76,7 @@ enum Record {
 
 /// One actuated command, or one decision that commanded nothing.
 struct DecisionRow {
-    ts_ms: i64,
+    at: Timestamp,
     kind: &'static str,
     device: Option<String>,
     payload_json: String,
@@ -87,28 +92,14 @@ struct DecisionRow {
     pre_battery_net_w: Option<f64>,
 }
 
-/// Which path produced a decision. Recorded so the failsafe's re-asserted idles
-/// can be told from the objective's own decisions without inferring it from the
-/// reason string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DecisionKind {
-    Decision,
-    Failsafe,
-}
-
-impl DecisionKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            DecisionKind::Decision => "decision",
-            DecisionKind::Failsafe => "failsafe",
-        }
-    }
-}
-
 impl Journal {
-    /// Open the journal and start its writer. Returns `None` (with a warning)
-    /// if the database cannot be opened or prepared, so the caller carries on
-    /// without a journal rather than failing to start.
+    /// Open the journal and start its writer.
+    ///
+    /// Always returns a usable `Journal`. If the database cannot be opened or
+    /// prepared it warns and returns a disabled one, so the caller carries on
+    /// without a journal rather than failing to start — and without having to
+    /// know which it got. The `Writer` is `None` in that case, since there is
+    /// nothing to drain.
     ///
     /// `session_config` is the decision-relevant configuration, recorded once so
     /// a replay knows what tuning produced these rows. It is not the whole
@@ -119,20 +110,20 @@ impl Journal {
         retention: RetentionDays,
         version: &str,
         session_config: &T,
-    ) -> Option<(Self, Writer)> {
+    ) -> (Self, Option<Writer>) {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
             && let Err(e) = std::fs::create_dir_all(parent)
         {
             tracing::warn!("Journal disabled: cannot create {}: {e}", parent.display());
-            return None;
+            return (Self::disabled(), None);
         }
 
         let conn = match Connection::open(path) {
             Ok(conn) => conn,
             Err(e) => {
                 tracing::warn!("Journal disabled: cannot open {}: {e}", path.display());
-                return None;
+                return (Self::disabled(), None);
             }
         };
 
@@ -145,7 +136,7 @@ impl Journal {
             Ok(id) => id,
             Err(e) => {
                 tracing::warn!("Journal disabled: cannot prepare {}: {e}", path.display());
-                return None;
+                return (Self::disabled(), None);
             }
         };
 
@@ -158,7 +149,21 @@ impl Journal {
         });
 
         tracing::info!("Journal open at {}", path.display());
-        Some((Self { tx, dropped }, handle))
+        (
+            Self {
+                tx: Some(tx),
+                dropped,
+            },
+            Some(handle),
+        )
+    }
+
+    /// A journal that accepts every record and keeps none.
+    fn disabled() -> Self {
+        Self {
+            tx: None,
+            dropped: Arc::new(AtomicU64::new(0)),
+        }
     }
 
     /// Record an engine event. Called *before* the event is stepped, so a crash
@@ -166,8 +171,8 @@ impl Journal {
     pub fn event(&self, event: &Event) {
         match serde_json::to_string(event) {
             Ok(payload_json) => self.send(Record::Event {
-                ts_ms: event.at().as_millis(),
-                kind: event.kind().to_string(),
+                at: event.at(),
+                kind: event.kind(),
                 payload_json,
             }),
             Err(e) => tracing::debug!("Journal: cannot serialize {}: {e}", event.kind()),
@@ -177,7 +182,7 @@ impl Journal {
     /// Record a payload exactly as it arrived, before anything tried to parse
     /// it. Anything that is not valid JSON is stored as a JSON string, so a
     /// truncated device response is captured rather than lost.
-    pub fn raw(&self, kind: &str, payload: &str) {
+    pub fn raw(&self, kind: &'static str, payload: &str) {
         // Validates the syntax without building a `Value` or allocating.
         let payload_json = match serde_json::from_str::<IgnoredAny>(payload) {
             Ok(_) => payload.to_string(),
@@ -190,8 +195,14 @@ impl Journal {
             },
         };
         self.send(Record::Event {
-            ts_ms: Utc::now().timestamp_millis(),
-            kind: kind.to_string(),
+            // The wall clock, not an event's own: these are captured upstream
+            // of the engine, before anything has parsed them, so there is no
+            // `Clock` attached yet. `events.ts_ms` therefore mixes observed time
+            // (engine events) with write time (`shelly`, `zendure_poll`); they
+            // differ by the few milliseconds between receiving a payload and
+            // folding it in. `events.id` is monotonic if you need a strict order.
+            at: Timestamp::from_millis(Utc::now().timestamp_millis()),
+            kind,
             payload_json,
         });
     }
@@ -207,8 +218,8 @@ impl Journal {
     /// the case you would go looking for.
     pub fn decision(
         &self,
-        ts_ms: i64,
-        kind: DecisionKind,
+        at: Timestamp,
+        path: ControlPath,
         decision: &ControlDecision,
         state: &EngineState,
         outcomes: &[Outcome],
@@ -229,8 +240,8 @@ impl Journal {
 
         let row = |device, command, outcome, error| {
             Record::Decision(Box::new(DecisionRow {
-                ts_ms,
-                kind: kind.as_str(),
+                at,
+                kind: path.journal_kind(),
                 device,
                 payload_json: payload_json.clone(),
                 state_json: state_json.clone(),
@@ -258,7 +269,10 @@ impl Journal {
     /// Non-blocking by construction. A full queue means the writer is stuck, and
     /// the control loop is not the place to find that out by waiting.
     fn send(&self, record: Record) {
-        if self.tx.try_send(record).is_err() {
+        let Some(tx) = &self.tx else {
+            return;
+        };
+        if tx.try_send(record).is_err() {
             let n = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
             // Every power of two, so a persistent stall is loud without a
             // wedged writer flooding the log at one line per reading.
@@ -401,12 +415,12 @@ fn writer(
 fn write(conn: &Connection, session_id: i64, record: &Record) -> rusqlite::Result<()> {
     match record {
         Record::Event {
-            ts_ms,
+            at,
             kind,
             payload_json,
         } => conn.execute(
             "INSERT INTO events (session_id, ts_ms, kind, payload_json) VALUES (?1, ?2, ?3, ?4)",
-            (session_id, ts_ms, kind, payload_json),
+            (session_id, at.as_millis(), kind, payload_json),
         )?,
         Record::Decision(row) => conn.execute(
             "INSERT INTO decisions
@@ -415,7 +429,7 @@ fn write(conn: &Connection, session_id: i64, record: &Record) -> rusqlite::Resul
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             (
                 session_id,
-                row.ts_ms,
+                row.at.as_millis(),
                 &row.device,
                 row.kind,
                 &row.payload_json,
@@ -494,6 +508,10 @@ mod tests {
 
     const NOW_MS: i64 = 1_757_000_000_000;
 
+    fn at() -> Timestamp {
+        Timestamp::from_millis(NOW_MS)
+    }
+
     fn clock() -> Clock {
         Clock {
             now: Timestamp::from_millis(NOW_MS),
@@ -556,8 +574,8 @@ mod tests {
     fn open(dir: &tempfile::TempDir) -> (Journal, Writer, std::path::PathBuf) {
         let path = dir.path().join("journal.db");
         let (journal, writer) =
-            Journal::open(&path, days(90), "0.0.0-test", &serde_json::json!({"k": 1}))
-                .expect("journal opens in a temp dir");
+            Journal::open(&path, days(90), "0.0.0-test", &serde_json::json!({"k": 1}));
+        let writer = writer.expect("journal opens in a temp dir");
         (journal, writer, path)
     }
 
@@ -714,8 +732,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (journal, writer, path) = open(&dir);
         journal.decision(
-            NOW_MS,
-            DecisionKind::Decision,
+            at(),
+            ControlPath::Objective,
             &decision(),
             &engine_state(),
             &[
@@ -764,8 +782,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (journal, writer, path) = open(&dir);
         journal.decision(
-            NOW_MS,
-            DecisionKind::Failsafe,
+            at(),
+            ControlPath::Failsafe,
             &decision(),
             &engine_state(),
             &[],
@@ -802,8 +820,8 @@ mod tests {
             ..engine_state()
         };
         journal.decision(
-            NOW_MS,
-            DecisionKind::Failsafe,
+            at(),
+            ControlPath::Failsafe,
             &decision(),
             &state,
             &[outcome("SN123", Applied::Ok, None)],
@@ -846,8 +864,8 @@ mod tests {
         let (journal, writer, path) = open(&dir);
         journal.raw("shelly", r#"{"ok":true}"#);
         journal.decision(
-            NOW_MS,
-            DecisionKind::Decision,
+            at(),
+            ControlPath::Objective,
             &decision(),
             &engine_state(),
             &[],
@@ -885,8 +903,8 @@ mod tests {
         let (journal, writer, path) = open(&dir);
         journal.raw("shelly", r#"{"old":true}"#);
         journal.decision(
-            NOW_MS,
-            DecisionKind::Decision,
+            at(),
+            ControlPath::Objective,
             &decision(),
             &engine_state(),
             &[outcome("SN123", Applied::Ok, None)],
@@ -915,7 +933,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
         let journal = Journal {
-            tx,
+            tx: Some(tx),
             dropped: Arc::new(AtomicU64::new(0)),
         };
 
@@ -923,8 +941,8 @@ mod tests {
             journal.raw("shelly", r#"{"ok":true}"#);
         }
         journal.decision(
-            NOW_MS,
-            DecisionKind::Decision,
+            at(),
+            ControlPath::Objective,
             &decision(),
             &engine_state(),
             &[],
@@ -949,14 +967,35 @@ mod tests {
 
     /// An unusable path disables the journal rather than failing startup —
     /// the invariant carried over from the NDJSON capture.
+    ///
+    /// The disabled journal is still a `Journal`, and still accepts records.
+    /// That is the point: no caller has to know which one it holds, so there is
+    /// no conditional to forget at a new call site.
     #[test]
-    fn an_unusable_path_disables_the_journal() {
+    fn an_unusable_path_disables_the_journal_without_disabling_the_caller() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("not-a-dir");
         std::fs::write(&file, b"x").unwrap();
 
         // A directory component that is actually a file.
         let path = file.join("journal.db");
-        assert!(Journal::open(&path, days(90), "0.0.0-test", &serde_json::json!({})).is_none());
+        let (journal, writer) =
+            Journal::open(&path, days(90), "0.0.0-test", &serde_json::json!({}));
+        assert!(writer.is_none(), "nothing to drain when disabled");
+
+        // Every entry point still takes a record and returns.
+        journal.raw("shelly", r#"{"ok":true}"#);
+        journal.decision(
+            at(),
+            ControlPath::Objective,
+            &decision(),
+            &engine_state(),
+            &[],
+        );
+        assert_eq!(
+            journal.dropped.load(Ordering::Relaxed),
+            0,
+            "a disabled journal discards, it does not count drops"
+        );
     }
 }

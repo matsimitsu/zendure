@@ -36,7 +36,7 @@ pub async fn run_subscriber(
     solar_phase: SolarPhase,
     ha_prefix: String,
     tx: mpsc::Sender<MqttEvent>,
-    journal: Option<Arc<Journal>>,
+    journal: Arc<Journal>,
 ) {
     loop {
         match eventloop.poll().await {
@@ -51,9 +51,7 @@ pub async fn run_subscriber(
                 if publish.topic == shelly_topic {
                     // Capture before parsing: a reading we fail to decode is
                     // exactly the one worth having on record.
-                    if let Some(journal) = &journal {
-                        journal.raw("shelly", &String::from_utf8_lossy(&publish.payload));
-                    }
+                    journal.raw("shelly", &String::from_utf8_lossy(&publish.payload));
                     match shelly::parse(&publish.payload, solar_phase) {
                         Ok(obs) => {
                             // Logged here rather than in the coordinator loop,

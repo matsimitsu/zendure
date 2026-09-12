@@ -19,10 +19,10 @@ mod zendure;
 use allocate::Directive;
 use clock::Clock;
 use config::Config;
-use device::{Actuation, Applied, Outcome};
+use device::{Applied, ControlPath, Outcome};
 use engine::Engine;
 use event::Event;
-use journal::{DecisionKind, Journal};
+use journal::Journal;
 use models::StorageMode;
 use mqtt::MqttEvent;
 use rumqttc::AsyncClient;
@@ -39,22 +39,21 @@ use zendure::ZendureClient;
 /// caller (step 9's charger) would have made it three; extracted, the ordering
 /// that matters is stated in one place.
 ///
-/// The outcomes come back rather than being journalled here, because each arm
-/// writes its own raw-log line under its own kind (`decision` / `failsafe`)
-/// with its own payload — and that write has to happen *after* this returns,
-/// so the recorded outcome reflects whether the device write actually landed.
+/// The outcomes come back rather than being journalled here, because that write
+/// has to happen *after* this returns, so the recorded outcome reflects whether
+/// the device write actually landed. The `ControlPath` carries everything the
+/// two arms used to differ by — the log wording, both status strings, and the
+/// journal's `kind`.
 async fn apply_and_publish(
     client: &ZendureClient,
     publisher: &AsyncClient,
     prefix: &str,
     directives: &[Directive],
-    actuation: Actuation,
-    ok_status: &str,
-    err_status: &str,
+    path: ControlPath,
 ) -> Vec<Outcome> {
     // The whole list, not its first element: a step that means "stop one box,
     // start another" has to reach both devices.
-    let outcomes = device::actuate(client, directives, actuation).await;
+    let outcomes = device::actuate(client, directives, path).await;
     let failed = outcomes.iter().any(|o| o.applied == Applied::Error);
 
     // Once after the loop rather than once per command. With one device that is
@@ -62,7 +61,11 @@ async fn apply_and_publish(
     // flapping twice per decision. A failure anywhere takes precedence: the
     // fleet is degraded even if some of it was commanded successfully.
     if !directives.is_empty() {
-        let status = if failed { err_status } else { ok_status };
+        let status = if failed {
+            path.err_status()
+        } else {
+            path.ok_status()
+        };
         mqtt::publish_status(publisher, prefix, status).await;
     }
 
@@ -154,15 +157,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // On by default: by the time you think to enable logging, the bug you
     // wanted it for has already happened. Any failure here disables the journal
     // and leaves control untouched.
-    let (journal, journal_writer) = match Journal::open(
+    let (journal, journal_writer) = Journal::open(
         &config.journal_path,
         config.journal_retention_days,
         env!("CARGO_PKG_VERSION"),
         &config.session(),
-    ) {
-        Some((journal, writer)) => (Some(std::sync::Arc::new(journal)), Some(writer)),
-        None => (None, None),
-    };
+    );
+    let journal = std::sync::Arc::new(journal);
 
     let (mqtt_client, eventloop) = mqtt::create_mqtt_client(&config);
     let publisher_client = mqtt_client.clone();
@@ -266,9 +267,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             grid: obs.grid,
                             solar: obs.solar,
                         };
-                        if let Some(journal) = &journal {
-                            journal.event(&event);
-                        }
+                        journal.event(&event);
                         let step = engine.step(&event);
 
                         if let Some(status) = step.status {
@@ -297,9 +296,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &publisher_client,
                                 &ha_prefix,
                                 &step.directives,
-                                Actuation::Decision,
-                                "operational",
-                                "zendure_api_error",
+                                ControlPath::Objective,
                             )
                             .await;
 
@@ -308,15 +305,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // want when reconstructing an incident. The engine's state goes
                             // in beside it so the row carries the inputs and the history the
                             // decision came from, not just its conclusion.
-                            if let Some(journal) = &journal {
                                 journal.decision(
-                                    clock.now.as_millis(),
-                                    DecisionKind::Decision,
+                                    clock.now,
+                                    ControlPath::Objective,
                                     &decision,
                                     &engine.state(),
                                     &outcomes,
                                 );
-                            }
 
                             mqtt::publish_decision(&publisher_client, &ha_prefix, &decision).await;
                             mqtt::publish_cycle_counts(
@@ -334,9 +329,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let clock = Clock::now(config.timezone);
                 let event = Event::MqttTimeout { at: clock };
-                if let Some(journal) = &journal {
-                    journal.event(&event);
-                }
+                journal.event(&event);
                 let step = engine.step(&event);
 
                 if step.status.is_some() {
@@ -354,21 +347,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &publisher_client,
                         &ha_prefix,
                         &step.directives,
-                        Actuation::FailsafeIdle,
-                        "mqtt_timeout",
-                        "mqtt_timeout_api_error",
+                        ControlPath::Failsafe,
                     )
                     .await;
 
-                    if let Some(journal) = &journal {
                         journal.decision(
-                            clock.now.as_millis(),
-                            DecisionKind::Failsafe,
+                            clock.now,
+                            ControlPath::Failsafe,
                             &decision,
                             &engine.state(),
                             &outcomes,
                         );
-                    }
 
                     mqtt::publish_decision(&publisher_client, &ha_prefix, &decision).await;
                 }
@@ -378,9 +367,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // device fields survive even though our types drop them.
                 let fetched = match zendure_client.get_properties_raw().await {
                     Ok(body) => {
-                        if let Some(journal) = &journal {
-                            journal.raw("zendure_poll", &body);
-                        }
+                        journal.raw("zendure_poll", &body);
                         serde_json::from_str::<models::ZendureReport>(&body)
                             .map_err(|e| format!("parse error: {e}"))
                     }
@@ -475,9 +462,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             id: device_id.clone(),
                             measurement: Measurement::Battery(state),
                         };
-                        if let Some(journal) = &journal {
-                            journal.event(&event);
-                        }
+                        journal.event(&event);
                         engine.step(&event);
                     }
                     Err(e) => {

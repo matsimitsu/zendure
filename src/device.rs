@@ -87,7 +87,7 @@ pub enum Applied {
 
 impl Applied {
     /// The journal's `outcome` column. A plain `&'static str`, like
-    /// `Actuation`'s and `ControlMode`'s `Display`, rather than serializing to
+    /// `ControlPath`'s and `ControlMode`'s `Display`, rather than serializing to
     /// JSON and stripping the quotes back off — which allocated, could fail
     /// into a `None` that read as "commanded nothing", and would have silently
     /// mangled any future variant whose rename contained a quote.
@@ -102,22 +102,55 @@ impl Applied {
     }
 }
 
-/// Which path is actuating, for the operator reading the log. A type rather
-/// than a `&str` for the same reason `Applied` is: two call sites, two values,
-/// and a typo in either is silent.
-#[derive(Debug, Clone, Copy)]
-pub enum Actuation {
-    Decision,
-    FailsafeIdle,
+/// Which path is driving the device: the objective's own decision, or the
+/// failsafe standing everything down.
+///
+/// One type for four values that have to move together — how the actuation is
+/// logged, the two MQTT status strings, and the journal's `kind` column. They
+/// used to be an `Actuation` and a separate `DecisionKind` passed fourteen
+/// lines apart in the same branch, plus two bare string literals at the call
+/// site, with nothing checking they agreed. The charger this anticipates adds one
+/// variant here instead of four coordinated edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlPath {
+    Objective,
+    Failsafe,
+}
+
+impl ControlPath {
+    /// The journal's `kind` column. Deliberately not `Display`: the log says
+    /// "failsafe idle" and the column says "failsafe", and both are pinned.
+    pub fn journal_kind(self) -> &'static str {
+        match self {
+            ControlPath::Objective => "decision",
+            ControlPath::Failsafe => "failsafe",
+        }
+    }
+
+    /// Published to HA when every device took its command.
+    pub fn ok_status(self) -> &'static str {
+        match self {
+            ControlPath::Objective => "operational",
+            ControlPath::Failsafe => "mqtt_timeout",
+        }
+    }
+
+    /// Published instead when any device refused it.
+    pub fn err_status(self) -> &'static str {
+        match self {
+            ControlPath::Objective => "zendure_api_error",
+            ControlPath::Failsafe => "mqtt_timeout_api_error",
+        }
+    }
 }
 
 /// Renders exactly the two literals the `tracing::error!` lines interpolated
 /// before, so an operator's existing grep over the logs still matches.
-impl std::fmt::Display for Actuation {
+impl std::fmt::Display for ControlPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Actuation::Decision => "decision",
-            Actuation::FailsafeIdle => "failsafe idle",
+            ControlPath::Objective => "decision",
+            ControlPath::Failsafe => "failsafe idle",
         })
     }
 }
@@ -159,7 +192,7 @@ pub struct Outcome {
 pub async fn actuate<B: BatteryController>(
     battery: &B,
     directives: &[Directive],
-    what: Actuation,
+    what: ControlPath,
 ) -> Vec<Outcome> {
     let mut outcomes = Vec::with_capacity(directives.len());
 
@@ -288,7 +321,7 @@ mod tests {
             directive("battery-a", Command::SetCharge(Setpoint::new(1200))),
         ];
 
-        let outcomes = actuate(&battery, &directives, Actuation::Decision).await;
+        let outcomes = actuate(&battery, &directives, ControlPath::Objective).await;
 
         assert_eq!(
             battery.applied(),
@@ -313,7 +346,7 @@ mod tests {
             directive("battery-a", Command::SetCharge(Setpoint::new(1200))),
         ];
 
-        let outcomes = actuate(&battery, &directives, Actuation::Decision).await;
+        let outcomes = actuate(&battery, &directives, ControlPath::Objective).await;
 
         assert_eq!(
             battery.applied(),
@@ -340,7 +373,7 @@ mod tests {
             directive("battery-a", Command::SetIdle),
         ];
 
-        let outcomes = actuate(&battery, &directives, Actuation::Decision).await;
+        let outcomes = actuate(&battery, &directives, ControlPath::Objective).await;
 
         assert_eq!(battery.applied(), vec![Command::SetIdle]);
         assert_eq!(outcomes[0].device, DeviceId::new("battery-b"));
