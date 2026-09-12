@@ -120,7 +120,12 @@ sqlite3 /var/lib/zendure/journal.db \
 
 Raw payloads are stored exactly as received rather than re-serialized from
 parsed types, so undocumented device fields are kept and a response we failed to
-decode is still on record. This exists so that when something looks wrong in a
+decode is still on record.
+
+This replaced an NDJSON capture under `JOURNAL_RAW_PATH`. That variable is gone
+and is now ignored if set; **the files it wrote are not cleaned up**, and nothing
+prunes them any more, so an existing `/var/lib/zendure/raw` should be removed by
+hand once you no longer want it. This exists so that when something looks wrong in a
 graph, the inputs that produced it still exist — recorded data cannot be
 backfilled.
 

@@ -72,6 +72,71 @@ async fn apply_and_publish(
     outcomes
 }
 
+/// Everything the poll produces that the decision never reads.
+///
+/// Round-trip efficiency, pack temperatures, SOC and battery power are all
+/// derived from `ZendureReport` fields the objective does not consult, and they
+/// are published for graphing rather than fed to the engine. Seventy-odd lines
+/// of that sat inline in a `select!` branch, four levels of indentation deep,
+/// between parsing the response and folding it into the world — so the arm's one
+/// job was the hardest thing in it to see.
+///
+/// Takes `&mut` for the three pieces of state a poll advances: the rolling RTE
+/// window, the pack capacities and the device's own minimum SOC, each of which
+/// only ever changes here.
+#[allow(clippy::too_many_arguments)]
+async fn publish_poll_telemetry(
+    publisher: &AsyncClient,
+    prefix: &str,
+    report: &models::ZendureReport,
+    state: &battery::BatteryState,
+    rte_tracker: &mut rte::RteTracker,
+    pack_capacities: &mut Vec<WattHours>,
+    min_soc_percent: &mut Soc,
+) {
+    let charge = Watts::from_device(report.properties.output_pack_power.unwrap_or(0));
+    let discharge = Watts::from_device(report.properties.pack_input_power.unwrap_or(0));
+    rte_tracker.record(charge, discharge);
+
+    if report.pack_data.is_some() {
+        *pack_capacities = rte::pack_capacities(&report.pack_data);
+    }
+    if let Some(ms) = report.properties.min_soc {
+        *min_soc_percent = Soc::from_tenths(ms);
+    }
+
+    let total_capacity_kwh = pack_capacities.iter().copied().sum::<WattHours>().to_kwh();
+    let usable_kwh = rte_tracker.usable_kwh(state.soc, *min_soc_percent, pack_capacities);
+    mqtt::publish_rte(
+        publisher,
+        prefix,
+        rte_tracker.rte_percent(),
+        usable_kwh,
+        total_capacity_kwh,
+    )
+    .await;
+
+    let pack_temps: Vec<(usize, u32)> = report
+        .pack_data
+        .as_ref()
+        .map(|packs| {
+            packs
+                .iter()
+                .enumerate()
+                .filter_map(|(i, p)| p.max_temp.map(|t| (i, t)))
+                .collect()
+        })
+        .unwrap_or_default();
+    mqtt::publish_temperatures(publisher, prefix, report.properties.hyper_tmp, &pack_temps).await;
+
+    mqtt::publish_soc_calibrating(publisher, prefix, state.soc_calibrating).await;
+    mqtt::publish_battery_soc(publisher, prefix, state.soc).await;
+    mqtt::publish_battery_power(publisher, prefix, charge, discharge).await;
+
+    // Persisted every poll, so the rolling 24h window survives a restart.
+    rte_tracker.save();
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `RUST_LOG` wins outright when it is set. It used to be merged with a
@@ -382,80 +447,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             state.current_power,
                         );
 
-                        // Feed RTE tracker with charge/discharge power
-                        rte_tracker.record(
-                            Watts::from_device(report.properties.output_pack_power.unwrap_or(0)),
-                            Watts::from_device(report.properties.pack_input_power.unwrap_or(0)),
-                        );
-
-                        // Update pack data and SOC limits if available
-                        if report.pack_data.is_some() {
-                            pack_capacities = rte::pack_capacities(&report.pack_data);
-                        }
-                        if let Some(ms) = report.properties.min_soc {
-                            min_soc_percent = Soc::from_tenths(ms);
-                        }
-
-                        // Publish RTE sensors
-                        let total_capacity_kwh =
-                            pack_capacities.iter().copied().sum::<WattHours>().to_kwh();
-                        let usable_kwh =
-                            rte_tracker.usable_kwh(state.soc, min_soc_percent, &pack_capacities);
-                        mqtt::publish_rte(
+                        publish_poll_telemetry(
                             &publisher_client,
                             &ha_prefix,
-                            rte_tracker.rte_percent(),
-                            usable_kwh,
-                            total_capacity_kwh,
+                            &report,
+                            &state,
+                            &mut rte_tracker,
+                            &mut pack_capacities,
+                            &mut min_soc_percent,
                         )
                         .await;
-
-                        // Publish temperature sensors
-                        let pack_temps: Vec<(usize, u32)> = report
-                            .pack_data
-                            .as_ref()
-                            .map(|packs| {
-                                packs
-                                    .iter()
-                                    .enumerate()
-                                    .filter_map(|(i, p)| p.max_temp.map(|t| (i, t)))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        mqtt::publish_temperatures(
-                            &publisher_client,
-                            &ha_prefix,
-                            report.properties.hyper_tmp,
-                            &pack_temps,
-                        )
-                        .await;
-
-                        // Publish SOC calibration state
-                        mqtt::publish_soc_calibrating(
-                            &publisher_client,
-                            &ha_prefix,
-                            state.soc_calibrating,
-                        )
-                        .await;
-
-                        mqtt::publish_battery_soc(
-                            &publisher_client,
-                            &ha_prefix,
-                            state.soc,
-                        )
-                        .await;
-
-                        // Publish actual battery power
-                        mqtt::publish_battery_power(
-                            &publisher_client,
-                            &ha_prefix,
-                            Watts::from_device(report.properties.output_pack_power.unwrap_or(0)),
-                            Watts::from_device(report.properties.pack_input_power.unwrap_or(0)),
-                        )
-                        .await;
-
-                        // Persist RTE state periodically (every poll)
-                        rte_tracker.save();
 
                         let event = Event::DeviceUpdate {
                             at: Clock::now(config.timezone),
