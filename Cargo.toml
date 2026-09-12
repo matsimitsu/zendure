@@ -13,6 +13,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = "0.4"
 chrono-tz = "0.10"
+# `bundled` compiles the SQLite amalgamation into the binary. The release ships a
+# static musl build to a box with no libsqlite3.so, so linking the system library
+# is not an option.
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"
