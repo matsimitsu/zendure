@@ -54,6 +54,12 @@ impl Announcer {
         if guard(&self.announced).contains(id) {
             return;
         }
+        // The lock is dropped between the check and the insert, so a `reset` on
+        // the subscriber task can land in between and be undone by the insert
+        // below. Benign, and not worth holding a lock across a publish for: the
+        // message went into the publisher's own queue, which survives the
+        // reconnect, and anything already handed to rumqttc is replayed from
+        // its `pending` list. The record stays accurate either way.
         if publisher.publish(build()) == Accepted::Queued {
             guard(&self.announced).insert(id.to_string());
         }

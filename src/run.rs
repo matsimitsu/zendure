@@ -1,27 +1,28 @@
 //! The coordinator loop: the process's whole runtime, lifted out of `main`.
 //!
-//! `main` now parses arguments, initialises logging, reads configuration and
-//! calls [`run`] — nothing else. That split exists for one reason: the loop
-//! below could not be driven by a test while it was inlined in `main`, and the
-//! two defects that reached production hid in exactly the place no test could
-//! reach. The MQTT-deadline spin (`c131b2f`) was found by measuring CPU on the
-//! hardware, not by the suite; a failing device write silently disarming the
-//! failsafe (`bfcf5ab`) was found by reading. Both lived in this `select!`.
+//! `main` parses arguments, initialises logging, reads configuration and calls
+//! [`run`] — nothing else. The split exists because the loop below is the one
+//! part of this crate no test has ever driven, and both defects that reached
+//! production hid in exactly there: the MQTT-deadline spin (`c131b2f`) was found
+//! by measuring CPU on the hardware rather than by the suite, and a failing
+//! device write silently disarming the failsafe (`bfcf5ab`) was found by
+//! reading.
 //!
-//! [`run`] takes its stop condition as a parameter rather than registering
-//! signal handlers itself, so a test can end the loop deterministically where
-//! production ends it on SIGTERM.
+//! **The loop still has no test, and this module does not yet make one
+//! possible.** [`run`] takes its stop condition as a parameter, which is one of
+//! the two seams a test needs; the other is the device, and `run` still reaches
+//! a real Zendure over HTTP in its first eighty lines. Until the read path is
+//! behind a trait — `device::actuate` is already generic over
+//! `BatteryController`, so only the poll is missing — driving `run` from a test
+//! means owning a battery. Saying otherwise would be worse than saying nothing:
+//! the next person looking for a regression test for a `select!` defect would
+//! believe the seam is here and stop looking.
+//!
+//! What is testable and is tested: [`shut_down`], whose ordering is the
+//! subtlest thing in the file.
 
 use std::future::Future;
 use std::time::Duration;
-
-/// How long a shutdown waits for queued messages to reach the broker.
-///
-/// Bounded rather than unbounded: systemd's `TimeoutStopSec` is the only
-/// other thing that would end the wait, and it ends it with SIGKILL, which
-/// takes the journal's drain down with it. Two seconds is long enough for a
-/// healthy broker to take a full queue and short enough to be invisible.
-const DRAIN_DEADLINE: Duration = Duration::from_secs(2);
 
 use crate::allocate::Directive;
 use crate::announce::Announcer;
@@ -31,9 +32,10 @@ use crate::device::{self, Applied, ControlPath};
 use crate::engine::Engine;
 use crate::event::Event;
 use crate::journal::Journal;
+use crate::journal::Writer;
 use crate::models::ControlDecision;
 use crate::models::StorageMode;
-use crate::mqtt::{self, MqttEvent, MqttPublisher};
+use crate::mqtt::{self, MqttEvent, MqttPublisher, PublisherTask};
 use crate::publish::Publisher;
 use crate::units::{DeciKelvin, Soc, Timestamp, WattHours, Watts};
 use crate::world::{Measurement, World};
@@ -41,21 +43,31 @@ use crate::zendure::ZendureClient;
 use crate::{battery, controller, models, rte};
 use tokio::sync::mpsc;
 
+/// How long each half of a shutdown waits before giving up and saying so.
+///
+/// Bounded rather than unbounded, and used for both the MQTT drain and the
+/// journal's: the only other thing that would end an unbounded wait is
+/// systemd's `TimeoutStopSec`, and that ends it with SIGKILL, which loses the
+/// rows the wait was protecting. A deadline at least gets to name what it left
+/// behind. Two seconds is long enough for a healthy broker to take a full queue
+/// and short enough to be invisible in a `systemctl restart`.
+const DRAIN_DEADLINE: Duration = Duration::from_secs(2);
+
 /// Why the loop stopped.
 ///
 /// Carries which signal fired so the log line stays the one operators grep for,
 /// rather than collapsing two arms into one message that names neither.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Stopped {
+pub enum StopReason {
     Sigterm,
     Sigint,
 }
 
-impl std::fmt::Display for Stopped {
+impl std::fmt::Display for StopReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Stopped::Sigterm => write!(f, "SIGTERM"),
-            Stopped::Sigint => write!(f, "SIGINT"),
+            StopReason::Sigterm => write!(f, "SIGTERM"),
+            StopReason::Sigint => write!(f, "SIGINT"),
         }
     }
 }
@@ -66,12 +78,23 @@ impl std::fmt::Display for Stopped {
 /// first of them, so a registration failure is reported at startup rather than
 /// leaving a process that cannot be asked to stop.
 ///
+/// The cost of registering this early, stated because it is not free: the
+/// future is not polled until the loop begins, and startup first makes four
+/// HTTP round trips to the device with a 5s timeout each plus a deliberate 5s
+/// sleep in `ensure_ram_mode` — so for up to ~25s a `systemctl stop` or a
+/// Ctrl-C appears to do nothing. The signal is *latched*, not lost: tokio's
+/// handler is installed at registration and the first loop iteration takes it.
+/// So this is a delay well inside systemd's default `TimeoutStopSec`, not a
+/// hang, and the alternative — registering just before the loop, as this did
+/// when it lived in `main` — trades it for a window where the default
+/// disposition would kill the process mid-handshake instead.
+///
 /// systemd stops this process with SIGTERM. Without an arm for it the process
 /// simply died, and everything still queued for the journal's writer died with
 /// it — a durability regression against the NDJSON capture, which wrote
 /// synchronously on the calling thread and so survived any kill. The row most
 /// worth having is the last decision before a restart.
-pub fn shutdown_signal() -> Result<impl Future<Output = Stopped>, std::io::Error> {
+pub fn shutdown_signal() -> Result<impl Future<Output = StopReason>, std::io::Error> {
     use tokio::signal::unix::{SignalKind, signal};
 
     let mut sigterm = signal(SignalKind::terminate())?;
@@ -79,8 +102,8 @@ pub fn shutdown_signal() -> Result<impl Future<Output = Stopped>, std::io::Error
 
     Ok(async move {
         tokio::select! {
-            _ = sigterm.recv() => Stopped::Sigterm,
-            _ = sigint.recv() => Stopped::Sigint,
+            _ = sigterm.recv() => StopReason::Sigterm,
+            _ = sigint.recv() => StopReason::Sigint,
         }
     })
 }
@@ -260,7 +283,7 @@ impl PollTelemetry {
 /// `stop` resolves or the subscriber goes away.
 pub async fn run(
     config: Config,
-    stop: impl Future<Output = Stopped>,
+    stop: impl Future<Output = StopReason>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Starting Zendure controller for {}", config.zendure_sn);
 
@@ -359,8 +382,8 @@ pub async fn run(
     // adapter that knows what a phase is.
     let solar_phase = config.solar_phase;
     let ha_prefix = config.ha_publish_prefix.clone();
-    let subscriber_prefix = config.ha_publish_prefix.clone();
     let subscriber_journal = journal.clone();
+    let subscriber_prefix = ha_prefix.clone();
     let subscriber_publisher: std::sync::Arc<dyn Publisher> = publisher.clone();
     let subscriber_announcer = announcer.clone();
     let subscriber = tokio::spawn(async move {
@@ -571,19 +594,52 @@ pub async fn run(
         }
     }
 
-    // Order matters, and it is not the order it looks like it should be.
-    //
-    // The publisher drains *first*, while the subscriber is still running,
-    // because the subscriber owns the MQTT eventloop and the eventloop is the
-    // only thing that actually moves bytes to the broker. Aborting it first
-    // would leave the publisher task awaiting a channel nobody drains, so every
-    // shutdown would stall for the full deadline and deliver nothing.
-    let queued = publisher.close();
+    shut_down(
+        &publisher,
+        &mut publisher_task,
+        subscriber,
+        journal,
+        journal_writer,
+    )
+    .await;
+
+    Ok(())
+}
+
+/// Stop everything in the one order that does not lose rows or stall.
+///
+/// Order matters, and it is not the order it looks like it should be.
+///
+/// The publisher drains **first**, while the subscriber is still running,
+/// because the subscriber owns the MQTT eventloop and the eventloop is the only
+/// thing that actually moves bytes to the broker. Aborting it first would leave
+/// the publisher task awaiting a channel nobody drains, so every shutdown would
+/// stall for the full deadline and deliver nothing.
+///
+/// Then the journal. Its writer stops when every sender is gone, and the
+/// subscriber task holds one, so the subscriber has to be finished before the
+/// last `Arc<Journal>` can drop. `abort` alone only schedules cancellation —
+/// awaiting it is what guarantees the task and its captured clone are gone.
+///
+/// Both drains are bounded. The journal's was not, which made the deadline
+/// above argue for something the code did not do: an unbounded wait ends at
+/// systemd's `TimeoutStopSec`, and that ends with SIGKILL, which loses the rows
+/// the wait was protecting. A deadline at least gets to say what was lost.
+async fn shut_down(
+    publisher: &MqttPublisher,
+    publisher_task: &mut PublisherTask,
+    subscriber: tokio::task::JoinHandle<()>,
+    journal: std::sync::Arc<Journal>,
+    journal_writer: Option<Writer>,
+) {
+    let queued = publisher.queued();
+    publisher.close();
+
     // Matched rather than `.is_err()`, which sees only the timeout: a task that
     // ended early resolves instantly to `Ok(Err(JoinError))`, and treating that
     // as success reported a clean drain for a task that had been dead for
-    // hours. The three outcomes are genuinely different and only one is fine.
-    match tokio::time::timeout(DRAIN_DEADLINE, &mut publisher_task).await {
+    // hours.
+    match tokio::time::timeout(DRAIN_DEADLINE, &mut *publisher_task).await {
         // Drained. The task logs its own closing summary.
         Ok(Ok(())) => {}
         Ok(Err(e)) => tracing::warn!(
@@ -594,8 +650,8 @@ pub async fn run(
             publisher_task.abort();
             // The task prints this summary itself when it ends normally;
             // aborting it is the one path where nobody would. `queued` is what
-            // was waiting when the drain *began* — some of it will have gone
-            // out since.
+            // was waiting when the drain began — some of it will have gone out
+            // since.
             tracing::warn!(
                 "MQTT drain did not finish in {}s — {queued} messages were queued when it \
                  began, {} dropped and {} failed this session",
@@ -606,36 +662,107 @@ pub async fn run(
         }
     }
 
-    // Then the journal. The writer stops when every sender is gone, and the
-    // subscriber task holds one, so it has to be finished before the last
-    // `Arc<Journal>` can drop. `abort` alone only schedules cancellation —
-    // awaiting it is what guarantees the task and its captured clone are gone.
     subscriber.abort();
     let _ = subscriber.await;
     drop(journal);
-    if let Some(writer) = journal_writer {
-        let _ = writer.await;
-    }
 
-    Ok(())
+    if let Some(writer) = journal_writer
+        && tokio::time::timeout(DRAIN_DEADLINE, writer).await.is_err()
+    {
+        tracing::warn!(
+            "Journal drain did not finish in {}s — the newest rows may be missing",
+            DRAIN_DEADLINE.as_secs(),
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::SessionConfig;
+    use crate::fixtures;
+    use crate::journal;
 
     /// The two signal arms became one, so the wording an operator greps for is
-    /// now produced by `Display` rather than written out twice. This is the
-    /// only thing the extraction changed the shape of; pin it.
+    /// now produced by `Display`. Only the name is pinned here: retyping the
+    /// whole log line would assert against a copy this test made, which keeps
+    /// passing when the real one changes.
     #[test]
-    fn stopping_renders_the_signal_name_the_log_line_always_used() {
+    fn a_stop_reason_renders_the_signal_name() {
+        assert_eq!(StopReason::Sigterm.to_string(), "SIGTERM");
+        assert_eq!(StopReason::Sigint.to_string(), "SIGINT");
+    }
+
+    /// `shut_down` must finish, and must not take the journal down with it.
+    ///
+    /// A broker that is gone parks the delivery task on rumqttc's channel, so
+    /// the MQTT drain cannot complete and has to hit its deadline. Everything
+    /// after it in the sequence depends on that being bounded: an unbounded
+    /// await there hangs the process until systemd's `TimeoutStopSec` turns
+    /// into a SIGKILL, which loses exactly the rows the shutdown exists to
+    /// protect. Mutation-checked — replacing the timeout with a bare `await`
+    /// makes this fail, and the whole call is wrapped so it fails rather than
+    /// hangs.
+    ///
+    /// The subscriber holds an `Arc<Journal>` clone, as the real one does, so
+    /// this also covers the ordering that matters most: the writer ends only
+    /// when every sender is gone, and a task still holding one would stall the
+    /// journal drain.
+    ///
+    /// Honest limit: the journal drain's own deadline is belt-and-braces and
+    /// this test does not distinguish it — with the subscriber awaited, nothing
+    /// holds a sender and the writer ends either way.
+    #[tokio::test]
+    async fn a_shutdown_finishes_when_the_broker_never_drains() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (journal, writer, path) = journal::testing::open(&dir, &SessionConfig::test_default());
+        let journal = std::sync::Arc::new(journal);
+
+        let events = fixtures::journey::events();
+        for event in &events {
+            journal.event(event);
+        }
+
+        // A publisher whose broker is not there, filled until its task parks.
+        let opts = rumqttc::MqttOptions::new("zendure-shutdown-test", "127.0.0.1", 1);
+        let (client, _eventloop) = rumqttc::AsyncClient::new(opts, 50);
+        let (publisher, mut publisher_task) = MqttPublisher::open(client);
+        for i in 0..300 {
+            publisher.publish(crate::publish::Message::telemetry(
+                "zendure/decision_power".to_string(),
+                i.to_string(),
+            ));
+            tokio::task::yield_now().await;
+        }
+        assert!(publisher.queued() > 0, "the delivery task is parked");
+
+        // Holds a journal sender and never returns, like the real subscriber.
+        let subscriber_journal = journal.clone();
+        let subscriber = tokio::spawn(async move {
+            let _held = subscriber_journal;
+            std::future::pending::<()>().await;
+        });
+
+        // Generously past both deadlines: this asserts that it is bounded at
+        // all, not what the bound is.
+        tokio::time::timeout(
+            DRAIN_DEADLINE * 4,
+            shut_down(
+                &publisher,
+                &mut publisher_task,
+                subscriber,
+                journal,
+                Some(writer),
+            ),
+        )
+        .await
+        .expect("a parked delivery task must not stall the shutdown");
+
+        let conn = rusqlite::Connection::open(&path).unwrap();
         assert_eq!(
-            format!("{} — draining the journal and stopping", Stopped::Sigterm),
-            "SIGTERM — draining the journal and stopping",
-        );
-        assert_eq!(
-            format!("{} — draining the journal and stopping", Stopped::Sigint),
-            "SIGINT — draining the journal and stopping",
+            journal::testing::count(&conn, "SELECT COUNT(*) FROM events"),
+            events.len() as i64,
+            "every row handed to the journal survived a drain that could not finish",
         );
     }
 }

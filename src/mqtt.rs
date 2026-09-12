@@ -100,14 +100,22 @@ impl MqttPublisher {
         (publisher, task)
     }
 
-    /// Stop accepting messages and let the task finish what is already queued,
-    /// reporting how many that was so a drain that runs out of time can say
-    /// what it left behind.
-    pub fn close(&self) -> usize {
+    /// How many messages are waiting for the broker right now.
+    ///
+    /// Only our own queue: not the one the delivery task is holding, nor the
+    /// ≤50 already handed to rumqttc, nor whatever its eventloop has moved to
+    /// `pending`. Enough to say what a drain that ran out of time was up
+    /// against.
+    pub fn queued(&self) -> usize {
         guard(&self.tx)
-            .take()
+            .as_ref()
             .map(|tx| tx.max_capacity() - tx.capacity())
             .unwrap_or(0)
+    }
+
+    /// Stop accepting messages and let the task finish what is already queued.
+    pub fn close(&self) {
+        *guard(&self.tx) = None;
     }
 
     pub fn dropped(&self) -> u64 {
@@ -1056,9 +1064,10 @@ mod tests {
         }
 
         assert!(
-            publisher.close() > 0,
+            publisher.queued() > 0,
             "messages are still queued behind a broker that is not there",
         );
+        publisher.close();
         assert!(
             timeout(Duration::from_millis(200), task).await.is_err(),
             "the task is parked, which is exactly why the drain has a deadline",
