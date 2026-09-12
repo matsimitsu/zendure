@@ -5,18 +5,22 @@ use std::time::Duration;
 use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS};
 use tokio::sync::mpsc;
 
+use crate::announce::Announcer;
 use crate::config::Config;
 use crate::journal::Journal;
 use crate::models::{ControlDecision, CycleCounts};
-use crate::publish::{Delivery, Message, Publisher};
+use crate::publish::{Accepted, Message, Publisher};
 use crate::source::MeterObservation;
 use crate::source::shelly::{self, SolarPhase};
+use crate::sync::guard;
 use crate::units::{KiloWattHours, Percent, Soc, Watts};
 
 /// How many messages may be waiting for the broker before we start dropping.
 ///
-/// A poll publishes 16 messages and a decision up to 7, so at a 10s poll and a
-/// ~1Hz meter this is roughly 35 seconds of backlog — long enough to ride out a
+/// Sized against the steady-state rate rather than a fixed budget, so a change
+/// to the publish set does not silently invalidate the arithmetic: a poll sends
+/// roughly a dozen messages every 10s and a decision up to 7 more, which puts
+/// this at something over half a minute of backlog — long enough to ride out a
 /// broker restart, short enough that a dead broker is reported in the same
 /// minute it died. Deliberately larger than rumqttc's own 50-slot request
 /// channel: ours is the one that is allowed to fill.
@@ -42,16 +46,6 @@ pub fn create_mqtt_client(config: &Config) -> (AsyncClient, EventLoop) {
 
 /// Awaiting this is what drains whatever is still queued at shutdown.
 pub type PublisherTask = tokio::task::JoinHandle<()>;
-
-/// Takes a poisoned lock rather than panicking through it.
-///
-/// Every critical section here is a map insert or a channel `try_send` and
-/// cannot panic, so poisoning should be unreachable — but this is the decision
-/// path, and a publish helper is not permitted to be the thing that kills the
-/// controller.
-fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 /// Publishes through a queue and a task, so the decision path never waits on a
 /// broker.
@@ -79,9 +73,9 @@ pub struct MqttPublisher {
     tx: std::sync::Mutex<Option<mpsc::Sender<Message>>>,
     dropped: Arc<AtomicU64>,
     failed: Arc<AtomicU64>,
-    /// Retained discovery documents this connection has already accepted, by
-    /// topic. Cleared on every ConnAck — see [`MqttPublisher::reconnected`].
-    discovered: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    /// Latched once the delivery task is found to be gone, so that discovery is
+    /// reported once rather than on every publish for the life of the process.
+    sink_gone: std::sync::atomic::AtomicBool,
 }
 
 impl MqttPublisher {
@@ -99,43 +93,17 @@ impl MqttPublisher {
             tx: std::sync::Mutex::new(Some(tx)),
             dropped,
             failed,
-            discovered: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sink_gone: std::sync::atomic::AtomicBool::new(false),
         });
 
         (publisher, task)
-    }
-
-    /// A publisher with no delivery task, so a test can read back exactly what
-    /// `publish` queued. Nothing else differs: this is the real queue and the
-    /// real `Publisher` impl, only without a broker on the other end.
-    #[cfg(test)]
-    pub(crate) fn queued(capacity: usize) -> (Arc<Self>, mpsc::Receiver<Message>) {
-        let (tx, rx) = mpsc::channel::<Message>(capacity);
-        let publisher = Arc::new(MqttPublisher {
-            tx: std::sync::Mutex::new(Some(tx)),
-            dropped: Arc::new(AtomicU64::new(0)),
-            failed: Arc::new(AtomicU64::new(0)),
-            discovered: std::sync::Mutex::new(std::collections::HashMap::new()),
-        });
-        (publisher, rx)
-    }
-
-    /// Forget which discovery documents have been published.
-    ///
-    /// Called on every ConnAck, because a broker that restarted may have lost
-    /// its retained store — and a broker we merely reconnected to may be a
-    /// different broker. Re-announcing on connect is cheap; not re-announcing
-    /// when the store is gone means every sensor silently disappears from Home
-    /// Assistant until the controller is restarted.
-    pub fn reconnected(&self) {
-        lock(&self.discovered).clear();
     }
 
     /// Stop accepting messages and let the task finish what is already queued,
     /// reporting how many that was so a drain that runs out of time can say
     /// what it left behind.
     pub fn close(&self) -> usize {
-        lock(&self.tx)
+        guard(&self.tx)
             .take()
             .map(|tx| tx.max_capacity() - tx.capacity())
             .unwrap_or(0)
@@ -148,48 +116,60 @@ impl MqttPublisher {
     pub fn failed(&self) -> u64 {
         self.failed.load(Ordering::Relaxed)
     }
+
+    #[cfg(test)]
+    fn sink_gone(&self) -> bool {
+        self.sink_gone.load(Ordering::Relaxed)
+    }
+}
+
+/// Why a message was not taken. Three causes that a single "dropped" hides, and
+/// they want three different reactions from whoever reads the log.
+enum Refused {
+    /// The broker is slow or gone and our queue has filled. Backpressure.
+    QueueFull,
+    /// The receiver is gone while we still hold a sender: the delivery task
+    /// ended early. Every publish from here on is discarded.
+    SinkGone,
+    /// `close` has been called. Expected, and not worth a word.
+    ShuttingDown,
 }
 
 impl Publisher for MqttPublisher {
-    fn publish(&self, message: Message) {
-        // A retained document the broker already holds, with the same bytes, is
-        // not worth the slot. Only discovery is deduplicated: telemetry is a
-        // value that means "this is true now", and suppressing a repeat would
-        // be suppressing the news that nothing changed.
-        let remember = if message.delivery == Delivery::Discovery {
-            if lock(&self.discovered).get(&message.topic) == Some(&message.payload) {
-                return;
-            }
-            Some((message.topic.clone(), message.payload.clone()))
-        } else {
-            None
+    fn publish(&self, message: Message) -> Accepted {
+        let refused = match guard(&self.tx).as_ref() {
+            Some(tx) => match tx.try_send(message) {
+                Ok(()) => return Accepted::Queued,
+                Err(mpsc::error::TrySendError::Full(_)) => Refused::QueueFull,
+                Err(mpsc::error::TrySendError::Closed(_)) => Refused::SinkGone,
+            },
+            None => Refused::ShuttingDown,
         };
 
-        let sent = match lock(&self.tx).as_ref() {
-            Some(tx) => tx.try_send(message).is_ok(),
-            // Closed: shutdown has begun and this is a late publish.
-            None => false,
-        };
-
-        if sent {
-            // Recorded on acceptance, never on attempt. A discovery document
-            // dropped under backpressure has not reached the broker, and
-            // remembering it here would suppress every retry for the life of
-            // the connection — the sensor would be missing from Home Assistant
-            // with nothing in the log to say why.
-            if let Some((topic, payload)) = remember {
-                lock(&self.discovered).insert(topic, payload);
-            }
-        }
-
-        if !sent {
-            let n = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+        let n = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+        match refused {
             // Every power of two, so a persistent stall is loud without a dead
-            // broker flooding the log at sixteen lines per poll.
-            if n.is_power_of_two() {
-                tracing::warn!("MQTT queue full — {n} messages dropped so far");
+            // broker flooding the log at a dozen lines per poll.
+            Refused::QueueFull => {
+                if n.is_power_of_two() {
+                    tracing::warn!("MQTT queue full — {n} messages dropped so far");
+                }
             }
+            // Once, latched. Reporting this as backpressure would be a lie in
+            // the one direction that costs an operator the most: the queue is
+            // not full, the sink is gone, and nothing will ever be published
+            // again.
+            Refused::SinkGone => {
+                if !self.sink_gone.swap(true, Ordering::Relaxed) {
+                    tracing::error!(
+                        "MQTT delivery task has gone — every publish from here is discarded",
+                    );
+                }
+            }
+            Refused::ShuttingDown => {}
         }
+
+        Accepted::Dropped
     }
 }
 
@@ -240,21 +220,22 @@ pub async fn run_subscriber(
     shelly_topic: String,
     solar_phase: SolarPhase,
     ha_prefix: String,
-    publisher: Arc<MqttPublisher>,
+    publisher: Arc<dyn Publisher>,
+    announcer: Arc<Announcer>,
     tx: mpsc::Sender<MqttEvent>,
     journal: Arc<Journal>,
 ) {
+    // Whether this *connection* has been subscribed. Reset on every ConnAck and
+    // retried after every event until it takes — see the loop's tail.
+    let mut subscribed = false;
+
     loop {
         match eventloop.poll().await {
             Ok(Event::Incoming(Packet::ConnAck(_))) => {
                 tracing::info!("MQTT connected, subscribing to {shelly_topic}");
-                if let Err(e) = client.subscribe(&shelly_topic, QoS::AtMostOnce).await {
-                    tracing::error!("Failed to subscribe to {shelly_topic}: {e}");
-                }
-                // Before the documents, not after: a broker that lost its
-                // retained store needs all of them again.
-                publisher.reconnected();
-                publish_ha_discovery(&*publisher, &ha_prefix);
+                subscribed = false;
+                // A broker that restarted may have lost its retained store.
+                announcer.reset();
             }
             Ok(Event::Incoming(Packet::Publish(publish))) => {
                 if publish.topic == shelly_topic {
@@ -287,8 +268,39 @@ pub async fn run_subscriber(
             Err(e) => {
                 tracing::error!("MQTT error: {e}");
                 tokio::time::sleep(Duration::from_secs(5)).await;
+                // No point offering anything to a broker that is not there, and
+                // `poll` frees no request slot on this path.
+                continue;
             }
         }
+
+        // Both of these are offered after *every* event, and both are
+        // non-blocking, and that is the whole point.
+        //
+        // `subscribe().await` is a send on rumqttc's 50-slot request channel,
+        // and `poll` — which this very task is inside — is the only thing that
+        // drains it. After an outage that channel is full (`clean` moves the
+        // backlog to `pending`, the delivery task immediately refills the
+        // channel, and `poll` returns `Ok(ConnAck)` on reconnect *before* any
+        // `select`), so awaiting the subscribe parked this task forever on a
+        // queue only it could drain. No meter readings ever again, no exit, and
+        // no restart — the controller would sit re-asserting failsafe idle for
+        // good while looking perfectly healthy.
+        //
+        // `try_subscribe` cannot park. Every `poll` above drains one request,
+        // so a slot frees within a few iterations and the retry lands. Setting
+        // the channel capacity to 0, which rumqttc's own docs suggest, would be
+        // worse here: at 0 the send blocks until `poll` receives it, and we are
+        // inside `poll`'s caller, so it would deadlock on every connect.
+        if !subscribed {
+            match client.try_subscribe(&shelly_topic, QoS::AtMostOnce) {
+                Ok(()) => subscribed = true,
+                // Not a warning: a full channel right after a reconnect is the
+                // expected case, and the next iteration retries.
+                Err(e) => tracing::debug!("Subscribe to {shelly_topic} deferred: {e}"),
+            }
+        }
+        publish_ha_discovery(&*publisher, &announcer, &ha_prefix);
     }
 }
 
@@ -331,7 +343,7 @@ fn sensor_discovery(
     )
 }
 
-pub fn publish_ha_discovery(publisher: &dyn Publisher, prefix: &str) {
+pub fn publish_ha_discovery(publisher: &dyn Publisher, announcer: &Announcer, prefix: &str) {
     let sensors = [
         ("decision_mode", "Battery Decision Mode", "", None),
         (
@@ -395,34 +407,37 @@ pub fn publish_ha_discovery(publisher: &dyn Publisher, prefix: &str) {
     ];
 
     for (id, name, unit, device_class) in &sensors {
-        publisher.publish(sensor_discovery(prefix, id, name, unit, *device_class));
+        announcer.announce(publisher, id, || {
+            sensor_discovery(prefix, id, name, unit, *device_class)
+        });
     }
 
     // Binary sensors
-    let binary_config = serde_json::json!({
+    let binary_config = || {
+        serde_json::json!({
         "name": "Battery SOC Calibrating",
         "state_topic": format!("{prefix}/soc_calibrating"),
         "unique_id": "zendure_soc_calibrating",
         "payload_on": "ON",
         "payload_off": "OFF",
         "device": ha_device(),
+        })
+    };
+
+    announcer.announce(publisher, "soc_calibrating", || {
+        Message::discovery(
+            "homeassistant/binary_sensor/zendure_soc_calibrating/config".to_string(),
+            binary_config().to_string(),
+        )
     });
-
-    publisher.publish(Message::discovery(
-        "homeassistant/binary_sensor/zendure_soc_calibrating/config".to_string(),
-        binary_config.to_string(),
-    ));
-
-    tracing::info!("Published HomeAssistant MQTT discovery config");
 }
 
 /// Publish one value per id, all under the same prefix.
-fn publish_values(publisher: &dyn Publisher, prefix: &str, values: &[(&str, String)]) {
+fn publish_values(publisher: &dyn Publisher, prefix: &str, values: Vec<(&str, String)>) {
     for (id, value) in values {
-        publisher.publish(Message::telemetry(
-            format!("{prefix}/{id}"),
-            value.to_string(),
-        ));
+        // The payload is moved, not cloned again: these run on the decision
+        // path, up to a dozen times a poll.
+        publisher.publish(Message::telemetry(format!("{prefix}/{id}"), value));
     }
 }
 
@@ -430,7 +445,7 @@ pub fn publish_decision(publisher: &dyn Publisher, prefix: &str, decision: &Cont
     publish_values(
         publisher,
         prefix,
-        &[
+        vec![
             ("decision_mode", decision.mode.to_string()),
             ("decision_power", decision.power_watts.to_string()),
             ("decision_reason", decision.reason.clone()),
@@ -443,7 +458,7 @@ pub fn publish_cycle_counts(publisher: &dyn Publisher, prefix: &str, counts: &Cy
     publish_values(
         publisher,
         prefix,
-        &[
+        vec![
             ("daily_cycles", counts.daily_transitions.to_string()),
             (
                 "daily_cooldown_suppressions",
@@ -463,7 +478,7 @@ pub fn publish_rte(
     publish_values(
         publisher,
         prefix,
-        &[
+        vec![
             (
                 "rte_percent",
                 rte_percent.map_or("unknown".to_string(), |v| format!("{v:.1}")),
@@ -476,7 +491,11 @@ pub fn publish_rte(
 
 pub fn publish_soc_calibrating(publisher: &dyn Publisher, prefix: &str, calibrating: bool) {
     let value = if calibrating { "ON" } else { "OFF" };
-    publish_values(publisher, prefix, &[("soc_calibrating", value.to_string())]);
+    publish_values(
+        publisher,
+        prefix,
+        vec![("soc_calibrating", value.to_string())],
+    );
 }
 
 pub fn publish_battery_power(
@@ -488,7 +507,7 @@ pub fn publish_battery_power(
     publish_values(
         publisher,
         prefix,
-        &[
+        vec![
             ("battery_charge_power", charge.to_string()),
             ("battery_discharge_power", discharge.to_string()),
         ],
@@ -499,12 +518,12 @@ pub fn publish_status(publisher: &dyn Publisher, prefix: &str, status: &str) {
     publish_values(
         publisher,
         prefix,
-        &[("controller_status", status.to_string())],
+        vec![("controller_status", status.to_string())],
     );
 }
 
 pub fn publish_battery_soc(publisher: &dyn Publisher, prefix: &str, soc: Soc) {
-    publish_values(publisher, prefix, &[("battery_soc", soc.to_string())]);
+    publish_values(publisher, prefix, vec![("battery_soc", soc.to_string())]);
 }
 
 /// Convert a Zendure temperature (tenths of Kelvin) to degrees Celsius.
@@ -514,24 +533,27 @@ fn tenths_kelvin_to_celsius(value: u32) -> f64 {
 
 pub fn publish_temperatures(
     publisher: &dyn Publisher,
+    announcer: &Announcer,
     prefix: &str,
     enclosure_temp: Option<u32>,
     pack_temps: &[(usize, u32)],
 ) {
-    // Publish per-pack discovery + state (dynamic number of packs)
+    // Per-pack sensors are announced from here rather than with the static list
+    // because the pack count is only known from a poll. This is the one caller
+    // that needs the announcer for a reason other than retrying.
     for &(idx, raw_temp) in pack_temps {
         let id = format!("pack{idx}_temp");
-        let name = format!("Battery Pack {idx} Temperature");
-        publisher.publish(sensor_discovery(
-            prefix,
-            &id,
-            &name,
-            "°C",
-            Some("temperature"),
-        ));
+        announcer.announce(publisher, &id, || {
+            let name = format!("Battery Pack {idx} Temperature");
+            sensor_discovery(prefix, &id, &name, "°C", Some("temperature"))
+        });
 
         let celsius = tenths_kelvin_to_celsius(raw_temp);
-        publish_values(publisher, prefix, &[(&id, format!("{celsius:.1}"))]);
+        publish_values(
+            publisher,
+            prefix,
+            vec![(id.as_str(), format!("{celsius:.1}"))],
+        );
     }
 
     // Publish enclosure temperature state
@@ -540,7 +562,7 @@ pub fn publish_temperatures(
         publish_values(
             publisher,
             prefix,
-            &[("enclosure_temp", format!("{celsius:.1}"))],
+            vec![("enclosure_temp", format!("{celsius:.1}"))],
         );
     }
 }
@@ -572,19 +594,6 @@ mod tests {
     fn unreachable_client() -> (AsyncClient, EventLoop) {
         let opts = MqttOptions::new("zendure-test", "127.0.0.1", 1);
         AsyncClient::new(opts, 50)
-    }
-
-    /// Everything sitting in the queue right now.
-    fn drain(rx: &mut mpsc::Receiver<Message>) -> Vec<Message> {
-        let mut out = Vec::new();
-        while let Ok(m) = rx.try_recv() {
-            out.push(m);
-        }
-        out
-    }
-
-    fn count(messages: &[Message], topic: &str) -> usize {
-        messages.iter().filter(|m| m.topic == topic).count()
     }
 
     fn telemetry(publisher: &RecordingPublisher) -> Vec<(String, String)> {
@@ -652,13 +661,44 @@ mod tests {
     }
 
     #[test]
-    fn the_remaining_scalars_publish_the_strings_they_always_did() {
+    fn status_publishes_the_string_it_was_given() {
         let p = RecordingPublisher::new();
         publish_status(&p, "zendure", "mqtt_timeout");
+        assert_eq!(
+            p.payload("zendure/controller_status").unwrap(),
+            "mqtt_timeout"
+        );
+    }
+
+    #[test]
+    fn soc_publishes_whole_percent() {
+        let p = RecordingPublisher::new();
         publish_battery_soc(&p, "zendure", Soc::new(81));
+        assert_eq!(p.payload("zendure/battery_soc").unwrap(), "81");
+    }
+
+    /// A binary sensor, so the payload is HA's `ON`/`OFF`, not `true`/`false`.
+    #[test]
+    fn soc_calibrating_publishes_on_and_off() {
+        let p = RecordingPublisher::new();
         publish_soc_calibrating(&p, "zendure", true);
+        assert_eq!(p.payload("zendure/soc_calibrating").unwrap(), "ON");
+
         publish_soc_calibrating(&p, "zendure", false);
+        assert_eq!(p.payload("zendure/soc_calibrating").unwrap(), "OFF");
+    }
+
+    #[test]
+    fn battery_power_publishes_both_directions_separately() {
+        let p = RecordingPublisher::new();
         publish_battery_power(&p, "zendure", Watts::from_device(1200), Watts::ZERO);
+        assert_eq!(p.payload("zendure/battery_charge_power").unwrap(), "1200");
+        assert_eq!(p.payload("zendure/battery_discharge_power").unwrap(), "0");
+    }
+
+    #[test]
+    fn cycle_counts_publish_both_counters() {
+        let p = RecordingPublisher::new();
         publish_cycle_counts(
             &p,
             "zendure",
@@ -667,16 +707,6 @@ mod tests {
                 daily_cooldown_suppressions: 2,
             },
         );
-
-        assert_eq!(
-            p.payload("zendure/controller_status").unwrap(),
-            "mqtt_timeout"
-        );
-        assert_eq!(p.payload("zendure/battery_soc").unwrap(), "81");
-        // The last write wins, so this is the `false` call.
-        assert_eq!(p.payload("zendure/soc_calibrating").unwrap(), "OFF");
-        assert_eq!(p.payload("zendure/battery_charge_power").unwrap(), "1200");
-        assert_eq!(p.payload("zendure/battery_discharge_power").unwrap(), "0");
         assert_eq!(p.payload("zendure/daily_cycles").unwrap(), "7");
         assert_eq!(
             p.payload("zendure/daily_cooldown_suppressions").unwrap(),
@@ -687,7 +717,13 @@ mod tests {
     #[test]
     fn temperatures_convert_tenths_of_kelvin_to_one_decimal_of_celsius() {
         let p = RecordingPublisher::new();
-        publish_temperatures(&p, "zendure", Some(3001), &[(0, 2981), (1, 2995)]);
+        publish_temperatures(
+            &p,
+            &Announcer::new(),
+            "zendure",
+            Some(3001),
+            &[(0, 2981), (1, 2995)],
+        );
 
         assert_eq!(p.payload("zendure/enclosure_temp").unwrap(), "27.0");
         assert_eq!(p.payload("zendure/pack0_temp").unwrap(), "25.0");
@@ -697,10 +733,14 @@ mod tests {
     #[test]
     fn discovery_documents_are_retained_and_telemetry_is_not() {
         let p = RecordingPublisher::new();
-        publish_ha_discovery(&p, "zendure");
+        publish_ha_discovery(&p, &Announcer::new(), "zendure");
 
         let sent = p.sent();
-        assert!(sent.iter().all(|m| m.delivery == Delivery::Discovery));
+        // The flag itself, not just the variant: an announcement that stops
+        // being retained vanishes from Home Assistant on the next broker
+        // restart, which is the whole reason this is QoS 1 and retained.
+        assert!(sent.iter().all(|m| m.delivery.retain()));
+        assert!(sent.iter().all(|m| m.delivery.qos() == QoS::AtLeastOnce));
         assert!(
             sent.iter().all(|m| m.topic.starts_with("homeassistant/")),
             "discovery lives under the homeassistant prefix, not the device's",
@@ -717,100 +757,18 @@ mod tests {
         assert_eq!(doc["state_class"], "measurement");
     }
 
-    // --- discovery, once per connection ---------------------------------
-
-    /// A 4-pack device published 4 retained discovery documents on *every*
-    /// poll — 4 of the 16 messages a poll sends, on the very channel whose
-    /// depth caused the wedge.
-    #[tokio::test]
-    async fn a_discovery_document_is_published_once_per_connection() {
-        let (publisher, mut rx) = MqttPublisher::queued(64);
-
-        for _ in 0..5 {
-            publish_temperatures(&*publisher, "zendure", None, &[(0, 2981)]);
-        }
-
-        let queued = drain(&mut rx);
-        // Five polls, five state values, one announcement.
-        assert_eq!(
-            count(&queued, "homeassistant/sensor/zendure_pack0_temp/config"),
-            1,
-        );
-        assert_eq!(count(&queued, "zendure/pack0_temp"), 5);
-    }
-
-    #[tokio::test]
-    async fn a_reconnect_announces_everything_again() {
-        let (publisher, mut rx) = MqttPublisher::queued(64);
-
-        publish_temperatures(&*publisher, "zendure", None, &[(0, 2981)]);
-        publisher.reconnected();
-        publish_temperatures(&*publisher, "zendure", None, &[(0, 2981)]);
-
-        assert_eq!(
-            count(
-                &drain(&mut rx),
-                "homeassistant/sensor/zendure_pack0_temp/config",
-            ),
-            2,
-        );
-    }
-
-    /// A changed document is a different document, dedup or not.
-    #[tokio::test]
-    async fn a_document_whose_bytes_changed_is_published_again() {
-        let (publisher, mut rx) = MqttPublisher::queued(64);
-        let topic = "homeassistant/sensor/zendure_battery_soc/config";
-
-        publisher.publish(Message::discovery(topic.to_string(), "{\"v\":1}".into()));
-        publisher.publish(Message::discovery(topic.to_string(), "{\"v\":1}".into()));
-        publisher.publish(Message::discovery(topic.to_string(), "{\"v\":2}".into()));
-
-        assert_eq!(count(&drain(&mut rx), topic), 2);
-    }
-
-    /// The dedup records what the queue *accepted*, not what was attempted.
-    ///
-    /// Recording on attempt would mean a discovery document dropped under
-    /// backpressure is suppressed for the life of the connection — the sensor
-    /// missing from Home Assistant, with nothing in the log to say why. Here
-    /// the queue is closed, so every send is refused: the second attempt must
-    /// still be made, which shows as a second drop rather than a silent skip.
-    #[tokio::test]
-    async fn a_dropped_discovery_document_is_attempted_again() {
-        let (client, _eventloop) = unreachable_client();
-        let (publisher, _task) = MqttPublisher::open(client);
-        publisher.close();
-
-        let doc = || {
-            Message::discovery(
-                "homeassistant/sensor/zendure_battery_soc/config".to_string(),
-                "{}".to_string(),
-            )
-        };
-        publisher.publish(doc());
-        assert_eq!(publisher.dropped(), 1);
-
-        publisher.publish(doc());
-        assert_eq!(
-            publisher.dropped(),
-            2,
-            "a document that never left is not a document that was published",
-        );
-    }
-
     // --- the wedge ------------------------------------------------------
 
-    /// Proves the fixture below reproduces the production condition rather
-    /// than merely resembling it.
+    /// Fixture validity, not a test of this crate.
     ///
-    /// This is the shape every publish had before the publisher trait: an
-    /// `await` against a client whose request channel only the (here unpolled)
-    /// eventloop drains. Once the channel fills, the await never returns — and
-    /// it was being made from inside the coordinator's `select!`, so the loop
-    /// stopped: no polls, no decisions, and no failsafe re-assertion.
+    /// It asserts a property of rumqttc — that an awaited send on a bounded
+    /// request channel nobody drains blocks forever — and it cannot fail
+    /// because of anything in this repo. It is here because every other test in
+    /// this section is worthless if that property does not hold: they would be
+    /// proving the new code survives a condition the fixture never creates.
+    /// Kept knowingly, at the cost of one runtime and a 50ms loop.
     #[tokio::test]
-    async fn awaiting_a_publish_blocks_forever_when_the_broker_never_drains() {
+    async fn fixture_check_awaiting_a_publish_blocks_when_nobody_drains() {
         let (client, _eventloop) = unreachable_client();
 
         let mut accepted = 0;
@@ -901,6 +859,46 @@ mod tests {
         assert_eq!(publisher.dropped(), 0, "the queue never filled");
     }
 
+    /// A vanished sink must not be reported as backpressure.
+    ///
+    /// Both refusals used to fold into one counter and one `"MQTT queue full"`
+    /// line, so a delivery task that had died — after which *nothing* is ever
+    /// published again — read in the log exactly like a slow broker.
+    #[tokio::test]
+    async fn a_dead_delivery_task_is_not_reported_as_a_full_queue() {
+        let (client, _eventloop) = unreachable_client();
+        let (publisher, task) = MqttPublisher::open(client);
+
+        task.abort();
+        let _ = task.await;
+
+        assert_eq!(
+            publisher.publish(Message::telemetry(
+                "zendure/battery_soc".to_string(),
+                "81".to_string(),
+            )),
+            Accepted::Dropped,
+        );
+        assert!(publisher.sink_gone(), "the sink is gone, not merely full");
+        assert_eq!(publisher.dropped(), 1);
+    }
+
+    /// A publish after `close` is expected, and must not be counted as though
+    /// the broker had failed us.
+    #[tokio::test]
+    async fn a_publish_during_shutdown_is_not_reported_as_a_dead_sink() {
+        let (client, _eventloop) = unreachable_client();
+        let (publisher, _task) = MqttPublisher::open(client);
+        publisher.close();
+
+        publisher.publish(Message::telemetry(
+            "zendure/battery_soc".to_string(),
+            "81".to_string(),
+        ));
+
+        assert!(!publisher.sink_gone());
+    }
+
     #[tokio::test]
     async fn closing_ends_the_delivery_task_once_the_queue_is_empty() {
         let (client, _eventloop) = unreachable_client();
@@ -918,14 +916,16 @@ mod tests {
             .expect("the task did not panic");
     }
 
-    /// Why the drain is bounded.
+    /// Why the drain needs a deadline at all.
     ///
     /// With the broker gone the delivery task parks on rumqttc's channel and
     /// cannot finish, so a shutdown that awaited it unconditionally would hang
-    /// until systemd's `TimeoutStopSec` turned into a SIGKILL — taking the
-    /// journal's own drain down with it.
+    /// until systemd turned `TimeoutStopSec` into a SIGKILL. The deadline
+    /// itself lives in `run.rs` and is exercised by `run`'s own drain test;
+    /// what this pins is the precondition — that the task really does park,
+    /// with messages still queued behind it.
     #[tokio::test]
-    async fn a_drain_that_cannot_finish_is_bounded_and_reported() {
+    async fn a_parked_delivery_task_leaves_messages_queued() {
         let (client, _eventloop) = unreachable_client();
         let (publisher, task) = MqttPublisher::open(client);
 

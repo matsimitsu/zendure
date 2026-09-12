@@ -1,4 +1,5 @@
 mod allocate;
+mod announce;
 mod battery;
 mod cli;
 mod clock;
@@ -19,6 +20,7 @@ mod replay;
 mod rte;
 mod run;
 mod source;
+mod sync;
 mod units;
 mod world;
 mod zendure;

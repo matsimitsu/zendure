@@ -24,6 +24,7 @@ use std::time::Duration;
 const DRAIN_DEADLINE: Duration = Duration::from_secs(2);
 
 use crate::allocate::Directive;
+use crate::announce::Announcer;
 use crate::clock::Clock;
 use crate::config::Config;
 use crate::device::{self, Applied, ControlPath, Outcome};
@@ -139,6 +140,7 @@ async fn apply_and_publish(
 #[allow(clippy::too_many_arguments)]
 async fn publish_poll_telemetry(
     publisher: &dyn Publisher,
+    announcer: &Announcer,
     prefix: &str,
     report: &models::ZendureReport,
     state: &battery::BatteryState,
@@ -178,7 +180,13 @@ async fn publish_poll_telemetry(
                 .collect()
         })
         .unwrap_or_default();
-    mqtt::publish_temperatures(publisher, prefix, report.properties.hyper_tmp, &pack_temps);
+    mqtt::publish_temperatures(
+        publisher,
+        announcer,
+        prefix,
+        report.properties.hyper_tmp,
+        &pack_temps,
+    );
 
     mqtt::publish_soc_calibrating(publisher, prefix, state.soc_calibrating);
     mqtt::publish_battery_soc(publisher, prefix, state.soc);
@@ -277,6 +285,9 @@ pub async fn run(
     // The sink the decision path publishes through. Its task owns the only
     // `await` against the broker; nothing below this line can block on one.
     let (publisher, mut publisher_task) = MqttPublisher::open(mqtt_client.clone());
+    // What Home Assistant has already been told about. Shared with the
+    // subscriber, which resets it on every ConnAck.
+    let announcer = std::sync::Arc::new(Announcer::new());
 
     let (tx, mut rx) = mpsc::channel::<MqttEvent>(64);
 
@@ -287,7 +298,8 @@ pub async fn run(
     let ha_prefix = config.ha_publish_prefix.clone();
     let subscriber_prefix = config.ha_publish_prefix.clone();
     let subscriber_journal = journal.clone();
-    let subscriber_publisher = publisher.clone();
+    let subscriber_publisher: std::sync::Arc<dyn Publisher> = publisher.clone();
+    let subscriber_announcer = announcer.clone();
     let subscriber = tokio::spawn(async move {
         mqtt::run_subscriber(
             mqtt_client,
@@ -296,6 +308,7 @@ pub async fn run(
             solar_phase,
             subscriber_prefix,
             subscriber_publisher,
+            subscriber_announcer,
             tx,
             subscriber_journal,
         )
@@ -497,6 +510,7 @@ pub async fn run(
 
                         publish_poll_telemetry(
                             &*publisher,
+                            &announcer,
                             &ha_prefix,
                             &report,
                             &state,
@@ -530,20 +544,31 @@ pub async fn run(
     // would leave the publisher task awaiting a channel nobody drains, so every
     // shutdown would stall for the full deadline and deliver nothing.
     let queued = publisher.close();
-    if tokio::time::timeout(DRAIN_DEADLINE, &mut publisher_task)
-        .await
-        .is_err()
-    {
-        publisher_task.abort();
-        // The task prints this summary itself when it ends normally; aborting
-        // it is the one path where nobody would.
-        tracing::warn!(
-            "MQTT drain did not finish in {}s — {queued} messages still queued, \
-             {} dropped and {} failed this session",
-            DRAIN_DEADLINE.as_secs(),
+    // Matched rather than `.is_err()`, which sees only the timeout: a task that
+    // ended early resolves instantly to `Ok(Err(JoinError))`, and treating that
+    // as success reported a clean drain for a task that had been dead for
+    // hours. The three outcomes are genuinely different and only one is fine.
+    match tokio::time::timeout(DRAIN_DEADLINE, &mut publisher_task).await {
+        // Drained. The task logs its own closing summary.
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!(
+            "MQTT delivery task ended early ({e}) — {} messages dropped this session",
             publisher.dropped(),
-            publisher.failed(),
-        );
+        ),
+        Err(_) => {
+            publisher_task.abort();
+            // The task prints this summary itself when it ends normally;
+            // aborting it is the one path where nobody would. `queued` is what
+            // was waiting when the drain *began* — some of it will have gone
+            // out since.
+            tracing::warn!(
+                "MQTT drain did not finish in {}s — {queued} messages were queued when it \
+                 began, {} dropped and {} failed this session",
+                DRAIN_DEADLINE.as_secs(),
+                publisher.dropped(),
+                publisher.failed(),
+            );
+        }
     }
 
     // Then the journal. The writer stops when every sender is gone, and the

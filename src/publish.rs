@@ -73,21 +73,35 @@ impl Message {
     }
 }
 
+/// Whether the sink took a message.
+///
+/// Not an error: there is nothing a caller in the decision path could usefully
+/// do about a broker that is not there, and no caller is obliged to look. It is
+/// a report, and exactly one kind of caller needs it — an announcement, which
+/// must be repeated until it lands, where a reading is superseded by the next
+/// one a second later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Accepted {
+    Queued,
+    Dropped,
+}
+
 /// A sink for outgoing readings.
 ///
 /// `&self` rather than `&mut self` for the same reason `BatteryController` takes
 /// it: the coordinator holds this immutably across a `select!` and the
-/// implementation keeps its own interior mutability. No return value, because
-/// there is nothing a caller in the decision path could usefully do about a
-/// broker that is not there — the implementation counts what it drops and says
-/// so, which is the honest version of handling it.
+/// implementation keeps its own interior mutability. Synchronous and
+/// infallible: no future to await, no error to handle.
 pub trait Publisher: Send + Sync {
-    fn publish(&self, message: Message);
+    fn publish(&self, message: Message) -> Accepted;
 }
 
 #[cfg(test)]
 pub(crate) struct RecordingPublisher {
     sent: std::sync::Mutex<Vec<Message>>,
+    /// Refuse everything, for testing the callers that must retry.
+    /// `RecordingBattery::failing_at` is the same idea on the write path.
+    refusing: bool,
 }
 
 #[cfg(test)]
@@ -95,6 +109,15 @@ impl RecordingPublisher {
     pub(crate) fn new() -> Self {
         RecordingPublisher {
             sent: std::sync::Mutex::new(Vec::new()),
+            refusing: false,
+        }
+    }
+
+    /// A sink with no room in it. Records the attempt, refuses the message.
+    pub(crate) fn refusing() -> Self {
+        RecordingPublisher {
+            sent: std::sync::Mutex::new(Vec::new()),
+            refusing: true,
         }
     }
 
@@ -115,8 +138,13 @@ impl RecordingPublisher {
 
 #[cfg(test)]
 impl Publisher for RecordingPublisher {
-    fn publish(&self, message: Message) {
+    fn publish(&self, message: Message) -> Accepted {
         self.sent.lock().unwrap().push(message);
+        if self.refusing {
+            Accepted::Dropped
+        } else {
+            Accepted::Queued
+        }
     }
 }
 
