@@ -20,6 +20,11 @@ use crate::units::RetentionDays;
 /// stuck, and waiting for it would be worse than losing the record.
 const QUEUE_DEPTH: usize = 1024;
 
+/// Bumped whenever the table shapes change. Nothing migrates on it yet; it
+/// exists so that a future change *can*, instead of silently inserting against
+/// a database whose columns predate it.
+const SCHEMA_VERSION: i64 = 1;
+
 /// Append-only record of everything entering and leaving the controller.
 ///
 /// Supersedes the NDJSON raw capture. Same contract, different storage: the
@@ -69,12 +74,16 @@ struct DecisionRow {
     kind: &'static str,
     device: Option<String>,
     payload_json: String,
-    world_json: String,
-    ctrl_state_json: String,
+    /// The whole `EngineState`, not its parts. Splitting it into `world_json`
+    /// and `ctrl_state_json` silently dropped `mqtt_timed_out`, which decides
+    /// whether a resuming meter reading announces `"operational"` — so a row
+    /// taken mid-outage replayed *almost* right. One column cannot lose a field
+    /// the struct later gains.
+    state_json: String,
     command: Option<String>,
     outcome: Option<String>,
     error: Option<String>,
-    pre_battery_net_w: f64,
+    pre_battery_net_w: Option<f64>,
 }
 
 /// Which path produced a decision. Recorded so the failsafe's re-asserted idles
@@ -131,17 +140,20 @@ impl Journal {
             "null".to_string()
         });
 
-        if let Err(e) = prepare(&conn, version, &config_json) {
-            tracing::warn!("Journal disabled: cannot prepare {}: {e}", path.display());
-            return None;
-        }
+        let session_id = match prepare(&conn, version, &config_json) {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!("Journal disabled: cannot prepare {}: {e}", path.display());
+                return None;
+            }
+        };
 
         let (tx, rx) = mpsc::channel(QUEUE_DEPTH);
         let dropped = Arc::new(AtomicU64::new(0));
 
         let handle = tokio::task::spawn_blocking({
             let dropped = Arc::clone(&dropped);
-            move || writer(conn, rx, retention, &dropped)
+            move || writer(conn, session_id, rx, retention, &dropped)
         });
         #[cfg(not(test))]
         drop(handle);
@@ -207,32 +219,19 @@ impl Journal {
         state: &EngineState,
         outcomes: &[Outcome],
     ) {
-        let payload_json = match serde_json::to_string(decision) {
-            Ok(json) => json,
-            Err(e) => {
-                tracing::debug!("Journal: cannot serialize decision: {e}");
-                return;
-            }
+        let (Some(payload_json), Some(state_json)) =
+            (json("decision", decision), json("engine state", state))
+        else {
+            return;
         };
-        let world_json = match serde_json::to_string(&state.world) {
-            Ok(json) => json,
-            Err(e) => {
-                tracing::debug!("Journal: cannot serialize world: {e}");
-                return;
-            }
-        };
-        let ctrl_state_json = match serde_json::to_string(&state.controller) {
-            Ok(json) => json,
-            Err(e) => {
-                tracing::debug!("Journal: cannot serialize controller state: {e}");
-                return;
-            }
-        };
+
         // The grid figure with the battery's own flow removed — what the house
-        // would have been drawing without it. Derivable from `world_json`, kept
+        // would have been drawing without it. Derivable from `state_json`, kept
         // as a column because every question about whether a decision was right
-        // starts by asking for it.
-        let pre_battery_net_w = state.world.underlying_grid().get();
+        // starts by asking for it. Non-finite becomes NULL deliberately: SQLite
+        // stores a bound NaN as NULL regardless, which under `NOT NULL` failed
+        // the whole insert and took the decision with it.
+        let pre_battery_net_w = Some(state.world.underlying_grid().get()).filter(|w| w.is_finite());
 
         let row = |device, command, outcome, error| {
             Record::Decision(Box::new(DecisionRow {
@@ -240,8 +239,7 @@ impl Journal {
                 kind: kind.as_str(),
                 device,
                 payload_json: payload_json.clone(),
-                world_json: world_json.clone(),
-                ctrl_state_json: ctrl_state_json.clone(),
+                state_json: state_json.clone(),
                 command,
                 outcome,
                 error,
@@ -257,9 +255,7 @@ impl Journal {
             self.send(row(
                 Some(outcome.device.to_string()),
                 Some(outcome.command.clone()),
-                serde_json::to_string(&outcome.applied)
-                    .ok()
-                    .map(|s| s.trim_matches('"').to_string()),
+                Some(outcome.applied.as_str().to_string()),
                 outcome.error.clone(),
             ));
         }
@@ -279,10 +275,26 @@ impl Journal {
     }
 }
 
+/// Serialize one value for a column, naming it if that fails.
+///
+/// `warn!`, not `debug!`: serializing our own types is a programming error that
+/// either never happens or happens every time, so it cannot flood the log the
+/// way a recurring write failure could — and a permanently unserializable
+/// journal going quiet is the outcome this whole module exists to avoid.
+fn json<T: Serialize>(what: &str, value: &T) -> Option<String> {
+    match serde_json::to_string(value) {
+        Ok(json) => Some(json),
+        Err(e) => {
+            tracing::warn!("Journal: cannot serialize {what}: {e}");
+            None
+        }
+    }
+}
+
 /// `auto_vacuum` has to be set before the first table exists, so a database
 /// created by an older build keeps its old setting. Harmless: without it the
 /// file holds its high-water mark instead of shrinking after a prune.
-fn prepare(conn: &Connection, version: &str, config_json: &str) -> rusqlite::Result<()> {
+fn prepare(conn: &Connection, version: &str, config_json: &str) -> rusqlite::Result<i64> {
     // First, before anything writes a page: `auto_vacuum` can only be set while
     // the database is still empty, and switching to WAL is itself a write. Set
     // after, it silently reports success and leaves the setting at NONE.
@@ -302,40 +314,51 @@ fn prepare(conn: &Connection, version: &str, config_json: &str) -> rusqlite::Res
          );
          CREATE TABLE IF NOT EXISTS events (
              id           INTEGER PRIMARY KEY,
+             session_id   INTEGER NOT NULL,
              ts_ms        INTEGER NOT NULL,
              kind         TEXT    NOT NULL,
              payload_json TEXT    NOT NULL
          );
          CREATE TABLE IF NOT EXISTS decisions (
              id                INTEGER PRIMARY KEY,
+             session_id        INTEGER NOT NULL,
              ts_ms             INTEGER NOT NULL,
              device            TEXT,
              kind              TEXT    NOT NULL,
              payload_json      TEXT    NOT NULL,
-             world_json        TEXT    NOT NULL,
-             ctrl_state_json   TEXT    NOT NULL,
+             state_json        TEXT    NOT NULL,
              command           TEXT,
              outcome           TEXT,
              error             TEXT,
-             pre_battery_net_w REAL    NOT NULL
+             pre_battery_net_w REAL
          );
-         CREATE INDEX IF NOT EXISTS events_ts    ON events (ts_ms);
-         CREATE INDEX IF NOT EXISTS decisions_ts ON decisions (ts_ms);",
+         CREATE INDEX IF NOT EXISTS events_ts        ON events (ts_ms);
+         CREATE INDEX IF NOT EXISTS events_kind      ON events (kind);
+         CREATE INDEX IF NOT EXISTS decisions_ts     ON decisions (ts_ms);
+         CREATE INDEX IF NOT EXISTS decisions_device ON decisions (device);",
     )?;
 
+    // Stamped so a future column addition has somewhere to branch on. Without
+    // it, `CREATE TABLE IF NOT EXISTS` silently accepts a database written by an
+    // older build and then fails every insert against the missing column.
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+
     // One row per process. A replay seeded from before the first decision has
-    // this to fall back on, and it dates every restart.
+    // this to fall back on, and it dates every restart. Its id is stamped onto
+    // every row written afterwards: the association is known here and would
+    // otherwise have to be reconstructed by timestamp later.
     conn.execute(
         "INSERT INTO sessions (started_ms, version, config_json) VALUES (?1, ?2, ?3)",
         (Utc::now().timestamp_millis(), version, config_json),
     )?;
-    Ok(())
+    Ok(conn.last_insert_rowid())
 }
 
 /// Owns the connection for the life of the process. Ends when every `Journal`
 /// handle is dropped, which in practice means the process is going down.
 fn writer(
     conn: Connection,
+    session_id: i64,
     mut rx: mpsc::Receiver<Record>,
     retention: RetentionDays,
     dropped: &AtomicU64,
@@ -344,7 +367,7 @@ fn writer(
     prune(&conn, retention);
 
     while let Some(record) = rx.blocking_recv() {
-        if let Err(e) = write(&conn, &record) {
+        if let Err(e) = write(&conn, session_id, &record) {
             // Debug, not warn: a failing database would otherwise emit a line
             // per reading. The dropped counter above is the loud signal.
             tracing::debug!("Journal: write failed: {e}");
@@ -364,28 +387,28 @@ fn writer(
     }
 }
 
-fn write(conn: &Connection, record: &Record) -> rusqlite::Result<()> {
+fn write(conn: &Connection, session_id: i64, record: &Record) -> rusqlite::Result<()> {
     match record {
         Record::Event {
             ts_ms,
             kind,
             payload_json,
         } => conn.execute(
-            "INSERT INTO events (ts_ms, kind, payload_json) VALUES (?1, ?2, ?3)",
-            (ts_ms, kind, payload_json),
+            "INSERT INTO events (session_id, ts_ms, kind, payload_json) VALUES (?1, ?2, ?3, ?4)",
+            (session_id, ts_ms, kind, payload_json),
         )?,
         Record::Decision(row) => conn.execute(
             "INSERT INTO decisions
-                 (ts_ms, device, kind, payload_json, world_json, ctrl_state_json,
+                 (session_id, ts_ms, device, kind, payload_json, state_json,
                   command, outcome, error, pre_battery_net_w)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             (
+                session_id,
                 row.ts_ms,
                 &row.device,
                 row.kind,
                 &row.payload_json,
-                &row.world_json,
-                &row.ctrl_state_json,
+                &row.state_json,
                 &row.command,
                 &row.outcome,
                 &row.error,
@@ -438,6 +461,7 @@ mod tests {
     use crate::clock::Clock;
     use crate::controller::Controller;
     use crate::device::Applied;
+    use crate::engine::Engine;
     use crate::models::ControlMode;
     use crate::units::{BatteryPower, GridPower, PowerCap, Setpoint, Soc, SolarPower, Timestamp};
     use crate::world::{DeviceId, Measurement, MeterReading, World};
@@ -723,34 +747,100 @@ mod tests {
         assert_eq!(device, None);
     }
 
-    /// The world and the controller's state travel with the decision, so a row
-    /// carries the inputs it was made from and can seed a replay on its own.
+    /// **A decision row can seed a replay.** The claim three doc comments made
+    /// while the code did not implement it.
+    ///
+    /// Goes all the way round rather than checking columns: write a row, read
+    /// `state_json` back out of SQLite, and `restore` a real `Engine` from it.
+    /// The gap this closes was invisible precisely because nobody tested the
+    /// composition — `engine.rs` proved `EngineState` round-trips through JSON,
+    /// this module proved two columns persisted, and `mqtt_timed_out` fell
+    /// between them. Anything the snapshot gains from here is carried or this
+    /// fails.
     #[tokio::test]
-    async fn a_decision_row_carries_the_world_and_the_controller_state() {
+    async fn a_decision_row_restores_a_working_engine() {
         let dir = tempfile::tempdir().unwrap();
         let (journal, path) = open(&dir);
-        let state = engine_state();
+
+        // Latched, so the field that used to be dropped is not its default.
+        let state = EngineState {
+            mqtt_timed_out: true,
+            ..engine_state()
+        };
         journal.decision(
             NOW_MS,
-            DecisionKind::Decision,
+            DecisionKind::Failsafe,
             &decision(),
             &state,
             &[outcome("SN123", Applied::Ok, None)],
         );
         let conn = drain(journal, &path).await;
 
-        let (world_json, ctrl_json, pre_net): (String, String, f64) = conn
+        let (state_json, pre_net): (String, f64) = conn
             .query_row(
-                "SELECT world_json, ctrl_state_json, pre_battery_net_w FROM decisions",
+                "SELECT state_json, pre_battery_net_w FROM decisions",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
 
-        assert_eq!(state.world, serde_json::from_str(&world_json).unwrap());
-        assert_eq!(state.controller, serde_json::from_str(&ctrl_json).unwrap());
+        let recovered: EngineState = serde_json::from_str(&state_json).unwrap();
+        assert_eq!(recovered, state, "the row must carry the whole snapshot");
+
+        let mut engine = Engine::new(
+            Controller::test_default(NOW_MS, 255),
+            World::new(),
+            std::time::Duration::from_secs(120),
+        );
+        engine.restore(recovered);
+        assert_eq!(
+            engine.state(),
+            state,
+            "an engine restored from the row is the engine"
+        );
+
         // 150.5 grid + (-300) battery: what the house drew without the battery.
         assert_eq!(pre_net, -149.5);
+    }
+
+    /// Every row is stamped with the session that wrote it, so `config_json`
+    /// joins to the rows it actually governed instead of being matched up by
+    /// timestamp after the fact.
+    #[tokio::test]
+    async fn rows_are_attributed_to_their_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let (journal, path) = open(&dir);
+        journal.raw("shelly", r#"{"ok":true}"#);
+        journal.decision(
+            NOW_MS,
+            DecisionKind::Decision,
+            &decision(),
+            &engine_state(),
+            &[],
+        );
+        let conn = drain(journal, &path).await;
+
+        let session: i64 = conn
+            .query_row("SELECT id FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT count(*) FROM events WHERE session_id IS NOT NULL"
+            ),
+            1
+        );
+        assert_eq!(
+            conn.query_row("SELECT session_id FROM events", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            session
+        );
+        assert_eq!(
+            conn.query_row("SELECT session_id FROM decisions", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            session
+        );
     }
 
     /// Retention is the only thing bounding this file. Deleting by date rather

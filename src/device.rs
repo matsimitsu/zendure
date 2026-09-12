@@ -85,6 +85,23 @@ pub enum Applied {
     Error,
 }
 
+impl Applied {
+    /// The journal's `outcome` column. A plain `&'static str`, like
+    /// `Actuation`'s and `ControlMode`'s `Display`, rather than serializing to
+    /// JSON and stripping the quotes back off — which allocated, could fail
+    /// into a `None` that read as "commanded nothing", and would have silently
+    /// mangled any future variant whose rename contained a quote.
+    ///
+    /// `applied_str_matches_serde` pins these against the `rename_all` above,
+    /// since the two now have to agree.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Applied::Ok => "ok",
+            Applied::Error => "error",
+        }
+    }
+}
+
 /// Which path is actuating, for the operator reading the log. A type rather
 /// than a `&str` for the same reason `Applied` is: two call sites, two values,
 /// and a typo in either is silent.
@@ -334,5 +351,19 @@ mod tests {
         );
         assert_eq!(outcomes[1].device, DeviceId::new("battery-a"));
         assert_eq!(outcomes[1].applied, Applied::Ok);
+    }
+
+    /// `as_str` and the serde rename are two spellings of one string, and the
+    /// journal reaches for both — `as_str` fills the indexed `outcome` column,
+    /// `Serialize` is what the raw capture wrote before it. Same class of drift
+    /// as `event.rs`'s `the_serde_tag_agrees_with_kind`, same guard.
+    #[test]
+    fn applied_str_matches_serde() {
+        for applied in [Applied::Ok, Applied::Error] {
+            let serialized = serde_json::to_string(&applied).unwrap();
+            assert_eq!(serialized, format!(r#""{}""#, applied.as_str()));
+        }
+        assert_eq!(Applied::Ok.as_str(), "ok");
+        assert_eq!(Applied::Error.as_str(), "error");
     }
 }

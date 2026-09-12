@@ -95,10 +95,15 @@ SQLite database at `JOURNAL_PATH`.
 
 ```sql
 sessions  (id, started_ms, version, config_json)
-events    (id, ts_ms, kind, payload_json)
-decisions (id, ts_ms, device, kind, payload_json, world_json, ctrl_state_json,
+events    (id, session_id, ts_ms, kind, payload_json)
+decisions (id, session_id, ts_ms, device, kind, payload_json, state_json,
            command, outcome, error, pre_battery_net_w)
 ```
+
+`state_json` is the engine's whole snapshot — world, controller history and the
+failsafe latch — so a single decision row is enough to seed a replay. Every row
+carries the `session_id` of the process that wrote it, which is what joins it to
+the `config_json` that governed it.
 
 `events.kind` is one of `shelly` and `zendure_poll` (payloads captured verbatim,
 *before* parsing) or `meter`, `device_update` and `mqtt_timeout` (the engine's
