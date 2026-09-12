@@ -231,7 +231,7 @@ pub struct CycleCounts {
 }
 
 /// Output of the controller, published to MQTT for HA graphing.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ControlDecision {
     /// Charge, Discharge, or Idle
     pub mode: ControlMode,

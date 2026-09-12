@@ -2,13 +2,18 @@
 //!
 //! A source adapter owns one meter's wire format: its JSON, its field names,
 //! its idea of how many phases there are. What leaves this module is a
-//! [`MeterObservation`], which carries none of that — so the day a P1 smart
-//! meter replaces the Shelly, it is a new file next to `shelly.rs` and not a
-//! single edit anywhere downstream.
+//! [`MeterObservation`], which carries none of that.
 //!
-//! The split is worth naming because of what it replaced: the coordinator loop
-//! used to match on `SolarPhase` to pick a field out of a Shelly DTO, which
-//! quietly made `main.rs` know what a Shelly Pro 3EM is.
+//! What that has actually bought so far: `main.rs` no longer matches on
+//! `SolarPhase` to pick a field out of a Shelly DTO, `ShellyReading` moved out
+//! of `models.rs`, and `MeterObservation` is a real normalized boundary
+//! between wire format and decision. There is no `trait Source` and no
+//! dispatch yet, so a second meter is not "one new file": it would still touch
+//! `mqtt.rs` (which hardcodes `shelly::parse(...)` in the subscriber and logs
+//! `"Shelly: …"` from otherwise meter-agnostic plumbing), `run_subscriber`
+//! (which takes a `SolarPhase`, a Shelly concept, as a parameter), `Config`
+//! (which holds one), and `main.rs` (which threads it through). That is the
+//! honest map for whoever adds a P1 meter next, not a promise that it is free.
 
 pub mod shelly;
 

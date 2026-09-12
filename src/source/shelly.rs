@@ -2,10 +2,12 @@
 //! that turns them into a [`MeterObservation`].
 //!
 //! Everything Shelly-shaped lives here — the DTO, the phase selector, the
-//! `SOLAR_PHASE` parse — so that "a P1 meter is one new file" is a fact about
-//! the tree rather than an aspiration. The DTO in particular used to sit in
-//! `models.rs` next to the Zendure wire types, which is where a second meter's
-//! fields would have landed too.
+//! `SOLAR_PHASE` parse. The DTO in particular used to sit in `models.rs` next
+//! to the Zendure wire types, which is where a second meter's fields would
+//! have landed too. That is real progress, but it is not yet "a P1 meter is
+//! one new file": there is no `trait Source` and no dispatch, so a second
+//! meter would still mean edits in `mqtt.rs`, `run_subscriber`, `Config` and
+//! `main.rs` — see `source/mod.rs` for the list.
 
 use serde::Deserialize;
 

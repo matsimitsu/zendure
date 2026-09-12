@@ -41,11 +41,13 @@ impl MeterReading {
         MeterReading { total, phases }
     }
 
-    /// A reading with no per-phase breakdown, for sources that report only a
-    /// net total and for fixtures that predate per-phase capture. Only the test
-    /// modules call it today — the live adapters all report three phases — but
-    /// it is the constructor a total-only meter would arrive through.
-    #[allow(dead_code)]
+    /// A reading with no per-phase breakdown, built by `controller.rs`'s and
+    /// `engine.rs`'s test modules where a test only cares about the net total.
+    /// The live adapters all report three phases, so this has no production
+    /// caller — `#[cfg(test)]` rather than `#[allow(dead_code)]` makes that
+    /// enforced instead of merely claimed: a production caller would fail to
+    /// compile, and promoting it out of test-only is then a deliberate edit.
+    #[cfg(test)]
     pub fn total_only(total: GridPower) -> Self {
         MeterReading {
             total,
@@ -78,14 +80,6 @@ pub struct DeviceId(String);
 impl DeviceId {
     pub fn new(id: impl Into<String>) -> Self {
         DeviceId(id.into())
-    }
-
-    /// The id as a plain string, for callers that need one without going
-    /// through `Display`. Exercised by the test modules; the decision path and
-    /// the journal both reach an id through `Display` or `Serialize` instead.
-    #[allow(dead_code)]
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -253,5 +247,116 @@ mod tests {
             serde_json::to_string(&world).unwrap(),
             r#"{"grid":{"total":150.5,"phases":[10.0,-200.0,340.5]},"solar":200.0,"devices":{"SN123":{"class":"battery","soc":50,"max_discharge_power":800,"max_charge_power":2400,"current_power":-300,"soc_calibrating":true,"soc_limit_reached":false,"fault":true}}}"#
         );
+    }
+
+    /// A battery otherwise identical to `sample_world`'s, distinguished only by
+    /// `current_power` — the one field `battery_flow` and `underlying_grid`
+    /// read.
+    fn battery_with_power(current_power: BatteryPower) -> BatteryState {
+        BatteryState {
+            soc: Soc::new(50),
+            max_discharge_power: PowerCap::new(800),
+            max_charge_power: PowerCap::new(2400),
+            current_power,
+            soc_calibrating: false,
+            soc_limit_reached: false,
+            fault: false,
+        }
+    }
+
+    /// Zero batteries net to zero, not a panic or a default from summing an
+    /// empty iterator over some other type.
+    #[test]
+    fn battery_flow_with_no_batteries_is_zero() {
+        let world = World::new();
+        assert_eq!(world.battery_flow(), BatteryPower::ZERO);
+    }
+
+    #[test]
+    fn battery_flow_with_one_battery_is_its_own_power() {
+        let mut world = World::new();
+        world.observe_device(
+            DeviceId::new("SN1"),
+            Measurement::Battery(battery_with_power(BatteryPower(-450))),
+        );
+        assert_eq!(world.battery_flow(), BatteryPower(-450));
+    }
+
+    /// Mixed signs: two discharging (positive), one charging (negative). A
+    /// naive count or an accidental `abs` would both pass a same-sign fixture;
+    /// this one only passes if the signs are actually summed.
+    #[test]
+    fn battery_flow_sums_mixed_signs_across_several_batteries() {
+        let mut world = World::new();
+        world.observe_device(
+            DeviceId::new("SN1"),
+            Measurement::Battery(battery_with_power(BatteryPower(-300))),
+        );
+        world.observe_device(
+            DeviceId::new("SN2"),
+            Measurement::Battery(battery_with_power(BatteryPower(500))),
+        );
+        world.observe_device(
+            DeviceId::new("SN3"),
+            Measurement::Battery(battery_with_power(BatteryPower(-150))),
+        );
+        assert_eq!(world.battery_flow(), BatteryPower(50));
+    }
+
+    /// `underlying_grid` has to be the meter total plus *every* battery's
+    /// flow, not just the first one it happens to iterate. The first battery
+    /// by id ("SN1") is charging at -300 W; if `underlying_grid` used only
+    /// that battery it would read 1000 + (-300) = 700 W. The other two
+    /// batteries add another 350 W of net flow, so the right answer, 1050 W,
+    /// is one a first-battery-only implementation cannot produce.
+    #[test]
+    fn underlying_grid_sums_meter_and_every_batterys_flow() {
+        let mut world = World::new();
+        world.observe_meter(
+            MeterReading::total_only(GridPower(1000.0)),
+            SolarPower::ZERO,
+        );
+        world.observe_device(
+            DeviceId::new("SN1"),
+            Measurement::Battery(battery_with_power(BatteryPower(-300))),
+        );
+        world.observe_device(
+            DeviceId::new("SN2"),
+            Measurement::Battery(battery_with_power(BatteryPower(200))),
+        );
+        world.observe_device(
+            DeviceId::new("SN3"),
+            Measurement::Battery(battery_with_power(BatteryPower(150))),
+        );
+
+        assert_eq!(world.underlying_grid(), GridPower(1050.0));
+    }
+
+    #[test]
+    fn battery_of_an_empty_world_is_none() {
+        let world = World::new();
+        assert!(world.battery().is_none());
+    }
+
+    /// Registered out of id order, so an implementation reading insertion
+    /// order (a `Vec`, or the first key an unsorted map happens to yield)
+    /// would return "battery-c" here instead of the lowest id.
+    #[test]
+    fn battery_returns_the_lowest_device_id() {
+        let mut world = World::new();
+        world.observe_device(
+            DeviceId::new("battery-c"),
+            Measurement::Battery(battery_with_power(BatteryPower(300))),
+        );
+        world.observe_device(
+            DeviceId::new("battery-a"),
+            Measurement::Battery(battery_with_power(BatteryPower(-100))),
+        );
+        world.observe_device(
+            DeviceId::new("battery-b"),
+            Measurement::Battery(battery_with_power(BatteryPower(200))),
+        );
+
+        assert_eq!(world.battery().unwrap().current_power, BatteryPower(-100));
     }
 }

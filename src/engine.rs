@@ -26,7 +26,7 @@ pub struct Engine {
 /// status transition to publish if the event itself caused one. Actuating a
 /// directive and observing whether it succeeded stays outside the engine —
 /// that's I/O, done by the caller.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Step {
     pub directives: Vec<Directive>,
     pub decision: Option<ControlDecision>,
@@ -45,7 +45,9 @@ impl Engine {
 
     /// The battery state the engine is currently deciding against, for
     /// callers that just want to log it (e.g. alongside a decision). `None`
-    /// once the world can hold something other than exactly one battery.
+    /// only when no device has reported yet — which cannot happen in
+    /// production, since `main.rs` seeds the world from a startup poll that
+    /// fails startup on error.
     pub fn battery(&self) -> Option<&BatteryState> {
         self.world.battery()
     }
@@ -298,17 +300,22 @@ mod tests {
         assert_eq!(step.status, None);
     }
 
-    /// Superseded in step 7 by: snapshot/restore equivalence
+    /// Two `Engine`s built identically and fed the same event sequence, one
+    /// run to completion before the other starts, must produce identical
+    /// steps at every position. `step` takes `&mut self` and a borrowed event
+    /// and nothing else — no `Clock::now` call, no `static mut`, no
+    /// thread-local — so running the two runs back to back rather than
+    /// interleaved gives real wall-clock time to elapse between them; an
+    /// engine secretly reading ambient time would see a different clock on
+    /// its second run and diverge from its first. Interleaving the two loops
+    /// microseconds apart would not exercise this: `step` never reads a
+    /// clock itself, so there is nothing that stepping two engines together
+    /// would catch that stepping them apart does not.
     ///
-    /// Two `Engine`s built identically and fed the same events must decide
-    /// identically at every step, in order. `step` takes `&self` state and a
-    /// borrowed event and nothing else, so this is really a test that no
-    /// hidden clock read or thread-local snuck into the decision path — a
-    /// leak there would make the two engines agree at first and drift once
-    /// their private timers ticked at different wall-clock moments, which a
-    /// single-engine test could never expose. Step 7's snapshot/restore test
-    /// strengthens this same property by proving it across a process
-    /// restart, not just across two in-memory instances.
+    /// Comparing whole `Step`s (via `Step`'s and `ControlDecision`'s derived
+    /// `PartialEq`) rather than picking out individual fields means a field
+    /// `ControlDecision` gains later is covered here automatically, with no
+    /// need to remember to add it to this test.
     ///
     /// The sequence exercises several branches on purpose: a meter reading
     /// that may decide, a device update that never does, a timeout that
@@ -316,48 +323,35 @@ mod tests {
     /// but stays quiet, and a resuming meter reading that reports again.
     #[test]
     fn the_fold_is_deterministic() {
-        let events = [
-            Event::Meter {
-                at: clock(),
-                grid: meter(500.0),
-                solar: SolarPower::new(0.0),
-            },
-            Event::DeviceUpdate {
-                at: clock(),
-                id: DeviceId::new(BATTERY_ID),
-                measurement: Measurement::Battery(battery()),
-            },
-            Event::MqttTimeout { at: clock() },
-            Event::MqttTimeout { at: clock() },
-            Event::Meter {
-                at: clock(),
-                grid: meter(500.0),
-                solar: SolarPower::new(0.0),
-            },
-        ];
+        fn events() -> [Event; 5] {
+            [
+                Event::Meter {
+                    at: clock(),
+                    grid: meter(500.0),
+                    solar: SolarPower::new(0.0),
+                },
+                Event::DeviceUpdate {
+                    at: clock(),
+                    id: DeviceId::new(BATTERY_ID),
+                    measurement: Measurement::Battery(battery()),
+                },
+                Event::MqttTimeout { at: clock() },
+                Event::MqttTimeout { at: clock() },
+                Event::Meter {
+                    at: clock(),
+                    grid: meter(500.0),
+                    solar: SolarPower::new(0.0),
+                },
+            ]
+        }
 
         let mut engine_a = engine();
+        let steps_a: Vec<Step> = events().iter().map(|event| engine_a.step(event)).collect();
+
         let mut engine_b = engine();
+        let steps_b: Vec<Step> = events().iter().map(|event| engine_b.step(event)).collect();
 
-        for event in &events {
-            let step_a = engine_a.step(event);
-            let step_b = engine_b.step(event);
-
-            assert_eq!(step_a.directives, step_b.directives);
-            assert_eq!(
-                step_a.decision.as_ref().map(|d| d.mode),
-                step_b.decision.as_ref().map(|d| d.mode),
-            );
-            assert_eq!(
-                step_a.decision.as_ref().map(|d| d.power_watts),
-                step_b.decision.as_ref().map(|d| d.power_watts),
-            );
-            assert_eq!(
-                step_a.decision.as_ref().map(|d| &d.reason),
-                step_b.decision.as_ref().map(|d| &d.reason),
-            );
-            assert_eq!(step_a.status, step_b.status);
-        }
+        assert_eq!(steps_a, steps_b);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use crate::world::{DeviceId, Measurement, MeterReading};
 /// Everything the engine can react to, each stamped with the `Clock` in
 /// effect when it was observed. Carrying the full clock (not just Gleam's
 /// hour+day) is what keeps weekday-dependent behavior replayable once these
-/// are journaled (step 5).
+/// are journaled (step 7).
 #[derive(Debug, Clone)]
 pub enum Event {
     Meter {
@@ -27,8 +27,8 @@ pub enum Event {
 }
 
 impl Event {
-    /// Unused until the replay/journal work (steps 4-5); kept alongside the
-    /// enum now so the fixture format doesn't need revisiting later.
+    /// Unused until the structured journal (step 7); kept alongside the enum
+    /// now so the fixture format doesn't need revisiting later.
     #[allow(dead_code)]
     pub fn at(&self) -> Timestamp {
         match self {
@@ -38,6 +38,8 @@ impl Event {
         }
     }
 
+    /// Unused until the structured journal (step 7). Today's strings are
+    /// `"meter"`, `"device_update"` and `"mqtt_timeout"`.
     #[allow(dead_code)]
     pub fn kind(&self) -> &'static str {
         match self {
