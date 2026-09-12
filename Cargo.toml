@@ -18,6 +18,10 @@ chrono-tz = "0.10"
 # static musl build to a box with no libsqlite3.so, so linking the system library
 # is not an option.
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+# Parsing only — we never emit TOML, and warnings name a value's type through
+# `Value::type_str` rather than rendering it. Pure Rust with no build script, so
+# it adds nothing the static musl cross-build can trip over.
+toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
 
 [dev-dependencies]
 tempfile = "3"
