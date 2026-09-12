@@ -328,11 +328,7 @@ pub async fn run(
     journal.event(&startup);
     engine.step(&startup);
 
-    let rte_state_path = std::path::PathBuf::from(
-        std::env::var("RTE_STATE_PATH")
-            .unwrap_or_else(|_| "/var/lib/zendure/rte_state.json".to_string()),
-    );
-    let mut rte_tracker = rte::RteTracker::new(rte_state_path);
+    let mut rte_tracker = rte::RteTracker::new(config.rte_state_path.clone());
 
     let poll_interval = config.zendure_poll_interval;
     let mut poll_timer = tokio::time::interval(poll_interval);

@@ -23,6 +23,13 @@ use crate::units::{GridPower, PowerMargin, RetentionDays, Soc, SolarPower};
 /// exception in it.
 pub const DEFAULT_JOURNAL_PATH: &str = "/var/lib/zendure/journal.db";
 
+/// Where the rolling round-trip-efficiency window is persisted.
+///
+/// Under `/var/lib` rather than `/tmp` because the window is 24 hours long and
+/// `/tmp` is cleared on boot, which silently rebuilt it from scratch on every
+/// restart.
+pub const DEFAULT_RTE_STATE_PATH: &str = "/var/lib/zendure/rte_state.json";
+
 fn parse_weekday(s: &str) -> Result<Weekday, String> {
     match s.trim().to_ascii_lowercase().as_str() {
         "mon" | "monday" => Ok(Weekday::Mon),
@@ -139,6 +146,8 @@ pub struct Config {
     pub journal_path: PathBuf,
     /// How long journal rows are kept. The only thing bounding the file.
     pub journal_retention_days: RetentionDays,
+    /// Where the rolling RTE window is persisted.
+    pub rte_state_path: PathBuf,
 }
 
 /// The decision-relevant half of [`Config`], recorded once per session so a
@@ -227,6 +236,7 @@ impl Config {
             zendure_poll_interval: _,
             journal_path: _,
             journal_retention_days: _,
+            rte_state_path: _,
             // Resolved into every event before it is journaled.
             timezone: _,
             solar_phase: _,
@@ -364,6 +374,9 @@ impl Config {
                 env::var("JOURNAL_PATH").unwrap_or_else(|_| DEFAULT_JOURNAL_PATH.to_string()),
             ),
             journal_retention_days: retention_from_env(),
+            rte_state_path: PathBuf::from(
+                env::var("RTE_STATE_PATH").unwrap_or_else(|_| DEFAULT_RTE_STATE_PATH.to_string()),
+            ),
         })
     }
 }
@@ -397,6 +410,7 @@ mod tests {
             cycle_warn_threshold: 200,
             min_soc: Soc::new(10),
             max_soc: Soc::new(100),
+            rte_state_path: PathBuf::from("/SECRET/rte_state.json"),
             balance_weekday: Some(Weekday::Mon),
             solar_phase: SolarPhase::A,
             solar_discharge_block_threshold: SolarPower::new(0.0),
@@ -426,6 +440,7 @@ mod tests {
             "SECRET-TOPIC",
             "SECRET-PREFIX",
             "/SECRET/journal.db",
+            "/SECRET/rte_state.json",
         ] {
             assert!(!json.contains(secret), "{secret} leaked into {json}");
         }
