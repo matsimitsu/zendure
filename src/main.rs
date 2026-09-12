@@ -142,16 +142,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Don't fire immediately — we just polled above
     poll_timer.tick().await;
 
-    let mut last_mqtt_update = tokio::time::Instant::now();
+    // A deadline, not a record of when MQTT was last heard from: both the
+    // reading arm and the timeout arm re-arm it. Deriving it from a "last
+    // update" timestamp that only the reading arm advanced left the deadline
+    // permanently in the past once a timeout fired, so `sleep_until` was always
+    // ready and the loop spun for the whole outage.
+    let mut mqtt_deadline = tokio::time::Instant::now() + mqtt_timeout;
 
     tracing::info!("Coordinator running, waiting for MQTT data...");
 
     loop {
-        let timeout_at = last_mqtt_update + mqtt_timeout;
         tokio::select! {
             event = rx.recv() => {
                 let Some(MqttEvent::GridPowerReading(reading)) = event else { break };
-                last_mqtt_update = tokio::time::Instant::now();
+                mqtt_deadline = tokio::time::Instant::now() + mqtt_timeout;
 
                 let net_grid_power = GridPower(reading.total_act_power);
                 // Solar production = export (negative power) on the phase the
@@ -233,7 +237,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .await;
                 }
             }
-            _ = tokio::time::sleep_until(timeout_at) => {
+            _ = tokio::time::sleep_until(mqtt_deadline) => {
+                mqtt_deadline = tokio::time::Instant::now() + mqtt_timeout;
+
                 let clock = Clock::now(config.timezone);
                 let step = engine.step(&Event::MqttTimeout { at: clock });
 
