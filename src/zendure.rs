@@ -2,10 +2,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::command::Command;
-use crate::models::{
-    DEVICE_MAX_CHARGE_POWER, DEVICE_MAX_DISCHARGE_POWER, StorageMode, ZendureReport,
-    ZendureWriteRequest,
-};
+use crate::device::AC2400_PLUS;
+use crate::models::{StorageMode, ZendureReport, ZendureWriteRequest};
 
 #[allow(dead_code)]
 pub struct ZendureClient {
@@ -81,8 +79,8 @@ impl ZendureClient {
     pub async fn write_power_caps(&self) -> Result<(), reqwest::Error> {
         self.ensure_ram_mode().await?;
         self.write_properties(serde_json::json!({
-            "chargeMaxLimit": DEVICE_MAX_CHARGE_POWER,
-            "inverseMaxPower": DEVICE_MAX_DISCHARGE_POWER,
+            "chargeMaxLimit": AC2400_PLUS.max_charge_power,
+            "inverseMaxPower": AC2400_PLUS.max_discharge_power,
         }))
         .await
     }

@@ -1,17 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::units::{GridPower, PowerCap, Setpoint};
-
-/// Rated charge power cap for the solarFlow2400AC+. The device stores this
-/// as a read/write setpoint (`chargeMaxLimit`) that can be reset to 0 by a
-/// firmware/factory reset, which stalls all charging — so the controller both
-/// writes it back and falls back to it when the device reports 0.
-pub const DEVICE_MAX_CHARGE_POWER: PowerCap = PowerCap::new(2400);
-/// Rated inverter output cap — Germany's 800W feed-in limit. Stored on the
-/// device as the read/write `inverseMaxPower` setpoint; treated like
-/// [`DEVICE_MAX_CHARGE_POWER`].
-pub const DEVICE_MAX_DISCHARGE_POWER: PowerCap = PowerCap::new(800);
+use crate::units::{GridPower, Setpoint};
 
 // --- MQTT input: Shelly Pro 3EM reading ---
 

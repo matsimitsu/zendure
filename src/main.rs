@@ -3,6 +3,7 @@ mod clock;
 mod command;
 mod config;
 mod controller;
+mod device;
 mod engine;
 mod event;
 mod models;
@@ -70,7 +71,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             initial_report.clone()
         }
     };
-    let battery_state = battery::BatteryState::from_properties(&battery_report.properties);
+    let battery_state =
+        battery::BatteryState::from_properties(&battery_report.properties, &device::AC2400_PLUS);
 
     let mut pack_capacities = rte::pack_capacities(&initial_report.pack_data);
     let mut min_soc_percent: Soc = initial_report
@@ -292,7 +294,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 match fetched {
                     Ok(report) => {
-                        let state = battery::BatteryState::from_properties(&report.properties);
+                        let state = battery::BatteryState::from_properties(&report.properties, &device::AC2400_PLUS);
                         tracing::debug!(
                             "Battery poll: SOC={}%, current_power={}W",
                             state.soc,

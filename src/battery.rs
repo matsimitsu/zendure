@@ -1,4 +1,5 @@
-use crate::models::{DEVICE_MAX_CHARGE_POWER, DEVICE_MAX_DISCHARGE_POWER, ZendureProperties};
+use crate::device::BatterySpec;
+use crate::models::ZendureProperties;
 use crate::units::{BatteryPower, PowerCap, Soc, Watts};
 
 /// Current battery state, used by the controller to make decisions.
@@ -25,7 +26,7 @@ pub struct BatteryState {
 }
 
 impl BatteryState {
-    pub fn from_properties(props: &ZendureProperties) -> Self {
+    pub fn from_properties(props: &ZendureProperties, spec: &BatterySpec) -> Self {
         let discharge = Watts::from_device(props.pack_input_power.unwrap_or(0));
         let charge = Watts::from_device(props.output_pack_power.unwrap_or(0));
         Self {
@@ -34,15 +35,27 @@ impl BatteryState {
             // device zeroed its own power-cap setpoint — we deliberately let that
             // stop charging/discharging rather than overwriting it mid-run (the
             // caps are only written once, at startup). An *absent* field falls
-            // back to the rated cap.
+            // back to the model's rated cap.
+            //
+            // Output is not clamped to the rating: `inverseMaxPower` is the
+            // feed-in limit the device itself enforces, so it is authoritative
+            // even when it disagrees with the spec.
             max_discharge_power: props
                 .inverse_max_power
                 .map(PowerCap::new)
-                .unwrap_or(DEVICE_MAX_DISCHARGE_POWER),
-            max_charge_power: props
-                .charge_max_limit
-                .map(PowerCap::new)
-                .unwrap_or(DEVICE_MAX_CHARGE_POWER),
+                .unwrap_or(spec.max_discharge_power),
+            // Input *is* clamped to the rating. That clamp used to live in
+            // `controller.rs` as `MAX_CHARGE_POWER.min(battery.max_charge_power)`,
+            // which meant the objective had to know the hardware's ceiling in
+            // order to read a reported number safely. It is device knowledge,
+            // so it belongs here at the device boundary; the objective now just
+            // reads a capability number and trusts it.
+            max_charge_power: spec.max_charge_power.min(
+                props
+                    .charge_max_limit
+                    .map(PowerCap::new)
+                    .unwrap_or(spec.max_charge_power),
+            ),
             current_power: BatteryPower::from_flows(discharge, charge),
             soc_calibrating: props.soc_status == Some(1),
             soc_limit_reached: props.soc_limit == Some(1),
@@ -54,6 +67,7 @@ impl BatteryState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::AC2400_PLUS;
     use crate::models::ZendureProperties;
     use crate::units::PowerCap;
 
@@ -67,14 +81,14 @@ mod tests {
             inverse_max_power: Some(0),
             ..Default::default()
         };
-        let state = BatteryState::from_properties(&props);
+        let state = BatteryState::from_properties(&props, &AC2400_PLUS);
         assert_eq!(state.max_charge_power, PowerCap::ZERO);
         assert_eq!(state.max_discharge_power, PowerCap::ZERO);
     }
 
     #[test]
     fn error_flag_sets_fault_but_fault_level_is_ignored() {
-        assert!(!BatteryState::from_properties(&ZendureProperties::default()).fault);
+        assert!(!BatteryState::from_properties(&ZendureProperties::default(), &AC2400_PLUS).fault);
 
         // faultLevel also goes non-zero for benign conditions (WiFi hiccups,
         // firmware update checks), so it must NOT set fault.
@@ -82,21 +96,21 @@ mod tests {
             fault_level: Some(2),
             ..Default::default()
         };
-        assert!(!BatteryState::from_properties(&benign).fault);
+        assert!(!BatteryState::from_properties(&benign, &AC2400_PLUS).fault);
 
         let errored = ZendureProperties {
             is_error: Some(1),
             ..Default::default()
         };
-        assert!(BatteryState::from_properties(&errored).fault);
+        assert!(BatteryState::from_properties(&errored, &AC2400_PLUS).fault);
     }
 
     #[test]
     fn absent_limits_fall_back_to_default() {
         let props = ZendureProperties::default();
-        let state = BatteryState::from_properties(&props);
-        assert_eq!(state.max_charge_power, DEVICE_MAX_CHARGE_POWER);
-        assert_eq!(state.max_discharge_power, DEVICE_MAX_DISCHARGE_POWER);
+        let state = BatteryState::from_properties(&props, &AC2400_PLUS);
+        assert_eq!(state.max_charge_power, AC2400_PLUS.max_charge_power);
+        assert_eq!(state.max_discharge_power, AC2400_PLUS.max_discharge_power);
     }
 
     #[test]
@@ -106,8 +120,22 @@ mod tests {
             inverse_max_power: Some(600),
             ..Default::default()
         };
-        let state = BatteryState::from_properties(&props);
+        let state = BatteryState::from_properties(&props, &AC2400_PLUS);
         assert_eq!(state.max_charge_power, PowerCap::new(1200));
         assert_eq!(state.max_discharge_power, PowerCap::new(600));
+    }
+
+    #[test]
+    fn reported_cap_above_the_rating_is_clamped() {
+        // A device reporting more than the model is rated for — a bad write, a
+        // firmware quirk — must not become a charge target the hardware can't
+        // meet. The rating wins, so the controller only ever sees a number the
+        // box can actually deliver.
+        let props = ZendureProperties {
+            charge_max_limit: Some(5000),
+            ..Default::default()
+        };
+        let state = BatteryState::from_properties(&props, &AC2400_PLUS);
+        assert_eq!(state.max_charge_power, PowerCap::new(2400));
     }
 }

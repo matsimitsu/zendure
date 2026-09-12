@@ -6,11 +6,8 @@ use crate::battery::BatteryState;
 use crate::clock::Clock;
 use crate::config::Config;
 use crate::models::{ControlDecision, ControlMode, CycleCounts};
-use crate::units::{
-    Elapsed, GridPower, PowerCap, PowerMargin, Setpoint, Soc, SolarPower, Timestamp,
-};
+use crate::units::{Elapsed, GridPower, PowerMargin, Setpoint, Soc, SolarPower, Timestamp};
 
-const MAX_CHARGE_POWER: PowerCap = PowerCap::new(2400);
 const RAMP_FACTOR: f64 = 0.75;
 
 /// Reactive self-consumption control. Deliberately free of clock reads: every
@@ -286,8 +283,7 @@ impl Controller {
             ControlMode::Charge => {
                 let adjustment = grid_power.exporting() - self.charge_margin.watts();
                 let current_charge = battery.current_power.charging();
-                let cap = MAX_CHARGE_POWER.min(battery.max_charge_power);
-                Setpoint::clamped(current_charge + adjustment, cap)
+                Setpoint::clamped(current_charge + adjustment, battery.max_charge_power)
             }
             ControlMode::Discharge => {
                 let adjustment = grid_power.importing() - self.discharge_margin.watts();
@@ -445,7 +441,7 @@ fn is_opposing_switch(prev: ControlMode, next: ControlMode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::units::BatteryPower;
+    use crate::units::{BatteryPower, PowerCap};
 
     fn battery(soc: u32) -> BatteryState {
         BatteryState {
