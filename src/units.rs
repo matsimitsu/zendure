@@ -513,6 +513,56 @@ impl PartialOrd<Duration> for Elapsed {
     }
 }
 
+/// A journal retention window, in whole days.
+///
+/// A newtype because the alternative bit: retention was a bare `i64` threaded
+/// through four signatures, and `prune` computes `now - days`. A negative value
+/// therefore puts the cutoff in the *future*, and "delete everything older than
+/// the cutoff" deletes the entire journal — at every startup and every midnight,
+/// reporting it as a successful prune. A value near `i64::MAX` panicked
+/// `chrono::Duration::days` on the writer thread, where the panic was swallowed.
+///
+/// Both are impossible to express now: the constructor is the only way in, it
+/// clamps once, and `cutoff` owns the arithmetic so no call site repeats it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RetentionDays(i64);
+
+impl RetentionDays {
+    /// Longest window we will honour. Far past any useful retention, and far
+    /// below the point where day-to-millisecond arithmetic can overflow.
+    pub const MAX_DAYS: i64 = 3_650;
+
+    /// Rejects the values that destroy data rather than clamping them: zero and
+    /// negative are almost certainly a typo, and silently reading them as "keep
+    /// one day" would be its own surprise. An absurd upper value *is* clamped,
+    /// since the intent there is unambiguous.
+    pub fn new(days: i64) -> Result<Self, String> {
+        if days <= 0 {
+            return Err(format!("must be a positive number of days, got {days}"));
+        }
+        Ok(RetentionDays(days.min(Self::MAX_DAYS)))
+    }
+
+    pub fn days(self) -> i64 {
+        self.0
+    }
+
+    /// The oldest timestamp worth keeping. Rows strictly before this go.
+    ///
+    /// Takes `now` rather than reading the clock, so the boundary is testable
+    /// without waiting a day — the same reason the controller takes a `Clock`.
+    pub fn cutoff(self, now: chrono::DateTime<chrono::Utc>) -> Timestamp {
+        Timestamp((now - chrono::Duration::days(self.0)).timestamp_millis())
+    }
+}
+
+impl fmt::Display for RetentionDays {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        i64::fmt(&self.0, f)
+    }
+}
+
 #[cfg(test)]
 #[path = "units_tests.rs"]
 mod tests;

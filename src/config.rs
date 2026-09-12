@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 // belongs to the adapter that reads them. Parsing `SOLAR_PHASE` is still this
 // file's job — reading the environment is what `Config` is for.
 use crate::source::shelly::SolarPhase;
-use crate::units::{GridPower, PowerMargin, Soc, SolarPower};
+use crate::units::{GridPower, PowerMargin, RetentionDays, Soc, SolarPower};
 
 fn parse_weekday(s: &str) -> Result<Weekday, String> {
     match s.trim().to_ascii_lowercase().as_str() {
@@ -46,6 +46,36 @@ fn minutes_from_env(key: &str, default: &str) -> Result<Duration, String> {
         .parse::<u64>()
         .map_err(|_| format!("{key} must be a number"))?;
     Ok(Duration::from_secs(minutes * 60))
+}
+
+/// Reads `JOURNAL_RETENTION_DAYS`, **warning and falling back rather than
+/// failing**.
+///
+/// Every other knob in this file is strict, and this one deliberately is not.
+/// The journal is a logging concern, and `journal.rs` holds the line that a
+/// logging failure must never become a control failure — an unusable
+/// `JOURNAL_PATH` already degrades to "no journal" for exactly this reason.
+/// Parsing this strictly put a typo in a *logging* variable on the path that
+/// exits `main`, so systemd would restart-loop while the battery held whatever
+/// command it last received. Loud and running beats silent and stopped.
+fn retention_from_env() -> RetentionDays {
+    const DEFAULT: i64 = 90;
+    let fallback = RetentionDays::new(DEFAULT).expect("90 is a valid retention");
+
+    let Ok(raw) = env::var("JOURNAL_RETENTION_DAYS") else {
+        return fallback;
+    };
+    match raw
+        .parse::<i64>()
+        .map_err(|e| e.to_string())
+        .and_then(RetentionDays::new)
+    {
+        Ok(days) => days,
+        Err(e) => {
+            tracing::warn!("JOURNAL_RETENTION_DAYS={raw} ignored ({e}); keeping {DEFAULT} days");
+            fallback
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -98,7 +128,7 @@ pub struct Config {
     /// SQLite journal of events and decisions.
     pub journal_path: PathBuf,
     /// How long journal rows are kept. The only thing bounding the file.
-    pub journal_retention_days: i64,
+    pub journal_retention_days: RetentionDays,
 }
 
 /// The decision-relevant half of [`Config`], recorded once per session so a
@@ -246,13 +276,7 @@ impl Config {
                 env::var("JOURNAL_PATH")
                     .unwrap_or_else(|_| "/var/lib/zendure/journal.db".to_string()),
             ),
-            // Strict, unlike the inline parse this replaces: that one silently
-            // fell back to its default on a typo, so a fat-fingered retention
-            // looked like it had been applied.
-            journal_retention_days: env::var("JOURNAL_RETENTION_DAYS")
-                .unwrap_or_else(|_| "90".to_string())
-                .parse::<i64>()
-                .map_err(|_| "JOURNAL_RETENTION_DAYS must be a number")?,
+            journal_retention_days: retention_from_env(),
         })
     }
 }

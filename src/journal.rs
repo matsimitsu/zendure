@@ -12,6 +12,7 @@ use crate::device::Outcome;
 use crate::engine::EngineState;
 use crate::event::Event;
 use crate::models::ControlDecision;
+use crate::units::RetentionDays;
 
 /// How many records may be in flight before the control loop starts dropping
 /// them. At roughly one meter reading a second plus a poll and a decision, this
@@ -105,7 +106,7 @@ impl Journal {
     /// in a fixture.
     pub fn open<T: Serialize>(
         path: &Path,
-        retention_days: i64,
+        retention: RetentionDays,
         version: &str,
         session_config: &T,
     ) -> Option<Self> {
@@ -140,7 +141,7 @@ impl Journal {
 
         let handle = tokio::task::spawn_blocking({
             let dropped = Arc::clone(&dropped);
-            move || writer(conn, rx, retention_days, &dropped)
+            move || writer(conn, rx, retention, &dropped)
         });
         #[cfg(not(test))]
         drop(handle);
@@ -336,11 +337,11 @@ fn prepare(conn: &Connection, version: &str, config_json: &str) -> rusqlite::Res
 fn writer(
     conn: Connection,
     mut rx: mpsc::Receiver<Record>,
-    retention_days: i64,
+    retention: RetentionDays,
     dropped: &AtomicU64,
 ) {
     let mut last_prune = Utc::now().date_naive();
-    prune(&conn, retention_days);
+    prune(&conn, retention);
 
     while let Some(record) = rx.blocking_recv() {
         if let Err(e) = write(&conn, &record) {
@@ -353,7 +354,7 @@ fn writer(
         let today = Utc::now().date_naive();
         if today != last_prune {
             last_prune = today;
-            prune(&conn, retention_days);
+            prune(&conn, retention);
         }
     }
 
@@ -397,8 +398,8 @@ fn write(conn: &Connection, record: &Record) -> rusqlite::Result<()> {
 
 /// The ring buffer. Retention is the only thing keeping this file bounded, since
 /// nothing else ever deletes a row.
-fn prune(conn: &Connection, retention_days: i64) {
-    let cutoff = (Utc::now() - chrono::Duration::days(retention_days)).timestamp_millis();
+fn prune(conn: &Connection, retention: RetentionDays) {
+    let cutoff = retention.cutoff(Utc::now()).as_millis();
     let mut removed = 0usize;
     for table in ["events", "decisions"] {
         match conn.execute(&format!("DELETE FROM {table} WHERE ts_ms < ?1"), [cutoff]) {
@@ -410,7 +411,7 @@ fn prune(conn: &Connection, retention_days: i64) {
         }
     }
     if removed > 0 {
-        tracing::info!("Journal: pruned {removed} rows beyond {retention_days} days");
+        tracing::info!("Journal: pruned {removed} rows beyond {retention} days");
         // Hands the freed pages back rather than leaving the file at its
         // high-water mark. Only does anything if the database was created with
         // `auto_vacuum=INCREMENTAL`.
@@ -505,7 +506,7 @@ mod tests {
     /// reading back. The journal is dropped by the caller to end the writer.
     fn open(dir: &tempfile::TempDir) -> (Journal, std::path::PathBuf) {
         let path = dir.path().join("journal.db");
-        let journal = Journal::open(&path, 90, "0.0.0-test", &serde_json::json!({"k": 1}))
+        let journal = Journal::open(&path, days(90), "0.0.0-test", &serde_json::json!({"k": 1}))
             .expect("journal opens in a temp dir");
         (journal, path)
     }
@@ -518,6 +519,10 @@ mod tests {
         drop(journal);
         handle.await.expect("writer panicked");
         Connection::open(path).unwrap()
+    }
+
+    fn days(n: i64) -> RetentionDays {
+        RetentionDays::new(n).unwrap()
     }
 
     fn count(conn: &Connection, sql: &str) -> i64 {
@@ -758,7 +763,7 @@ mod tests {
         let conn = drain(journal, &path).await;
 
         backdate(&conn, 100);
-        prune(&conn, 90);
+        prune(&conn, days(90));
         assert_eq!(count(&conn, "SELECT count(*) FROM events"), 0);
     }
 
@@ -772,7 +777,7 @@ mod tests {
         let conn = drain(journal, &path).await;
 
         backdate(&conn, 10);
-        prune(&conn, 90);
+        prune(&conn, days(90));
         assert_eq!(count(&conn, "SELECT count(*) FROM events"), 1);
     }
 
@@ -786,6 +791,6 @@ mod tests {
 
         // A directory component that is actually a file.
         let path = file.join("journal.db");
-        assert!(Journal::open(&path, 90, "0.0.0-test", &serde_json::json!({})).is_none());
+        assert!(Journal::open(&path, days(90), "0.0.0-test", &serde_json::json!({})).is_none());
     }
 }

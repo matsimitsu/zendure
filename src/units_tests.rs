@@ -297,3 +297,47 @@ fn battery_power_sums_over_a_fleet() {
         .sum();
     assert_eq!(extreme, BatteryPower(i32::MAX));
 }
+
+/// Zero and negative are rejected, not clamped.
+///
+/// This is the bug the type exists for. `prune` deletes rows older than
+/// `now - days`; with a negative count that cutoff is in the *future*, so the
+/// "prune" deletes the entire journal and logs it as a success. Observed before
+/// the fix: a second start with `-5` reported `pruned 13 rows beyond -5 days`.
+#[test]
+fn retention_rejects_windows_that_would_delete_the_present() {
+    for bad in [0, -1, -5, i64::MIN] {
+        assert!(
+            RetentionDays::new(bad).is_err(),
+            "{bad} days must not be accepted"
+        );
+    }
+    assert_eq!(RetentionDays::new(1).unwrap().days(), 1);
+    assert_eq!(RetentionDays::new(90).unwrap().days(), 90);
+}
+
+/// An absurd value is clamped rather than rejected — the intent is
+/// unambiguous — and clamping is what keeps `cutoff` away from the range where
+/// `chrono::Duration::days` panics. That panic happened on the writer thread,
+/// whose `JoinHandle` was dropped, so it was swallowed entirely.
+#[test]
+fn retention_clamps_absurd_windows_instead_of_panicking() {
+    assert_eq!(
+        RetentionDays::new(i64::MAX).unwrap().days(),
+        RetentionDays::MAX_DAYS
+    );
+    // The point of the clamp: this must not panic.
+    let now = chrono::Utc::now();
+    let cutoff = RetentionDays::new(i64::MAX).unwrap().cutoff(now);
+    assert!(cutoff < Timestamp::from_millis(now.timestamp_millis()));
+}
+
+/// The cutoff is in the past by exactly the window, which is what makes
+/// "older than N days" mean N days.
+#[test]
+fn retention_cutoff_is_the_window_behind_now() {
+    let now = chrono::Utc::now();
+    let cutoff = RetentionDays::new(30).unwrap().cutoff(now);
+    let expected = now - chrono::Duration::days(30);
+    assert_eq!(cutoff, Timestamp::from_millis(expected.timestamp_millis()));
+}

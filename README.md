@@ -84,7 +84,7 @@ All configuration is via environment variables:
 | `RTE_STATE_PATH` | No | `/var/lib/zendure/rte_state.json` | File path for persisting round-trip efficiency state across restarts. Must survive reboots — `/tmp` is cleared, which loses the rolling 24h window |
 | `RUST_LOG` | No | — | Log level filter (e.g. `zendure=debug` for verbose output) |
 | `JOURNAL_PATH` | No | `/var/lib/zendure/journal.db` | SQLite journal of events and decisions (see below). If it can't be opened, the journal is disabled and the controller starts normally |
-| `JOURNAL_RETENTION_DAYS` | No | `90` | Days of journal history to keep; older rows are deleted at startup and once a day |
+| `JOURNAL_RETENTION_DAYS` | No | `90` | Days of journal history to keep (1–3650); older rows are deleted at startup and once a day. An unparseable or out-of-range value warns and keeps the default rather than failing startup — a logging setting must never stop the controller |
 
 ## Journal
 
