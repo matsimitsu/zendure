@@ -259,3 +259,41 @@ fn watts_from_device_saturates_on_an_absurd_payload() {
     assert_eq!(Watts::from_device(2400), Watts(2400));
     assert_eq!(Watts::from_device(u32::MAX), Watts(i32::MAX));
 }
+
+#[test]
+fn battery_power_addition_saturates_at_the_extremes() {
+    // A corrupt reading must not panic a debug build in the decision path,
+    // which is the whole reason this is `saturating_add` and not `+`.
+    assert_eq!(
+        BatteryPower(i32::MAX) + BatteryPower(1),
+        BatteryPower(i32::MAX),
+    );
+    assert_eq!(
+        BatteryPower(i32::MIN) + BatteryPower(-1),
+        BatteryPower(i32::MIN),
+    );
+}
+
+#[test]
+fn battery_power_sums_over_a_fleet() {
+    // The world's meter correction is this sum, so an empty fleet has to read
+    // as no correction rather than as a missing value.
+    let none: BatteryPower = [].into_iter().sum();
+    assert_eq!(none, BatteryPower::ZERO);
+
+    let one: BatteryPower = [BatteryPower(-800)].into_iter().sum();
+    assert_eq!(one, BatteryPower(-800));
+
+    // Signs are meaningful and mixed in a real fleet: charging is negative,
+    // discharging positive, so the total is a net flow and not a magnitude.
+    let mixed: BatteryPower = [BatteryPower(-800), BatteryPower(600), BatteryPower(-100)]
+        .into_iter()
+        .sum();
+    assert_eq!(mixed, BatteryPower(-300));
+
+    // Folding through `Add` keeps the saturation the single-step case has.
+    let extreme: BatteryPower = [BatteryPower(i32::MAX), BatteryPower(i32::MAX)]
+        .into_iter()
+        .sum();
+    assert_eq!(extreme, BatteryPower(i32::MAX));
+}

@@ -28,7 +28,7 @@ pub struct Engine {
 /// that's I/O, done by the caller.
 #[derive(Debug, Default)]
 pub struct Step {
-    pub commands: Vec<Directive>,
+    pub directives: Vec<Directive>,
     pub decision: Option<ControlDecision>,
     pub status: Option<&'static str>,
 }
@@ -91,13 +91,13 @@ impl Engine {
         // touches is the world's business, and `main.rs` actuating whatever
         // list it is handed is what keeps the dropped-command bug from coming
         // back.
-        let commands = decision
+        let directives = decision
             .as_ref()
             .map(|d| allocate(d, &self.world))
             .unwrap_or_default();
 
         Step {
-            commands,
+            directives,
             decision,
             status,
         }
@@ -130,10 +130,10 @@ impl Engine {
         // *every* battery. A hand-built `vec![command]` here would stand one
         // box down and leave the others running during the exact outage the
         // failsafe exists for.
-        let commands = allocate(&decision, &self.world);
+        let directives = allocate(&decision, &self.world);
 
         Step {
-            commands,
+            directives,
             decision: Some(decision),
             status: first_tick.then_some("mqtt_timeout"),
         }
@@ -205,7 +205,7 @@ mod tests {
         let mut engine = engine();
         let step = engine.step(&Event::MqttTimeout { at: clock() });
 
-        assert_eq!(step.commands, vec![idle_for(BATTERY_ID)]);
+        assert_eq!(step.directives, vec![idle_for(BATTERY_ID)]);
         assert_eq!(step.decision.unwrap().mode, ControlMode::Idle);
         assert_eq!(step.status, Some("mqtt_timeout"));
     }
@@ -228,7 +228,7 @@ mod tests {
         let step = engine.step(&Event::MqttTimeout { at: clock() });
 
         assert_eq!(
-            step.commands,
+            step.directives,
             vec![idle_for("battery-a"), idle_for("battery-b")],
         );
     }
@@ -241,7 +241,7 @@ mod tests {
 
         // The command keeps being issued: the engine never learns whether the
         // first write landed, so a failed one must not disable the failsafe.
-        assert_eq!(step.commands, vec![idle_for(BATTERY_ID)]);
+        assert_eq!(step.directives, vec![idle_for(BATTERY_ID)]);
         assert_eq!(step.decision.unwrap().mode, ControlMode::Idle);
         // ...but the transition is reported only once per outage.
         assert_eq!(step.status, None);
@@ -252,7 +252,7 @@ mod tests {
         let mut engine = engine();
         for _ in 0..5 {
             let step = engine.step(&Event::MqttTimeout { at: clock() });
-            assert_eq!(step.commands, vec![idle_for(BATTERY_ID)]);
+            assert_eq!(step.directives, vec![idle_for(BATTERY_ID)]);
         }
     }
 
@@ -343,7 +343,7 @@ mod tests {
             let step_a = engine_a.step(event);
             let step_b = engine_b.step(event);
 
-            assert_eq!(step_a.commands, step_b.commands);
+            assert_eq!(step_a.directives, step_b.directives);
             assert_eq!(
                 step_a.decision.as_ref().map(|d| d.mode),
                 step_b.decision.as_ref().map(|d| d.mode),
@@ -372,7 +372,7 @@ mod tests {
             measurement: Measurement::Battery(updated),
         });
 
-        assert!(step.commands.is_empty());
+        assert!(step.directives.is_empty());
         assert!(step.decision.is_none());
         assert!(step.status.is_none());
         assert_eq!(engine.battery().unwrap().soc, Soc::new(80));

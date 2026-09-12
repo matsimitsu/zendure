@@ -16,7 +16,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::battery::BatteryState;
-use crate::units::{BatteryPower, GridPower, SolarPower};
+use crate::units::{BatteryPower, GridPower, SolarPower, forward_display};
 
 /// One meter observation: the signed net total plus each phase. `total` is the
 /// meter's own `total_act_power`, never re-summed from the phases — every
@@ -89,11 +89,7 @@ impl DeviceId {
     }
 }
 
-impl fmt::Display for DeviceId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        <str as fmt::Display>::fmt(&self.0, f)
-    }
-}
+forward_display!(DeviceId, str);
 
 /// What a device reports about itself. One variant per device class: a
 /// charger's measurement (CP state, plugged, session energy) has nothing in

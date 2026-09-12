@@ -16,16 +16,58 @@ mod units;
 mod world;
 mod zendure;
 
+use allocate::Directive;
 use clock::Clock;
 use config::Config;
+use device::{Actuation, Applied, Outcome};
 use engine::Engine;
 use event::Event;
 use models::StorageMode;
 use mqtt::MqttEvent;
 use rawlog::RawLog;
+use rumqttc::AsyncClient;
 use tokio::sync::mpsc;
 use units::{Soc, WattHours, Watts};
 use world::{Measurement, World};
+use zendure::ZendureClient;
+
+/// Actuate a step's directives and report the fleet's health once.
+///
+/// Both arms of the loop — a decision and the failsafe idle — do exactly this,
+/// differing only in which path is actuating and what the two status strings
+/// are. Inlined twice it was the same twelve lines written out, and the third
+/// caller (step 9's charger) would have made it three; extracted, the ordering
+/// that matters is stated in one place.
+///
+/// The outcomes come back rather than being journalled here, because each arm
+/// writes its own raw-log line under its own kind (`decision` / `failsafe`)
+/// with its own payload — and that write has to happen *after* this returns,
+/// so the recorded outcome reflects whether the device write actually landed.
+async fn apply_and_publish(
+    client: &ZendureClient,
+    publisher: &AsyncClient,
+    prefix: &str,
+    directives: &[Directive],
+    actuation: Actuation,
+    ok_status: &str,
+    err_status: &str,
+) -> Vec<Outcome> {
+    // The whole list, not its first element: a step that means "stop one box,
+    // start another" has to reach both devices.
+    let outcomes = device::actuate(client, directives, actuation).await;
+    let failed = outcomes.iter().any(|o| o.applied == Applied::Error);
+
+    // Once after the loop rather than once per command. With one device that is
+    // the same single publish as before; with two it stops the HA status
+    // flapping twice per decision. A failure anywhere takes precedence: the
+    // fleet is degraded even if some of it was commanded successfully.
+    if !directives.is_empty() {
+        let status = if failed { err_status } else { ok_status };
+        mqtt::publish_status(publisher, prefix, status).await;
+    }
+
+    outcomes
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -226,20 +268,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
                             }
 
-                            // The whole list, not its first element: a step that means
-                            // "stop one box, start another" has to reach both devices.
-                            let outcomes = device::actuate(&zendure_client, &step.commands, "decision").await;
-                            let failed = outcomes.iter().any(|o| o.outcome == "error");
-
-                            // Once after the loop rather than once per command. With one
-                            // device that is the same single publish as before; with two
-                            // it stops the HA status flapping twice per decision. A
-                            // failure anywhere takes precedence: the fleet is degraded
-                            // even if some of it was commanded successfully.
-                            if !step.commands.is_empty() {
-                                let status = if failed { "zendure_api_error" } else { "operational" };
-                                mqtt::publish_status(&publisher_client, &ha_prefix, status).await;
-                            }
+                            let outcomes = apply_and_publish(
+                                &zendure_client,
+                                &publisher_client,
+                                &ha_prefix,
+                                &step.directives,
+                                Actuation::Decision,
+                                "operational",
+                                "zendure_api_error",
+                            )
+                            .await;
 
                             // Recorded after actuation, so each outcome reflects whether
                             // the write to that device actually landed — which is what you
@@ -281,13 +319,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(decision) = step.decision {
                     // Every battery stands down, and one unreachable box does
                     // not leave the others running through the outage.
-                    let outcomes = device::actuate(&zendure_client, &step.commands, "failsafe idle").await;
-                    let failed = outcomes.iter().any(|o| o.outcome == "error");
-
-                    if !step.commands.is_empty() {
-                        let status = if failed { "mqtt_timeout_api_error" } else { "mqtt_timeout" };
-                        mqtt::publish_status(&publisher_client, &ha_prefix, status).await;
-                    }
+                    let outcomes = apply_and_publish(
+                        &zendure_client,
+                        &publisher_client,
+                        &ha_prefix,
+                        &step.directives,
+                        Actuation::FailsafeIdle,
+                        "mqtt_timeout",
+                        "mqtt_timeout_api_error",
+                    )
+                    .await;
 
                     if let Some(log) = &raw_log {
                         log.value("failsafe", &serde_json::json!({

@@ -70,13 +70,52 @@ pub trait BatteryController {
     fn apply(&self, command: &Command) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
+/// Whether a command landed. A two-state role, so it gets a type: as a
+/// `&'static str` compared at the call sites, `== "eror"` compiled and quietly
+/// reported `operational` straight through an outage. The variants are the only
+/// two values that exist, and the compiler checks the comparison.
+///
+/// `snake_case` so it serializes as the `"ok"` / `"error"` the journal already
+/// carries — step 7's `decisions.outcome` column and the README example read
+/// the same bytes as before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Applied {
+    Ok,
+    Error,
+}
+
+/// Which path is actuating, for the operator reading the log. A type rather
+/// than a `&str` for the same reason `Applied` is: two call sites, two values,
+/// and a typo in either is silent.
+#[derive(Debug, Clone, Copy)]
+pub enum Actuation {
+    Decision,
+    FailsafeIdle,
+}
+
+/// Renders exactly the two literals the `tracing::error!` lines interpolated
+/// before, so an operator's existing grep over the logs still matches.
+impl std::fmt::Display for Actuation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Actuation::Decision => "decision",
+            Actuation::FailsafeIdle => "failsafe idle",
+        })
+    }
+}
+
 /// One command's fate, as recorded. `command` is the `Display` string, which is
 /// the format `command_tests.rs` pins and the raw log already quotes.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Outcome {
     pub device: DeviceId,
     pub command: String,
-    pub outcome: &'static str,
+    /// The field is `applied` because `outcome.outcome` stutters; the JSON key
+    /// stays `outcome` because the journal is append-only and lines already on
+    /// disk have to keep reading the same way as the ones written tomorrow.
+    #[serde(rename = "outcome")]
+    pub applied: Applied,
     pub error: Option<String>,
 }
 
@@ -103,7 +142,7 @@ pub struct Outcome {
 pub async fn actuate<B: BatteryController>(
     battery: &B,
     directives: &[Directive],
-    what: &str,
+    what: Actuation,
 ) -> Vec<Outcome> {
     let mut outcomes = Vec::with_capacity(directives.len());
 
@@ -136,7 +175,11 @@ pub async fn actuate<B: BatteryController>(
         outcomes.push(Outcome {
             device: directive.device().clone(),
             command: directive.describe(),
-            outcome: if result.is_ok() { "ok" } else { "error" },
+            applied: if result.is_ok() {
+                Applied::Ok
+            } else {
+                Applied::Error
+            },
             error: result.err(),
         });
     }
@@ -228,7 +271,7 @@ mod tests {
             directive("battery-a", Command::SetCharge(Setpoint::new(1200))),
         ];
 
-        let outcomes = actuate(&battery, &directives, "decision").await;
+        let outcomes = actuate(&battery, &directives, Actuation::Decision).await;
 
         assert_eq!(
             battery.applied(),
@@ -237,10 +280,10 @@ mod tests {
         assert_eq!(outcomes.len(), 2);
         assert_eq!(outcomes[0].device, DeviceId::new("battery-a"));
         assert_eq!(outcomes[0].command, "set_idle");
-        assert_eq!(outcomes[0].outcome, "ok");
+        assert_eq!(outcomes[0].applied, Applied::Ok);
         assert_eq!(outcomes[1].device, DeviceId::new("battery-a"));
         assert_eq!(outcomes[1].command, "set_charge(1200W)");
-        assert_eq!(outcomes[1].outcome, "ok");
+        assert_eq!(outcomes[1].applied, Applied::Ok);
     }
 
     /// An unreachable box must not leave the rest uncommanded — the failure is
@@ -253,15 +296,15 @@ mod tests {
             directive("battery-a", Command::SetCharge(Setpoint::new(1200))),
         ];
 
-        let outcomes = actuate(&battery, &directives, "decision").await;
+        let outcomes = actuate(&battery, &directives, Actuation::Decision).await;
 
         assert_eq!(
             battery.applied(),
             vec![Command::SetIdle, Command::SetCharge(Setpoint::new(1200))],
         );
-        assert_eq!(outcomes[0].outcome, "error");
+        assert_eq!(outcomes[0].applied, Applied::Error);
         assert_eq!(outcomes[0].error.as_deref(), Some("device unreachable"));
-        assert_eq!(outcomes[1].outcome, "ok");
+        assert_eq!(outcomes[1].applied, Applied::Ok);
         assert_eq!(outcomes[1].error, None);
     }
 
@@ -280,16 +323,16 @@ mod tests {
             directive("battery-a", Command::SetIdle),
         ];
 
-        let outcomes = actuate(&battery, &directives, "decision").await;
+        let outcomes = actuate(&battery, &directives, Actuation::Decision).await;
 
         assert_eq!(battery.applied(), vec![Command::SetIdle]);
         assert_eq!(outcomes[0].device, DeviceId::new("battery-b"));
-        assert_eq!(outcomes[0].outcome, "error");
+        assert_eq!(outcomes[0].applied, Applied::Error);
         assert_eq!(
             outcomes[0].error.as_deref(),
             Some("no adapter registered for device battery-b"),
         );
         assert_eq!(outcomes[1].device, DeviceId::new("battery-a"));
-        assert_eq!(outcomes[1].outcome, "ok");
+        assert_eq!(outcomes[1].applied, Applied::Ok);
     }
 }

@@ -47,6 +47,13 @@ macro_rules! forward_display {
     };
 }
 
+// `macro_rules!` is scoped to the rest of *this* file unless it is re-exported,
+// which is why `DeviceId`'s `Display` in `world.rs` was hand-written as a
+// character-for-character copy of what this expands to. Exported crate-locally
+// so the next newtype outside this module gets the precision-forwarding
+// behaviour by naming it rather than by remembering to reproduce it.
+pub(crate) use forward_display;
+
 // --- Watts: the integer-watt arithmetic unit -------------------------------
 
 /// Integer watts. The unit the device speaks and the controller computes in —
@@ -207,16 +214,23 @@ impl BatteryPower {
     }
 }
 
+/// Saturating, exactly as `Watts`'s `Add` is: two packs cannot come near
+/// `i32::MAX` watts, so the saturation is there for a corrupt reading rather
+/// than an expected sum — and a corrupt reading must not panic a debug build in
+/// the decision path.
+impl Add for BatteryPower {
+    type Output = BatteryPower;
+    fn add(self, rhs: BatteryPower) -> BatteryPower {
+        BatteryPower(self.0.saturating_add(rhs.0))
+    }
+}
+
 /// The combined flow of several batteries, which is what the world's meter
-/// correction is made of. Saturating, exactly as `Watts`'s `Add` is: two packs
-/// cannot come near `i32::MAX` watts, so the saturation is there for a corrupt
-/// reading rather than an expected sum — and a corrupt reading must not panic a
-/// debug build in the decision path.
+/// correction is made of. Folds with `Add`, as `WattHours`'s `Sum` does, so the
+/// overflow behaviour is stated once above rather than reinvented here.
 impl std::iter::Sum for BatteryPower {
     fn sum<I: Iterator<Item = BatteryPower>>(iter: I) -> BatteryPower {
-        iter.fold(BatteryPower::ZERO, |acc, p| {
-            BatteryPower(acc.0.saturating_add(p.0))
-        })
+        iter.fold(BatteryPower::ZERO, Add::add)
     }
 }
 
