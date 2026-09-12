@@ -95,8 +95,8 @@ SQLite database at `JOURNAL_PATH`.
 
 ```sql
 sessions  (id, started_ms, version, config_json)
-events    (id, session_id, ts_ms, kind, payload_json)
-decisions (id, session_id, ts_ms, device, kind, payload_json, state_json,
+events    (id, session_id, seq, ts_ms, kind, payload_json)
+decisions (id, session_id, seq, ts_ms, device, kind, payload_json, state_json,
            command, outcome, error, pre_battery_net_w)
 ```
 
@@ -104,6 +104,13 @@ decisions (id, session_id, ts_ms, device, kind, payload_json, state_json,
 failsafe latch — so a single decision row is enough to seed a replay. Every row
 carries the `session_id` of the process that wrote it, which is what joins it to
 the `config_json` that governed it.
+
+`seq` orders the whole file. The two row tables have independent `id`
+sequences, so `seq` is the only way to ask "what happened after this row?"
+across both — which is what seeding a replay from a decision and then feeding it
+the events that followed requires. It is assigned by the single writer thread in
+the order records were handed to it, continues across restarts rather than
+restarting per session, and leaves gaps where a write failed or a prune deleted.
 
 `events.kind` is one of `shelly` and `zendure_poll` (payloads captured verbatim,
 *before* parsing) or `meter`, `device_update` and `mqtt_timeout` (the engine's

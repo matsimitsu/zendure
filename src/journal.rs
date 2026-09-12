@@ -20,10 +20,15 @@ use crate::units::{RetentionDays, Timestamp};
 /// stuck, and waiting for it would be worse than losing the record.
 const QUEUE_DEPTH: usize = 1024;
 
-/// Bumped whenever the table shapes change. Nothing migrates on it yet; it
-/// exists so that a future change *can*, instead of silently inserting against
-/// a database whose columns predate it.
-const SCHEMA_VERSION: i64 = 1;
+/// Bumped whenever the table shapes change, and *checked* on open: a database
+/// stamped with anything else is refused rather than inserted against, because
+/// `CREATE TABLE IF NOT EXISTS` accepts a file whose columns predate the build
+/// and then fails every insert instead.
+///
+/// Version 2 added `seq`. Nothing migrates between versions — there is no
+/// deployed v1 database to migrate, and inventing a migration path for a file
+/// that only ever existed on a development machine would be pure ceremony.
+const SCHEMA_VERSION: i64 = 2;
 
 /// Append-only record of everything entering and leaving the controller.
 ///
@@ -132,8 +137,8 @@ impl Journal {
             "null".to_string()
         });
 
-        let session_id = match prepare(&conn, version, &config_json) {
-            Ok(id) => id,
+        let prepared = match prepare(&conn, version, &config_json) {
+            Ok(prepared) => prepared,
             Err(e) => {
                 tracing::warn!("Journal disabled: cannot prepare {}: {e}", path.display());
                 return (Self::disabled(), None);
@@ -145,7 +150,7 @@ impl Journal {
 
         let handle = tokio::task::spawn_blocking({
             let dropped = Arc::clone(&dropped);
-            move || writer(conn, session_id, rx, retention, &dropped)
+            move || writer(conn, prepared, rx, retention, &dropped)
         });
 
         tracing::info!("Journal open at {}", path.display());
@@ -200,7 +205,8 @@ impl Journal {
             // `Clock` attached yet. `events.ts_ms` therefore mixes observed time
             // (engine events) with write time (`shelly`, `zendure_poll`); they
             // differ by the few milliseconds between receiving a payload and
-            // folding it in. `events.id` is monotonic if you need a strict order.
+            // folding it in. `seq` is the strict order if you need one, and it
+            // spans both tables where `events.id` only orders this one.
             at: Timestamp::from_millis(Utc::now().timestamp_millis()),
             kind,
             payload_json,
@@ -299,10 +305,15 @@ fn json<T: Serialize>(what: &str, value: &T) -> Option<String> {
     }
 }
 
+/// Open a database, check it is one we can write, and start a session in it.
+///
+/// Returns the session id stamped onto every row, and the next `seq` to hand
+/// out.
+///
 /// `auto_vacuum` has to be set before the first table exists, so a database
 /// created by an older build keeps its old setting. Harmless: without it the
 /// file holds its high-water mark instead of shrinking after a prune.
-fn prepare(conn: &Connection, version: &str, config_json: &str) -> rusqlite::Result<i64> {
+fn prepare(conn: &Connection, version: &str, config_json: &str) -> rusqlite::Result<Prepared> {
     // First, before anything writes a page: `auto_vacuum` can only be set while
     // the database is still empty, and switching to WAL is itself a write. Set
     // after, it silently reports success and leaves the setting at NONE.
@@ -318,6 +329,22 @@ fn prepare(conn: &Connection, version: &str, config_json: &str) -> rusqlite::Res
     // timeout is zero.
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
+    // Before creating anything: a file stamped with a different schema has
+    // columns this build does not know about, or lacks ones it writes. Left
+    // alone, `CREATE TABLE IF NOT EXISTS` would accept it silently and every
+    // insert would then fail against the missing column — which degrades to a
+    // warning per power of two and a journal that records nothing. Refusing
+    // here disables the journal once, with the reason.
+    let stamped: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if stamped != 0 && stamped != SCHEMA_VERSION {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISMATCH),
+            Some(format!(
+                "database is schema version {stamped}, this build writes {SCHEMA_VERSION}"
+            )),
+        ));
+    }
+
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS sessions (
              id          INTEGER PRIMARY KEY,
@@ -328,6 +355,7 @@ fn prepare(conn: &Connection, version: &str, config_json: &str) -> rusqlite::Res
          CREATE TABLE IF NOT EXISTS events (
              id           INTEGER PRIMARY KEY,
              session_id   INTEGER NOT NULL,
+             seq          INTEGER NOT NULL,
              ts_ms        INTEGER NOT NULL,
              kind         TEXT    NOT NULL,
              payload_json TEXT    NOT NULL
@@ -335,6 +363,7 @@ fn prepare(conn: &Connection, version: &str, config_json: &str) -> rusqlite::Res
          CREATE TABLE IF NOT EXISTS decisions (
              id                INTEGER PRIMARY KEY,
              session_id        INTEGER NOT NULL,
+             seq               INTEGER NOT NULL,
              ts_ms             INTEGER NOT NULL,
              device            TEXT,
              kind              TEXT    NOT NULL,
@@ -347,8 +376,10 @@ fn prepare(conn: &Connection, version: &str, config_json: &str) -> rusqlite::Res
          );
          CREATE INDEX IF NOT EXISTS events_ts        ON events (ts_ms);
          CREATE INDEX IF NOT EXISTS events_kind      ON events (kind);
+         CREATE INDEX IF NOT EXISTS events_seq       ON events (seq);
          CREATE INDEX IF NOT EXISTS decisions_ts     ON decisions (ts_ms);
-         CREATE INDEX IF NOT EXISTS decisions_device ON decisions (device);",
+         CREATE INDEX IF NOT EXISTS decisions_device ON decisions (device);
+         CREATE INDEX IF NOT EXISTS decisions_seq    ON decisions (seq);",
     )?;
 
     // Stamped so a future column addition has somewhere to branch on. Without
@@ -364,18 +395,49 @@ fn prepare(conn: &Connection, version: &str, config_json: &str) -> rusqlite::Res
         "INSERT INTO sessions (started_ms, version, config_json) VALUES (?1, ?2, ?3)",
         (Utc::now().timestamp_millis(), version, config_json),
     )?;
-    Ok(conn.last_insert_rowid())
+    let session_id = conn.last_insert_rowid();
+
+    // `seq` continues across sessions rather than restarting, so it orders the
+    // whole file and not just one process's rows. A replay seeded from a
+    // decision written before a restart has to be able to ask for "everything
+    // after that row" without also knowing which session each side came from.
+    // Gaps left by a prune are fine; only the ordering is load-bearing.
+    let next_seq: i64 = conn
+        .query_row(
+            "SELECT max(seq) FROM (SELECT max(seq) AS seq FROM events
+                               UNION ALL
+                               SELECT max(seq) AS seq FROM decisions)",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )?
+        .unwrap_or(0)
+        + 1;
+
+    Ok(Prepared {
+        session_id,
+        next_seq,
+    })
+}
+
+/// What a freshly opened database hands the writer.
+struct Prepared {
+    session_id: i64,
+    next_seq: i64,
 }
 
 /// Owns the connection for the life of the process. Ends when every `Journal`
 /// handle is dropped, which in practice means the process is going down.
 fn writer(
     conn: Connection,
-    session_id: i64,
+    prepared: Prepared,
     mut rx: mpsc::Receiver<Record>,
     retention: RetentionDays,
     dropped: &AtomicU64,
 ) {
+    let Prepared {
+        session_id,
+        mut next_seq,
+    } = prepared;
     let mut last_prune = Utc::now().date_naive();
     prune(&conn, retention);
 
@@ -386,7 +448,16 @@ fn writer(
     let mut failed: u64 = 0;
 
     while let Some(record) = rx.blocking_recv() {
-        if let Err(e) = write(&conn, session_id, &record) {
+        // Assigned here, by the one thread that writes, in the order the
+        // records left the channel. That is what makes `seq` an ordering across
+        // both tables: a decision's rows are handed numbers strictly after the
+        // event that produced them, even though the two live in separate tables
+        // with independent row ids. Consumed whether or not the insert lands, so
+        // a failed write leaves a gap rather than a repeated number.
+        let seq = next_seq;
+        next_seq += 1;
+
+        if let Err(e) = write(&conn, session_id, seq, &record) {
             failed += 1;
             // First one always, then powers of two. A full disk or a read-only
             // SD card fails every insert, so a line per record would flood; a
@@ -412,23 +483,25 @@ fn writer(
     }
 }
 
-fn write(conn: &Connection, session_id: i64, record: &Record) -> rusqlite::Result<()> {
+fn write(conn: &Connection, session_id: i64, seq: i64, record: &Record) -> rusqlite::Result<()> {
     match record {
         Record::Event {
             at,
             kind,
             payload_json,
         } => conn.execute(
-            "INSERT INTO events (session_id, ts_ms, kind, payload_json) VALUES (?1, ?2, ?3, ?4)",
-            (session_id, at.as_millis(), kind, payload_json),
+            "INSERT INTO events (session_id, seq, ts_ms, kind, payload_json)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            (session_id, seq, at.as_millis(), kind, payload_json),
         )?,
         Record::Decision(row) => conn.execute(
             "INSERT INTO decisions
-                 (session_id, ts_ms, device, kind, payload_json, state_json,
+                 (session_id, seq, ts_ms, device, kind, payload_json, state_json,
                   command, outcome, error, pre_battery_net_w)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             (
                 session_id,
+                seq,
                 row.at.as_millis(),
                 &row.device,
                 row.kind,
@@ -587,6 +660,114 @@ mod tests {
 
     fn count(conn: &Connection, sql: &str) -> i64 {
         conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    /// Every row in the file, both tables, in `seq` order.
+    fn seq_order(conn: &Connection) -> Vec<(i64, String)> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT seq, kind FROM events
+                 UNION ALL
+                 SELECT seq, 'decision:' || kind FROM decisions
+                 ORDER BY seq",
+            )
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    /// The property step 8's export depends on: a decision is ordered strictly
+    /// after the event that produced it, across two tables whose row ids run
+    /// independently. Without this, "replay everything after this snapshot" can
+    /// only be asked in milliseconds, and two records sharing one millisecond
+    /// make the boundary ambiguous.
+    #[tokio::test]
+    async fn seq_orders_events_and_decisions_against_each_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let (journal, writer, path) = open(&dir);
+
+        journal.event(&Event::MqttTimeout { at: clock() });
+        journal.decision(
+            at(),
+            ControlPath::Failsafe,
+            &decision(),
+            &engine_state(),
+            &[outcome("SN123", Applied::Ok, None)],
+        );
+        journal.event(&Event::MqttTimeout { at: clock() });
+
+        let conn = drain(journal, writer, &path).await;
+        let rows = seq_order(&conn);
+
+        assert_eq!(
+            rows,
+            vec![
+                (1, "mqtt_timeout".to_string()),
+                (2, "decision:failsafe".to_string()),
+                (3, "mqtt_timeout".to_string()),
+            ]
+        );
+    }
+
+    /// `seq` numbers the file, not the process. A replay seeded from a decision
+    /// written before a restart asks for "everything after that row" without
+    /// knowing which session either side came from — which only works if the
+    /// counter carries over.
+    #[tokio::test]
+    async fn seq_continues_across_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        // Not `clock()`: that fixture is pinned to a fixed past instant, and the
+        // second session's startup prune would delete the first session's row
+        // before this could look at it.
+        let now = Clock::test_at(Utc::now().timestamp_millis());
+
+        let (journal, writer, path) = open(&dir);
+        journal.event(&Event::MqttTimeout { at: now });
+        drain(journal, writer, &path).await;
+
+        let (journal, writer, path) = open(&dir);
+        journal.event(&Event::MqttTimeout { at: now });
+        let conn = drain(journal, writer, &path).await;
+
+        let seqs: Vec<i64> = seq_order(&conn).into_iter().map(|(seq, _)| seq).collect();
+        assert_eq!(seqs, vec![1, 2]);
+        assert_eq!(
+            count(&conn, "SELECT count(DISTINCT session_id) FROM events"),
+            2
+        );
+    }
+
+    /// A database written by a different build has columns this one does not
+    /// write, or lacks ones it does. `CREATE TABLE IF NOT EXISTS` accepts it
+    /// silently and every insert then fails against a missing column — a
+    /// warning per power of two and a journal that records nothing. Refusing
+    /// once, with the reason, is the failure the `user_version` stamp was put
+    /// there to make possible.
+    #[test]
+    fn a_database_from_another_schema_version_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+
+        let conn = Connection::open(&path).unwrap();
+        prepare(&conn, "0.0.0-test", "{}").unwrap();
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
+        drop(conn);
+
+        let (journal, writer) =
+            Journal::open(&path, days(90), "0.0.0-test", &serde_json::json!({"k": 1}));
+        assert!(
+            writer.is_none(),
+            "a mismatched database must not be written to"
+        );
+
+        // Disabled, not panicking: the controller starts without a journal.
+        journal.event(&Event::MqttTimeout { at: clock() });
+
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(count(&conn, "SELECT count(*) FROM sessions"), 1);
     }
 
     #[tokio::test]
