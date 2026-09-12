@@ -1,14 +1,15 @@
 use std::fmt;
 
 use crate::models::{ControlDecision, ControlMode};
+use crate::units::Setpoint;
 
 /// What the controller wants sent to the device, separate from the decision
 /// that produced it (which also carries the HA-published `reason`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(clippy::enum_variant_names)]
 pub enum Command {
-    SetCharge(i32),
-    SetDischarge(i32),
+    SetCharge(Setpoint),
+    SetDischarge(Setpoint),
     SetIdle,
     SetStandby,
 }
@@ -34,3 +35,7 @@ impl fmt::Display for Command {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "command_tests.rs"]
+mod tests;

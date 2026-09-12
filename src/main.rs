@@ -9,6 +9,7 @@ mod models;
 mod mqtt;
 mod rawlog;
 mod rte;
+mod units;
 mod zendure;
 
 use clock::Clock;
@@ -19,6 +20,7 @@ use models::StorageMode;
 use mqtt::MqttEvent;
 use rawlog::RawLog;
 use tokio::sync::mpsc;
+use units::{GridPower, Soc, SolarPower, WattHours, Watts};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -71,11 +73,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let battery_state = battery::BatteryState::from_properties(&battery_report.properties);
 
     let mut pack_capacities = rte::pack_capacities(&initial_report.pack_data);
-    let mut min_soc_percent: u32 = initial_report
+    let mut min_soc_percent: Soc = initial_report
         .properties
         .min_soc
-        .map(|v| v / 10)
-        .unwrap_or(0);
+        .map(Soc::from_tenths)
+        .unwrap_or(Soc::ZERO);
     tracing::info!(
         "Battery: SOC={}%, max_discharge={}W, max_charge={}W, current_power={}W, packs={}",
         battery_state.soc,
@@ -122,7 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await;
     });
 
-    let mqtt_timeout = std::time::Duration::from_secs(config.mqtt_timeout_secs);
+    let mqtt_timeout = config.mqtt_timeout;
     let mut engine = Engine::new(
         controller::Controller::from_config(&config, &Clock::now(config.timezone)),
         battery_state,
@@ -135,7 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let mut rte_tracker = rte::RteTracker::new(rte_state_path);
 
-    let poll_interval = std::time::Duration::from_secs(config.zendure_poll_interval_secs);
+    let poll_interval = config.zendure_poll_interval;
     let mut poll_timer = tokio::time::interval(poll_interval);
     // Don't fire immediately — we just polled above
     poll_timer.tick().await;
@@ -151,16 +153,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let Some(MqttEvent::GridPowerReading(reading)) = event else { break };
                 last_mqtt_update = tokio::time::Instant::now();
 
-                let net_grid_power = reading.total_act_power;
+                let net_grid_power = GridPower(reading.total_act_power);
                 // Solar production = export (negative power) on the phase the
                 // inverter feeds into. The meter total nets this against loads
                 // on other phases, so read the single phase directly.
                 let solar_phase_power = match config.solar_phase {
-                    SolarPhase::A => reading.a_act_power,
-                    SolarPhase::B => reading.b_act_power,
-                    SolarPhase::C => reading.c_act_power,
+                    SolarPhase::A => GridPower(reading.a_act_power),
+                    SolarPhase::B => GridPower(reading.b_act_power),
+                    SolarPhase::C => GridPower(reading.c_act_power),
                 };
-                let solar_power = (-solar_phase_power).max(0.0);
+                let solar_power = SolarPower::from_phase_export(solar_phase_power);
                 tracing::info!(
                     "Shelly: total={:.0}W (A={:.0} B={:.0} C={:.0}), solar={:.0}W",
                     reading.total_act_power,
@@ -173,8 +175,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let clock = Clock::now(config.timezone);
                 let step = engine.step(&Event::GridPower {
                     at: clock,
-                    total_w: net_grid_power,
-                    solar_w: solar_power,
+                    total: net_grid_power,
+                    solar: solar_power,
                 });
 
                 if let Some(status) = step.status {
@@ -292,21 +294,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
 
                         // Feed RTE tracker with charge/discharge power
-                        let charge_w = report.properties.output_pack_power.unwrap_or(0) as f64;
-                        let discharge_w = report.properties.pack_input_power.unwrap_or(0) as f64;
-                        rte_tracker.record(charge_w, discharge_w);
+                        rte_tracker.record(
+                            Watts::from_device(report.properties.output_pack_power.unwrap_or(0)),
+                            Watts::from_device(report.properties.pack_input_power.unwrap_or(0)),
+                        );
 
                         // Update pack data and SOC limits if available
                         if report.pack_data.is_some() {
                             pack_capacities = rte::pack_capacities(&report.pack_data);
                         }
                         if let Some(ms) = report.properties.min_soc {
-                            min_soc_percent = ms / 10;
+                            min_soc_percent = Soc::from_tenths(ms);
                         }
 
                         // Publish RTE sensors
-                        let total_capacity_kwh: f64 =
-                            pack_capacities.iter().sum::<f64>() / 1000.0;
+                        let total_capacity_kwh =
+                            pack_capacities.iter().copied().sum::<WattHours>().to_kwh();
                         let usable_kwh =
                             rte_tracker.usable_kwh(state.soc, min_soc_percent, &pack_capacities);
                         mqtt::publish_rte(
@@ -357,8 +360,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         mqtt::publish_battery_power(
                             &publisher_client,
                             &ha_prefix,
-                            report.properties.output_pack_power.unwrap_or(0),
-                            report.properties.pack_input_power.unwrap_or(0),
+                            Watts::from_device(report.properties.output_pack_power.unwrap_or(0)),
+                            Watts::from_device(report.properties.pack_input_power.unwrap_or(0)),
                         )
                         .await;
 

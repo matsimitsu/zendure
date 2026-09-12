@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use crate::config::Config;
 use crate::models::{ControlDecision, CycleCounts, ShellyReading};
 use crate::rawlog::RawLog;
+use crate::units::{KiloWattHours, Percent, Soc, Watts};
 
 #[derive(Debug, Clone)]
 pub enum MqttEvent {
@@ -234,17 +235,17 @@ pub async fn publish_cycle_counts(client: &AsyncClient, prefix: &str, counts: &C
 pub async fn publish_rte(
     client: &AsyncClient,
     prefix: &str,
-    rte_percent: Option<f64>,
-    usable_kwh: f64,
-    total_capacity_kwh: f64,
+    rte_percent: Option<Percent>,
+    usable: KiloWattHours,
+    total_capacity: KiloWattHours,
 ) {
     let values: &[(&str, String)] = &[
         (
             "rte_percent",
             rte_percent.map_or("unknown".to_string(), |v| format!("{v:.1}")),
         ),
-        ("rte_usable_kwh", format!("{usable_kwh:.2}")),
-        ("rte_total_capacity_kwh", format!("{total_capacity_kwh:.2}")),
+        ("rte_usable_kwh", format!("{usable:.2}")),
+        ("rte_total_capacity_kwh", format!("{total_capacity:.2}")),
     ];
 
     for (id, value) in values {
@@ -272,12 +273,12 @@ pub async fn publish_soc_calibrating(client: &AsyncClient, prefix: &str, calibra
 pub async fn publish_battery_power(
     client: &AsyncClient,
     prefix: &str,
-    charge_w: u32,
-    discharge_w: u32,
+    charge: Watts,
+    discharge: Watts,
 ) {
     let values: &[(&str, String)] = &[
-        ("battery_charge_power", charge_w.to_string()),
-        ("battery_discharge_power", discharge_w.to_string()),
+        ("battery_charge_power", charge.to_string()),
+        ("battery_discharge_power", discharge.to_string()),
     ];
 
     for (id, value) in values {
@@ -301,7 +302,7 @@ pub async fn publish_status(client: &AsyncClient, prefix: &str, status: &str) {
     }
 }
 
-pub async fn publish_battery_soc(client: &AsyncClient, prefix: &str, soc: u32) {
+pub async fn publish_battery_soc(client: &AsyncClient, prefix: &str, soc: Soc) {
     let topic = format!("{prefix}/battery_soc");
     if let Err(e) = client
         .publish(&topic, QoS::AtMostOnce, false, soc.to_string().as_bytes())

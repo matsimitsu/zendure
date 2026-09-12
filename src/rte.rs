@@ -5,19 +5,26 @@ use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
+use crate::units::{KiloWattHours, Percent, Soc, WattHours, Watts};
+
 /// Persisted energy sample: (unix timestamp, charge_wh, discharge_wh)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedSample {
     ts: f64,
-    charge_wh: f64,
-    discharge_wh: f64,
+    charge_wh: WattHours,
+    discharge_wh: WattHours,
 }
 
 /// On-disk format for the RTE state file.
 #[derive(Debug, Serialize, Deserialize)]
 struct PersistedState {
     samples: Vec<PersistedSample>,
+    // Bare `f64` rather than `Watts`: `Watts` is `i32`-backed, so serializing
+    // it would write `100` where the existing file on disk has `100.0`, and
+    // parsing that same `100.0` back into an `i32` newtype fails outright.
+    // Converted at the boundary instead — see `save`/`load` below.
     last_charge_power: f64,
+    // See `last_charge_power` above — same reasoning applies here.
     last_discharge_power: f64,
     last_sample_ts: Option<f64>,
 }
@@ -26,8 +33,8 @@ struct PersistedState {
 struct Sample {
     instant: Instant,
     unix_ts: f64,
-    charge_wh: f64,
-    discharge_wh: f64,
+    charge_wh: WattHours,
+    discharge_wh: WattHours,
 }
 
 /// Tracks battery round-trip efficiency over a rolling 24-hour window
@@ -36,8 +43,8 @@ pub struct RteTracker {
     samples: VecDeque<Sample>,
     last_sample_time: Option<Instant>,
     last_sample_unix: Option<f64>,
-    last_charge_power: f64,
-    last_discharge_power: f64,
+    last_charge_power: Watts,
+    last_discharge_power: Watts,
     window: Duration,
     state_path: PathBuf,
     /// `save` runs on every poll, so a persistently unwritable path would log
@@ -51,8 +58,8 @@ impl RteTracker {
             samples: VecDeque::new(),
             last_sample_time: None,
             last_sample_unix: None,
-            last_charge_power: 0.0,
-            last_discharge_power: 0.0,
+            last_charge_power: Watts::ZERO,
+            last_discharge_power: Watts::ZERO,
             window: Duration::from_secs(24 * 3600),
             state_path,
             save_failed: AtomicBool::new(false),
@@ -69,19 +76,18 @@ impl RteTracker {
     }
 
     /// Record a power sample. Call this on every battery poll.
-    /// `charge_w` = power flowing into battery (W), `discharge_w` = power flowing out (W).
-    pub fn record(&mut self, charge_w: f64, discharge_w: f64) {
-        self.record_at(Instant::now(), charge_w, discharge_w);
+    /// `charge` = power flowing into battery, `discharge` = power flowing out.
+    pub fn record(&mut self, charge: Watts, discharge: Watts) {
+        self.record_at(Instant::now(), charge, discharge);
     }
 
-    fn record_at(&mut self, now: Instant, charge_w: f64, discharge_w: f64) {
+    fn record_at(&mut self, now: Instant, charge: Watts, discharge: Watts) {
         let unix_now = unix_now();
 
         if let Some(last_time) = self.last_sample_time {
-            let dt_hours = now.duration_since(last_time).as_secs_f64() / 3600.0;
-            // Trapezoidal integration
-            let charge_wh = (self.last_charge_power + charge_w) / 2.0 * dt_hours;
-            let discharge_wh = (self.last_discharge_power + discharge_w) / 2.0 * dt_hours;
+            let dt = now.duration_since(last_time);
+            let charge_wh = WattHours::integrate(self.last_charge_power, charge, dt);
+            let discharge_wh = WattHours::integrate(self.last_discharge_power, discharge, dt);
             self.samples.push_back(Sample {
                 instant: now,
                 unix_ts: unix_now,
@@ -92,8 +98,8 @@ impl RteTracker {
 
         self.last_sample_time = Some(now);
         self.last_sample_unix = Some(unix_now);
-        self.last_charge_power = charge_w;
-        self.last_discharge_power = discharge_w;
+        self.last_charge_power = charge;
+        self.last_discharge_power = discharge;
 
         self.prune(now);
     }
@@ -106,31 +112,31 @@ impl RteTracker {
         }
     }
 
-    /// Total energy charged in the rolling window (Wh).
-    pub fn total_charge_wh(&self) -> f64 {
+    /// Total energy charged in the rolling window.
+    pub fn total_charge_wh(&self) -> WattHours {
         self.samples.iter().map(|s| s.charge_wh).sum()
     }
 
-    /// Total energy discharged in the rolling window (Wh).
-    pub fn total_discharge_wh(&self) -> f64 {
+    /// Total energy discharged in the rolling window.
+    pub fn total_discharge_wh(&self) -> WattHours {
         self.samples.iter().map(|s| s.discharge_wh).sum()
     }
 
     /// Round-trip efficiency percentage (0–100), or None if insufficient data.
-    pub fn rte_percent(&self) -> Option<f64> {
+    pub fn rte_percent(&self) -> Option<Percent> {
         let charged = self.total_charge_wh();
-        if charged < 1.0 {
+        if charged.get() < 1.0 {
             return None; // Need at least 1 Wh of charge data
         }
         let discharged = self.total_discharge_wh();
-        let rte = (discharged / charged) * 100.0;
+        let rte = (discharged.get() / charged.get()) * 100.0;
 
         // When RTE drops below 70%, use geometric mean fallback to smooth out
         // poor efficiency readings (per Zendure-HA-zenSDK approach).
         if rte < 70.0 {
-            Some((rte / 100.0).sqrt() * 100.0)
+            Some(Percent((rte / 100.0).sqrt() * 100.0))
         } else {
-            Some(rte)
+            Some(Percent(rte))
         }
     }
 
@@ -138,17 +144,22 @@ impl RteTracker {
     ///
     /// - `soc`: current state of charge (0–100%)
     /// - `min_soc`: minimum allowed SOC (0–100%)
-    /// - `pack_capacities_wh`: capacity of each connected pack in Wh
-    pub fn usable_kwh(&self, soc: u32, min_soc: u32, pack_capacities_wh: &[f64]) -> f64 {
-        let total_capacity_wh: f64 = pack_capacities_wh.iter().sum();
-        if total_capacity_wh <= 0.0 || soc <= min_soc {
-            return 0.0;
+    /// - `pack_capacities`: capacity of each connected pack
+    pub fn usable_kwh(
+        &self,
+        soc: Soc,
+        min_soc: Soc,
+        pack_capacities: &[WattHours],
+    ) -> KiloWattHours {
+        let total_capacity_wh: WattHours = pack_capacities.iter().copied().sum();
+        if total_capacity_wh.get() <= 0.0 || soc <= min_soc {
+            return KiloWattHours::ZERO;
         }
 
-        let usable_soc_fraction = (soc - min_soc) as f64 / 100.0;
-        let rte_factor = self.rte_percent().unwrap_or(85.0) / 100.0;
+        let usable_soc_fraction = soc.fraction_above(min_soc);
+        let rte_factor = self.rte_percent().map_or(0.85, Percent::fraction);
 
-        total_capacity_wh * usable_soc_fraction * rte_factor / 1000.0
+        WattHours(total_capacity_wh.get() * usable_soc_fraction * rte_factor).to_kwh()
     }
 
     /// Persist current state to disk.
@@ -163,8 +174,8 @@ impl RteTracker {
                     discharge_wh: s.discharge_wh,
                 })
                 .collect(),
-            last_charge_power: self.last_charge_power,
-            last_discharge_power: self.last_discharge_power,
+            last_charge_power: f64::from(self.last_charge_power.get()),
+            last_discharge_power: f64::from(self.last_discharge_power.get()),
             last_sample_ts: self.last_sample_unix,
         };
 
@@ -218,8 +229,8 @@ impl RteTracker {
             });
         }
 
-        self.last_charge_power = state.last_charge_power;
-        self.last_discharge_power = state.last_discharge_power;
+        self.last_charge_power = Watts(state.last_charge_power.round() as i32);
+        self.last_discharge_power = Watts(state.last_discharge_power.round() as i32);
 
         // Restore last_sample_time relative to now, but only if it's recent enough
         if let Some(last_ts) = state.last_sample_ts {
@@ -249,22 +260,22 @@ fn unix_now() -> f64 {
 }
 
 /// Map a Zendure `pack_type` to its nominal capacity in Wh.
-pub fn pack_type_capacity_wh(pack_type: u32) -> f64 {
+pub fn pack_type_capacity_wh(pack_type: u32) -> WattHours {
     match pack_type {
         // AB1000 / AB1000S
-        500 => 960.0,
+        500 => WattHours(960.0),
         // AB2000 / AB2000S
-        501 => 1920.0,
+        501 => WattHours(1920.0),
         // Unknown — assume AB2000 as conservative default
         _ => {
             tracing::warn!("Unknown pack_type {pack_type}, assuming 1920 Wh");
-            1920.0
+            WattHours(1920.0)
         }
     }
 }
 
 /// Extract per-pack capacities from ZendureReport pack_data.
-pub fn pack_capacities(pack_data: &Option<Vec<crate::models::PackData>>) -> Vec<f64> {
+pub fn pack_capacities(pack_data: &Option<Vec<crate::models::PackData>>) -> Vec<WattHours> {
     match pack_data {
         Some(packs) => packs
             .iter()
@@ -298,14 +309,14 @@ mod tests {
         let t0 = Instant::now();
 
         // Simulate 1 hour of charging at 1000W
-        tracker.record_at(t0, 1000.0, 0.0);
-        tracker.record_at(t0 + Duration::from_secs(3600), 1000.0, 0.0);
+        tracker.record_at(t0, Watts(1000), Watts::ZERO);
+        tracker.record_at(t0 + Duration::from_secs(3600), Watts(1000), Watts::ZERO);
 
         // Simulate 1 hour of discharging at 850W (85% efficiency)
-        tracker.record_at(t0 + Duration::from_secs(3600), 0.0, 850.0);
-        tracker.record_at(t0 + Duration::from_secs(7200), 0.0, 850.0);
+        tracker.record_at(t0 + Duration::from_secs(3600), Watts::ZERO, Watts(850));
+        tracker.record_at(t0 + Duration::from_secs(7200), Watts::ZERO, Watts(850));
 
-        let rte = tracker.rte_percent().unwrap();
+        let rte = tracker.rte_percent().unwrap().get();
         assert!((rte - 85.0).abs() < 1.0, "Expected ~85% RTE, got {rte}");
     }
 
@@ -316,14 +327,14 @@ mod tests {
         let t0 = Instant::now();
 
         // Simulate 1 hour of charging at 1000W
-        tracker.record_at(t0, 1000.0, 0.0);
-        tracker.record_at(t0 + Duration::from_secs(3600), 1000.0, 0.0);
+        tracker.record_at(t0, Watts(1000), Watts::ZERO);
+        tracker.record_at(t0 + Duration::from_secs(3600), Watts(1000), Watts::ZERO);
 
         // Simulate 1 hour of discharging at 500W (50% raw efficiency → below 70%)
-        tracker.record_at(t0 + Duration::from_secs(3600), 0.0, 500.0);
-        tracker.record_at(t0 + Duration::from_secs(7200), 0.0, 500.0);
+        tracker.record_at(t0 + Duration::from_secs(3600), Watts::ZERO, Watts(500));
+        tracker.record_at(t0 + Duration::from_secs(7200), Watts::ZERO, Watts(500));
 
-        let rte = tracker.rte_percent().unwrap();
+        let rte = tracker.rte_percent().unwrap().get();
         // Raw 50% → sqrt(0.5) * 100 ≈ 70.7
         assert!(
             (rte - 70.7).abs() < 1.0,
@@ -338,7 +349,13 @@ mod tests {
         // No RTE data → uses 85% default
         // 2 packs of 1920 Wh = 3840 Wh, SOC=80%, min=10% → 70% usable
         // 3840 * 0.70 * 0.85 / 1000 = 2.2848
-        let usable = tracker.usable_kwh(80, 10, &[1920.0, 1920.0]);
+        let usable = tracker
+            .usable_kwh(
+                Soc::new(80),
+                Soc::new(10),
+                &[WattHours(1920.0), WattHours(1920.0)],
+            )
+            .get();
         assert!(
             (usable - 2.285).abs() < 0.1,
             "Expected ~2.28 kWh, got {usable}"
@@ -348,7 +365,12 @@ mod tests {
     #[test]
     fn test_usable_kwh_at_min_soc() {
         let tracker = RteTracker::new(temp_path());
-        assert_eq!(tracker.usable_kwh(10, 10, &[1920.0]), 0.0);
+        assert_eq!(
+            tracker
+                .usable_kwh(Soc::new(10), Soc::new(10), &[WattHours(1920.0)])
+                .get(),
+            0.0
+        );
     }
 
     #[test]
@@ -359,14 +381,16 @@ mod tests {
         // Create tracker, add data, save
         {
             let mut tracker = RteTracker::new(path.clone());
-            tracker.record_at(t0, 1000.0, 0.0);
-            tracker.record_at(t0 + Duration::from_secs(3600), 0.0, 850.0);
+            tracker.record_at(t0, Watts(1000), Watts::ZERO);
+            tracker.record_at(t0 + Duration::from_secs(3600), Watts::ZERO, Watts(850));
             tracker.save();
         }
 
         // Load into new tracker — samples should be restored
         let tracker2 = RteTracker::new(path);
-        assert!(tracker2.total_charge_wh() > 0.0 || tracker2.total_discharge_wh() > 0.0);
+        assert!(
+            tracker2.total_charge_wh().get() > 0.0 || tracker2.total_discharge_wh().get() > 0.0
+        );
     }
 
     #[test]
@@ -379,8 +403,8 @@ mod tests {
         let t0 = Instant::now();
 
         let mut tracker = RteTracker::new(path.clone());
-        tracker.record_at(t0, 1000.0, 0.0);
-        tracker.record_at(t0 + Duration::from_secs(3600), 0.0, 850.0);
+        tracker.record_at(t0, Watts(1000), Watts::ZERO);
+        tracker.record_at(t0 + Duration::from_secs(3600), Watts::ZERO, Watts(850));
         tracker.save();
 
         assert!(
@@ -388,7 +412,9 @@ mod tests {
             "state file should be written into a created directory"
         );
         let restored = RteTracker::new(path);
-        assert!(restored.total_charge_wh() > 0.0 || restored.total_discharge_wh() > 0.0);
+        assert!(
+            restored.total_charge_wh().get() > 0.0 || restored.total_discharge_wh().get() > 0.0
+        );
     }
 
     #[test]
@@ -400,7 +426,7 @@ mod tests {
         std::fs::write(&blocker, b"x").unwrap();
 
         let mut tracker = RteTracker::new(blocker.join("state.json"));
-        tracker.record_at(Instant::now(), 1000.0, 0.0);
+        tracker.record_at(Instant::now(), Watts(1000), Watts::ZERO);
         tracker.save();
         tracker.save(); // second failure takes the quiet path
     }
@@ -418,7 +444,31 @@ mod tests {
 
     #[test]
     fn test_pack_type_capacity() {
-        assert_eq!(pack_type_capacity_wh(500), 960.0);
-        assert_eq!(pack_type_capacity_wh(501), 1920.0);
+        assert_eq!(pack_type_capacity_wh(500).get(), 960.0);
+        assert_eq!(pack_type_capacity_wh(501).get(), 1920.0);
+    }
+
+    /// The old-format JSON is a live file in production holding a 24h window.
+    /// `PersistedState` has no `#[serde(default)]` anywhere, so any shape
+    /// change makes it fail to parse — and `load` swallows that with a
+    /// warning, silently losing the window. This pins the wire format: parse
+    /// the exact old-format string, check the values landed correctly, and
+    /// assert re-serializing it produces byte-identical output.
+    #[test]
+    fn test_persisted_state_wire_format_unchanged() {
+        let json = r#"{"samples":[{"ts":1.0,"charge_wh":2.0,"discharge_wh":3.0}],"last_charge_power":100.0,"last_discharge_power":0.0,"last_sample_ts":1.0}"#;
+
+        let state: PersistedState = serde_json::from_str(json).unwrap();
+
+        assert_eq!(state.samples.len(), 1);
+        assert_eq!(state.samples[0].ts, 1.0);
+        assert_eq!(state.samples[0].charge_wh.get(), 2.0);
+        assert_eq!(state.samples[0].discharge_wh.get(), 3.0);
+        assert_eq!(state.last_charge_power, 100.0);
+        assert_eq!(state.last_discharge_power, 0.0);
+        assert_eq!(state.last_sample_ts, Some(1.0));
+
+        let round_tripped = serde_json::to_string(&state).unwrap();
+        assert_eq!(round_tripped, json);
     }
 }

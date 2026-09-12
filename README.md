@@ -57,13 +57,13 @@ All configuration is via environment variables:
 |----------|----------|---------|-------------|
 | `CHARGE_START_THRESHOLD` | No | `-100.0` | Grid power (W) below which charging starts. Negative = exporting |
 | `DISCHARGE_START_THRESHOLD` | No | `0.0` | Grid power (W) above which discharging starts |
-| `CHARGE_MARGIN` | No | `50` | Safety margin (W) subtracted from charge power to avoid grid import |
-| `DISCHARGE_MARGIN` | No | `5` | Safety margin (W) subtracted from discharge power |
-| `MIN_SOC` | No | `10` | Minimum SOC (%) — discharge is blocked at or below this level |
-| `MAX_SOC` | No | `100` | Maximum SOC (%) — charging is blocked at or above this level |
+| `CHARGE_MARGIN` | No | `50` | Safety margin (W) subtracted from charge power to avoid grid import. Must be zero or positive |
+| `DISCHARGE_MARGIN` | No | `5` | Safety margin (W) subtracted from discharge power. Must be zero or positive |
+| `MIN_SOC` | No | `10` | Minimum SOC (%) — discharge is blocked at or below this level. Clamped to 0–100 |
+| `MAX_SOC` | No | `100` | Maximum SOC (%) — charging is blocked at or above this level. Clamped to 0–100 |
 | `BALANCE_WEEKDAY` | No | `mon` | Weekday (`Mon`–`Sun`) on which `MAX_SOC` is raised to 100% so the pack gets a periodic full charge for cell balancing. `none` disables the override |
 | `SOLAR_PHASE` | No | `A` | Which Shelly phase (`A`, `B`, or `C`) the solar inverter feeds into |
-| `SOLAR_DISCHARGE_BLOCK_THRESHOLD` | No | `0` | Solar export (W) on `SOLAR_PHASE` at or above which discharge is skipped, so large loads (e.g. EV charging) pull from grid+solar instead of draining the battery. `0` disables the guard |
+| `SOLAR_DISCHARGE_BLOCK_THRESHOLD` | No | `0` | Solar export (W) on `SOLAR_PHASE` at or above which discharge is skipped, so large loads (e.g. EV charging) pull from grid+solar instead of draining the battery. `0` disables the guard, as does any negative value |
 
 ### Timing and safety
 

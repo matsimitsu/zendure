@@ -1,7 +1,10 @@
 use std::env;
+use std::time::Duration;
 
 use chrono::Weekday;
 use chrono_tz::Tz;
+
+use crate::units::{GridPower, PowerMargin, Soc, SolarPower};
 
 /// Which Shelly Pro 3EM phase the solar inverter (e.g. Huawei Sun2000) feeds
 /// into. Solar production is read as the export on that single phase, since the
@@ -40,6 +43,26 @@ fn parse_weekday(s: &str) -> Result<Weekday, String> {
     }
 }
 
+/// Reads an env var (or `default`) as whole seconds into a `Duration`, keeping
+/// the original error-message shape (`"<KEY> must be a number"`).
+fn secs_from_env(key: &str, default: &str) -> Result<Duration, String> {
+    let secs = env::var(key)
+        .unwrap_or_else(|_| default.to_string())
+        .parse::<u64>()
+        .map_err(|_| format!("{key} must be a number"))?;
+    Ok(Duration::from_secs(secs))
+}
+
+/// Reads an env var (or `default`) as whole minutes into a `Duration`, keeping
+/// the original error-message shape (`"<KEY> must be a number"`).
+fn minutes_from_env(key: &str, default: &str) -> Result<Duration, String> {
+    let minutes = env::var(key)
+        .unwrap_or_else(|_| default.to_string())
+        .parse::<u64>()
+        .map_err(|_| format!("{key} must be a number"))?;
+    Ok(Duration::from_secs(minutes * 60))
+}
+
 #[allow(dead_code)]
 pub struct Config {
     pub mqtt_host: String,
@@ -51,42 +74,42 @@ pub struct Config {
     pub zendure_sn: String,
     pub shelly_topic: String,
     pub ha_publish_prefix: String,
-    pub zendure_poll_interval_secs: u64,
-    /// Safety margin subtracted from charge power to avoid grid import (W)
-    pub charge_margin: i32,
-    /// Safety margin subtracted from discharge power (W)
-    pub discharge_margin: i32,
-    /// Grid power below this triggers charging (W, negative = exporting)
-    pub charge_start_threshold: f64,
-    /// Grid power above this triggers discharging (W, positive = importing)
-    pub discharge_start_threshold: f64,
-    /// Minimum seconds before charge↔discharge toggle
-    pub min_mode_duration_secs: u64,
-    /// Minimum seconds between decisions (API protection)
-    pub min_decision_interval_secs: u64,
-    /// Minutes of idle before entering standby
-    pub idle_timeout_minutes: u64,
+    pub zendure_poll_interval: Duration,
+    /// Safety margin subtracted from charge power to avoid grid import
+    pub charge_margin: PowerMargin,
+    /// Safety margin subtracted from discharge power
+    pub discharge_margin: PowerMargin,
+    /// Grid power below this triggers charging (negative = exporting)
+    pub charge_start_threshold: GridPower,
+    /// Grid power above this triggers discharging (positive = importing)
+    pub discharge_start_threshold: GridPower,
+    /// Minimum time before charge↔discharge toggle
+    pub min_mode_duration: Duration,
+    /// Minimum time between decisions (API protection)
+    pub min_decision_interval: Duration,
+    /// Idle duration before entering standby
+    pub idle_timeout: Duration,
     /// Warn when daily cycle count reaches this threshold
     pub cycle_warn_threshold: u32,
-    /// Minimum SOC percentage before discharge is blocked (default 10)
-    pub min_soc: u32,
-    /// Maximum SOC percentage before charging is blocked (default 100)
-    pub max_soc: u32,
+    /// Minimum SOC before discharge is blocked (default 10)
+    pub min_soc: Soc,
+    /// Maximum SOC before charging is blocked (default 100)
+    pub max_soc: Soc,
     /// Weekday on which `max_soc` is raised to 100% for a periodic cell-balancing
     /// full charge. `None` disables the override (default: Monday).
     pub balance_weekday: Option<Weekday>,
     /// Which meter phase the solar inverter feeds into.
     pub solar_phase: SolarPhase,
-    /// Solar inverter export (W) on `solar_phase` at or above which discharge is
+    /// Solar inverter export on `solar_phase` at or above which discharge is
     /// skipped, so large loads (e.g. EV charging) pull from grid+solar instead
     /// of draining the home battery. 0 disables the guard (default).
-    pub solar_discharge_block_threshold: i32,
-    /// Minimum seconds of idle before discharge is allowed (prevents charge→discharge oscillation)
-    pub min_idle_before_discharge_secs: u64,
+    pub solar_discharge_block_threshold: SolarPower,
+    /// Minimum idle duration before discharge is allowed (prevents charge→discharge oscillation)
+    pub min_idle_before_discharge: Duration,
     /// IANA timezone (e.g. Europe/Amsterdam)
     pub timezone: Tz,
-    /// Seconds without MQTT updates before forcing idle (safety failsafe)
-    pub mqtt_timeout_secs: u64,
+    /// Time without MQTT updates before forcing idle (safety failsafe)
+    pub mqtt_timeout: Duration,
 }
 
 impl Config {
@@ -112,50 +135,50 @@ impl Config {
             shelly_topic: env::var("SHELLY_TOPIC").map_err(|_| "SHELLY_TOPIC is required")?,
             ha_publish_prefix: env::var("HA_PUBLISH_PREFIX")
                 .unwrap_or_else(|_| "zendure".to_string()),
-            zendure_poll_interval_secs: env::var("ZENDURE_POLL_INTERVAL")
-                .unwrap_or_else(|_| "10".to_string())
-                .parse::<u64>()
-                .map_err(|_| "ZENDURE_POLL_INTERVAL must be a number")?,
-            charge_margin: env::var("CHARGE_MARGIN")
-                .unwrap_or_else(|_| "50".to_string())
-                .parse::<i32>()
-                .map_err(|_| "CHARGE_MARGIN must be a number")?,
-            discharge_margin: env::var("DISCHARGE_MARGIN")
-                .unwrap_or_else(|_| "5".to_string())
-                .parse::<i32>()
-                .map_err(|_| "DISCHARGE_MARGIN must be a number")?,
-            charge_start_threshold: env::var("CHARGE_START_THRESHOLD")
-                .unwrap_or_else(|_| "-100.0".to_string())
-                .parse::<f64>()
-                .map_err(|_| "CHARGE_START_THRESHOLD must be a number")?,
-            discharge_start_threshold: env::var("DISCHARGE_START_THRESHOLD")
-                .unwrap_or_else(|_| "0.0".to_string())
-                .parse::<f64>()
-                .map_err(|_| "DISCHARGE_START_THRESHOLD must be a number")?,
-            min_mode_duration_secs: env::var("MIN_MODE_DURATION")
-                .unwrap_or_else(|_| "10".to_string())
-                .parse::<u64>()
-                .map_err(|_| "MIN_MODE_DURATION must be a number")?,
-            min_decision_interval_secs: env::var("MIN_DECISION_INTERVAL")
-                .unwrap_or_else(|_| "5".to_string())
-                .parse::<u64>()
-                .map_err(|_| "MIN_DECISION_INTERVAL must be a number")?,
-            idle_timeout_minutes: env::var("IDLE_TIMEOUT_MINUTES")
-                .unwrap_or_else(|_| "5".to_string())
-                .parse::<u64>()
-                .map_err(|_| "IDLE_TIMEOUT_MINUTES must be a number")?,
+            zendure_poll_interval: secs_from_env("ZENDURE_POLL_INTERVAL", "10")?,
+            charge_margin: PowerMargin::new(
+                env::var("CHARGE_MARGIN")
+                    .unwrap_or_else(|_| "50".to_string())
+                    .parse::<u32>()
+                    .map_err(|_| "CHARGE_MARGIN must be a number")?,
+            ),
+            discharge_margin: PowerMargin::new(
+                env::var("DISCHARGE_MARGIN")
+                    .unwrap_or_else(|_| "5".to_string())
+                    .parse::<u32>()
+                    .map_err(|_| "DISCHARGE_MARGIN must be a number")?,
+            ),
+            charge_start_threshold: GridPower(
+                env::var("CHARGE_START_THRESHOLD")
+                    .unwrap_or_else(|_| "-100.0".to_string())
+                    .parse::<f64>()
+                    .map_err(|_| "CHARGE_START_THRESHOLD must be a number")?,
+            ),
+            discharge_start_threshold: GridPower(
+                env::var("DISCHARGE_START_THRESHOLD")
+                    .unwrap_or_else(|_| "0.0".to_string())
+                    .parse::<f64>()
+                    .map_err(|_| "DISCHARGE_START_THRESHOLD must be a number")?,
+            ),
+            min_mode_duration: secs_from_env("MIN_MODE_DURATION", "10")?,
+            min_decision_interval: secs_from_env("MIN_DECISION_INTERVAL", "5")?,
+            idle_timeout: minutes_from_env("IDLE_TIMEOUT_MINUTES", "5")?,
             cycle_warn_threshold: env::var("CYCLE_WARN_THRESHOLD")
                 .unwrap_or_else(|_| "200".to_string())
                 .parse::<u32>()
                 .map_err(|_| "CYCLE_WARN_THRESHOLD must be a number")?,
-            min_soc: env::var("MIN_SOC")
-                .unwrap_or_else(|_| "10".to_string())
-                .parse::<u32>()
-                .map_err(|_| "MIN_SOC must be a number")?,
-            max_soc: env::var("MAX_SOC")
-                .unwrap_or_else(|_| "100".to_string())
-                .parse::<u32>()
-                .map_err(|_| "MAX_SOC must be a number")?,
+            min_soc: Soc::new(
+                env::var("MIN_SOC")
+                    .unwrap_or_else(|_| "10".to_string())
+                    .parse::<u32>()
+                    .map_err(|_| "MIN_SOC must be a number")?,
+            ),
+            max_soc: Soc::new(
+                env::var("MAX_SOC")
+                    .unwrap_or_else(|_| "100".to_string())
+                    .parse::<u32>()
+                    .map_err(|_| "MAX_SOC must be a number")?,
+            ),
             balance_weekday: {
                 let raw = env::var("BALANCE_WEEKDAY").unwrap_or_else(|_| "mon".to_string());
                 if matches!(
@@ -170,22 +193,18 @@ impl Config {
             solar_phase: SolarPhase::parse(
                 &env::var("SOLAR_PHASE").unwrap_or_else(|_| "A".to_string()),
             )?,
-            solar_discharge_block_threshold: env::var("SOLAR_DISCHARGE_BLOCK_THRESHOLD")
-                .unwrap_or_else(|_| "0".to_string())
-                .parse::<i32>()
-                .map_err(|_| "SOLAR_DISCHARGE_BLOCK_THRESHOLD must be a number")?,
-            min_idle_before_discharge_secs: env::var("MIN_IDLE_BEFORE_DISCHARGE")
-                .unwrap_or_else(|_| "300".to_string())
-                .parse::<u64>()
-                .map_err(|_| "MIN_IDLE_BEFORE_DISCHARGE must be a number")?,
+            solar_discharge_block_threshold: SolarPower::new(
+                env::var("SOLAR_DISCHARGE_BLOCK_THRESHOLD")
+                    .unwrap_or_else(|_| "0".to_string())
+                    .parse::<f64>()
+                    .map_err(|_| "SOLAR_DISCHARGE_BLOCK_THRESHOLD must be a number")?,
+            ),
+            min_idle_before_discharge: secs_from_env("MIN_IDLE_BEFORE_DISCHARGE", "300")?,
             timezone: env::var("TIMEZONE")
                 .unwrap_or_else(|_| "UTC".to_string())
                 .parse::<Tz>()
                 .map_err(|_| "TIMEZONE must be a valid IANA timezone (e.g. Europe/Amsterdam)")?,
-            mqtt_timeout_secs: env::var("MQTT_TIMEOUT")
-                .unwrap_or_else(|_| "60".to_string())
-                .parse::<u64>()
-                .map_err(|_| "MQTT_TIMEOUT must be a number")?,
+            mqtt_timeout: secs_from_env("MQTT_TIMEOUT", "60")?,
         })
     }
 }

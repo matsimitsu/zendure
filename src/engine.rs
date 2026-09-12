@@ -6,6 +6,7 @@ use crate::command::Command;
 use crate::controller::Controller;
 use crate::event::Event;
 use crate::models::{ControlDecision, ControlMode, CycleCounts};
+use crate::units::{GridPower, Setpoint, SolarPower};
 
 /// The event-driven fold at the heart of the controller. Owns exactly the
 /// state that used to live as locals in `main.rs`'s coordinator loop: the
@@ -52,11 +53,7 @@ impl Engine {
 
     pub fn step(&mut self, event: &Event) -> Step {
         match event {
-            Event::GridPower {
-                at,
-                total_w,
-                solar_w,
-            } => self.step_grid_power(at, *total_w, *solar_w),
+            Event::GridPower { at, total, solar } => self.step_grid_power(at, *total, *solar),
             Event::BatteryUpdate { state, .. } => {
                 self.battery = state.clone();
                 Step::default()
@@ -65,14 +62,14 @@ impl Engine {
         }
     }
 
-    fn step_grid_power(&mut self, at: &Clock, total_w: f64, solar_w: f64) -> Step {
+    fn step_grid_power(&mut self, at: &Clock, total: GridPower, solar: SolarPower) -> Step {
         let mut status = None;
         if self.mqtt_timed_out {
             self.mqtt_timed_out = false;
             status = Some("operational");
         }
 
-        let decision = self.controller.decide(total_w, solar_w, &self.battery, at);
+        let decision = self.controller.decide(total, solar, &self.battery, at);
         let commands = decision.iter().map(Command::from).collect();
 
         Step {
@@ -93,12 +90,12 @@ impl Engine {
 
         let decision = ControlDecision {
             mode: ControlMode::Idle,
-            power_watts: 0,
+            power_watts: Setpoint::ZERO,
             reason: format!(
                 "MQTT timeout: no updates for {}s",
                 self.mqtt_timeout.as_secs(),
             ),
-            grid_power: 0.0,
+            grid_power: GridPower::ZERO,
         };
         let command = Command::from(&decision);
 
@@ -113,6 +110,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::units::{BatteryPower, GridPower, PowerCap, Soc, SolarPower, Timestamp};
     use chrono::Weekday;
 
     const NOW_MS: i64 = 1_000_000_000;
@@ -120,7 +118,7 @@ mod tests {
 
     fn clock() -> Clock {
         Clock {
-            now_ms: NOW_MS,
+            now: Timestamp::from_millis(NOW_MS),
             hour: 12,
             day_ordinal: DAY,
             weekday: Weekday::Wed,
@@ -129,10 +127,10 @@ mod tests {
 
     fn battery() -> BatteryState {
         BatteryState {
-            soc: 50,
-            max_discharge_power: 800,
-            max_charge_power: 2400,
-            current_power: 0,
+            soc: Soc::new(50),
+            max_discharge_power: PowerCap::new(800),
+            max_charge_power: PowerCap::new(2400),
+            current_power: BatteryPower(0),
             soc_calibrating: false,
             soc_limit_reached: false,
             fault: false,
@@ -175,8 +173,8 @@ mod tests {
 
         let step = engine.step(&Event::GridPower {
             at: clock(),
-            total_w: 500.0,
-            solar_w: 0.0,
+            total: GridPower(500.0),
+            solar: SolarPower::new(0.0),
         });
 
         assert_eq!(step.status, Some("operational"));
@@ -187,8 +185,8 @@ mod tests {
         let mut engine = engine();
         let step = engine.step(&Event::GridPower {
             at: clock(),
-            total_w: 500.0,
-            solar_w: 0.0,
+            total: GridPower(500.0),
+            solar: SolarPower::new(0.0),
         });
 
         assert_eq!(step.status, None);
@@ -198,7 +196,7 @@ mod tests {
     fn battery_update_refreshes_state_without_a_decision() {
         let mut engine = engine();
         let mut updated = battery();
-        updated.soc = 80;
+        updated.soc = Soc::new(80);
 
         let step = engine.step(&Event::BatteryUpdate {
             at: clock(),
@@ -208,6 +206,6 @@ mod tests {
         assert!(step.commands.is_empty());
         assert!(step.decision.is_none());
         assert!(step.status.is_none());
-        assert_eq!(engine.battery().soc, 80);
+        assert_eq!(engine.battery().soc, Soc::new(80));
     }
 }
