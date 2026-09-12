@@ -73,20 +73,12 @@ impl Engine {
         self.world.battery()
     }
 
-    /// The whole projection, for the caller that wants to record it: the raw
-    /// log writes it alongside every decision, so a journal line carries the
-    /// inputs the decision was made from and not just its conclusion.
-    pub fn world(&self) -> &World {
-        &self.world
-    }
-
     pub fn cycle_counts(&self) -> CycleCounts {
         self.controller.cycle_counts()
     }
 
     /// Snapshot the fold. Recorded with every decision so the journal can seed a
     /// replay from any decision row.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn state(&self) -> EngineState {
         EngineState {
             world: self.world.clone(),

@@ -7,9 +7,9 @@ mod controller;
 mod device;
 mod engine;
 mod event;
+mod journal;
 mod models;
 mod mqtt;
-mod rawlog;
 mod rte;
 mod source;
 mod units;
@@ -22,9 +22,9 @@ use config::Config;
 use device::{Actuation, Applied, Outcome};
 use engine::Engine;
 use event::Event;
+use journal::{DecisionKind, Journal};
 use models::StorageMode;
 use mqtt::MqttEvent;
-use rawlog::RawLog;
 use rumqttc::AsyncClient;
 use tokio::sync::mpsc;
 use units::{Soc, WattHours, Watts};
@@ -147,19 +147,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pack_capacities.len(),
     );
 
-    // Raw capture: append-only NDJSON of everything in and out, on by default.
-    // A bridge until the structured journal lands, but recorded data cannot be
-    // backfilled, so it starts now. Any failure here disables the log and
-    // leaves control untouched.
-    let raw_log = RawLog::new(
-        std::path::PathBuf::from(
-            std::env::var("JOURNAL_RAW_PATH")
-                .unwrap_or_else(|_| "/var/lib/zendure/raw".to_string()),
-        ),
-        std::env::var("JOURNAL_RETENTION_DAYS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(90),
+    // On by default: by the time you think to enable logging, the bug you
+    // wanted it for has already happened. Any failure here disables the journal
+    // and leaves control untouched.
+    let journal = Journal::open(
+        &config.journal_path,
+        config.journal_retention_days,
+        env!("CARGO_PKG_VERSION"),
+        &config.session(),
     )
     .map(std::sync::Arc::new);
 
@@ -174,7 +169,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let solar_phase = config.solar_phase;
     let ha_prefix = config.ha_publish_prefix.clone();
     let subscriber_prefix = config.ha_publish_prefix.clone();
-    let subscriber_log = raw_log.clone();
+    let subscriber_journal = journal.clone();
     tokio::spawn(async move {
         mqtt::run_subscriber(
             mqtt_client,
@@ -183,7 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             solar_phase,
             subscriber_prefix,
             tx,
-            subscriber_log,
+            subscriber_journal,
         )
         .await;
     });
@@ -241,11 +236,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let net_grid_power = obs.grid.total;
 
                         let clock = Clock::now(config.timezone);
-                        let step = engine.step(&Event::Meter {
+                        // Bound, not passed inline, so it can be recorded
+                        // *before* it is folded in: a crash mid-decision still
+                        // leaves the input that caused it on record.
+                        let event = Event::Meter {
                             at: clock,
                             grid: obs.grid,
                             solar: obs.solar,
-                        });
+                        };
+                        if let Some(journal) = &journal {
+                            journal.event(&event);
+                        }
+                        let step = engine.step(&event);
 
                         if let Some(status) = step.status {
                             tracing::info!("MQTT updates resumed");
@@ -281,15 +283,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             // Recorded after actuation, so each outcome reflects whether
                             // the write to that device actually landed — which is what you
-                            // want when reconstructing an incident. The world goes in
-                            // beside it so the line carries the inputs, not just the
-                            // conclusion.
-                            if let Some(log) = &raw_log {
-                                log.value("decision", &serde_json::json!({
-                                    "decision": &decision,
-                                    "world": engine.world(),
-                                    "commands": outcomes,
-                                }));
+                            // want when reconstructing an incident. The engine's state goes
+                            // in beside it so the row carries the inputs and the history the
+                            // decision came from, not just its conclusion.
+                            if let Some(journal) = &journal {
+                                journal.decision(
+                                    clock.now.as_millis(),
+                                    DecisionKind::Decision,
+                                    &decision,
+                                    &engine.state(),
+                                    &outcomes,
+                                );
                             }
 
                             mqtt::publish_decision(&publisher_client, &ha_prefix, &decision).await;
@@ -307,7 +311,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 mqtt_deadline = tokio::time::Instant::now() + mqtt_timeout;
 
                 let clock = Clock::now(config.timezone);
-                let step = engine.step(&Event::MqttTimeout { at: clock });
+                let event = Event::MqttTimeout { at: clock };
+                if let Some(journal) = &journal {
+                    journal.event(&event);
+                }
+                let step = engine.step(&event);
 
                 if step.status.is_some() {
                     tracing::warn!(
@@ -330,12 +338,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )
                     .await;
 
-                    if let Some(log) = &raw_log {
-                        log.value("failsafe", &serde_json::json!({
-                            "decision": &decision,
-                            "world": engine.world(),
-                            "commands": outcomes,
-                        }));
+                    if let Some(journal) = &journal {
+                        journal.decision(
+                            clock.now.as_millis(),
+                            DecisionKind::Failsafe,
+                            &decision,
+                            &engine.state(),
+                            &outcomes,
+                        );
                     }
 
                     mqtt::publish_decision(&publisher_client, &ha_prefix, &decision).await;
@@ -346,8 +356,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // device fields survive even though our types drop them.
                 let fetched = match zendure_client.get_properties_raw().await {
                     Ok(body) => {
-                        if let Some(log) = &raw_log {
-                            log.raw("zendure_poll", &body);
+                        if let Some(journal) = &journal {
+                            journal.raw("zendure_poll", &body);
                         }
                         serde_json::from_str::<models::ZendureReport>(&body)
                             .map_err(|e| format!("parse error: {e}"))
@@ -438,11 +448,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Persist RTE state periodically (every poll)
                         rte_tracker.save();
 
-                        engine.step(&Event::DeviceUpdate {
+                        let event = Event::DeviceUpdate {
                             at: Clock::now(config.timezone),
                             id: device_id.clone(),
                             measurement: Measurement::Battery(state),
-                        });
+                        };
+                        if let Some(journal) = &journal {
+                            journal.event(&event);
+                        }
+                        engine.step(&event);
                     }
                     Err(e) => {
                         tracing::warn!("Failed to poll battery state: {e}");

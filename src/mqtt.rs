@@ -5,8 +5,8 @@ use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS};
 use tokio::sync::mpsc;
 
 use crate::config::Config;
+use crate::journal::Journal;
 use crate::models::{ControlDecision, CycleCounts};
-use crate::rawlog::RawLog;
 use crate::source::MeterObservation;
 use crate::source::shelly::{self, SolarPhase};
 use crate::units::{KiloWattHours, Percent, Soc, Watts};
@@ -36,7 +36,7 @@ pub async fn run_subscriber(
     solar_phase: SolarPhase,
     ha_prefix: String,
     tx: mpsc::Sender<MqttEvent>,
-    raw_log: Option<Arc<RawLog>>,
+    journal: Option<Arc<Journal>>,
 ) {
     loop {
         match eventloop.poll().await {
@@ -51,8 +51,8 @@ pub async fn run_subscriber(
                 if publish.topic == shelly_topic {
                     // Capture before parsing: a reading we fail to decode is
                     // exactly the one worth having on record.
-                    if let Some(log) = &raw_log {
-                        log.raw("shelly", &String::from_utf8_lossy(&publish.payload));
+                    if let Some(journal) = &journal {
+                        journal.raw("shelly", &String::from_utf8_lossy(&publish.payload));
                     }
                     match shelly::parse(&publish.payload, solar_phase) {
                         Ok(obs) => {

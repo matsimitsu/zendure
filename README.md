@@ -83,29 +83,46 @@ All configuration is via environment variables:
 | `TIMEZONE` | No | `UTC` | IANA timezone for cycle counting (e.g. `Europe/Amsterdam`) |
 | `RTE_STATE_PATH` | No | `/var/lib/zendure/rte_state.json` | File path for persisting round-trip efficiency state across restarts. Must survive reboots — `/tmp` is cleared, which loses the rolling 24h window |
 | `RUST_LOG` | No | — | Log level filter (e.g. `zendure=debug` for verbose output) |
-| `JOURNAL_RAW_PATH` | No | `/var/lib/zendure/raw` | Directory for the raw capture log (see below). If it can't be created, capture is disabled and the controller starts normally |
-| `JOURNAL_RETENTION_DAYS` | No | `90` | Days of raw capture to keep; older files are deleted at startup and at each daily rollover |
+| `JOURNAL_PATH` | No | `/var/lib/zendure/journal.db` | SQLite journal of events and decisions (see below). If it can't be opened, the journal is disabled and the controller starts normally |
+| `JOURNAL_RETENTION_DAYS` | No | `90` | Days of journal history to keep; older rows are deleted at startup and once a day |
 
-## Raw capture
+## Journal
 
-Every Shelly reading, every Zendure poll response, and every decision (with the
-world it was decided from and the outcome of the command sent to each device)
-is appended to a daily NDJSON file under `JOURNAL_RAW_PATH`:
+Every Shelly reading, every Zendure poll response, every event the engine folds
+in, and every decision (with the world and controller state it was decided
+from, and the outcome of the command sent to each device) is recorded to a
+SQLite database at `JOURNAL_PATH`.
+
+```sql
+sessions  (id, started_ms, version, config_json)
+events    (id, ts_ms, kind, payload_json)
+decisions (id, ts_ms, device, kind, payload_json, world_json, ctrl_state_json,
+           command, outcome, error, pre_battery_net_w)
+```
+
+`events.kind` is one of `shelly` and `zendure_poll` (payloads captured verbatim,
+*before* parsing) or `meter`, `device_update` and `mqtt_timeout` (the engine's
+own events, replayable). `decisions.kind` is `decision` or `failsafe`, with one
+row per device actuated — one today, more once a second battery or a charger
+joins the world. A decision that commanded nothing still gets a row, with a null
+`device`.
 
 ```
-{"ts_ms":1757620800123,"kind":"shelly","payload":{"total_act_power":150.5,...}}
-{"ts_ms":1757620800456,"kind":"zendure_poll","payload":{"electricLevel":64,...}}
-{"ts_ms":1757620801789,"kind":"decision","payload":{"commands":[{"device":"HEC4NENCN490270","command":"set_discharge(145W)","outcome":"ok","error":null}],"decision":{"mode":"Discharge","power_watts":145,"reason":"...","grid_power":150.5},"world":{"grid":{"total":150.5,"phases":[10.0,20.0,120.5]},"solar":0.0,"devices":{"HEC4NENCN490270":{"class":"battery","soc":64,...}}}}}
+sqlite3 /var/lib/zendure/journal.db \
+  "SELECT datetime(ts_ms/1000,'unixepoch'), device, command, outcome, pre_battery_net_w
+     FROM decisions ORDER BY ts_ms DESC LIMIT 20;"
 ```
 
-`commands` has one entry per device actuated that step — one today, more once
-a second battery or a charger joins the world. The failsafe path (an MQTT
-timeout forcing every battery idle) logs the same shape under `kind: "failsafe"`.
+Raw payloads are stored exactly as received rather than re-serialized from
+parsed types, so undocumented device fields are kept and a response we failed to
+decode is still on record. This exists so that when something looks wrong in a
+graph, the inputs that produced it still exist — recorded data cannot be
+backfilled.
 
-Payloads are stored exactly as received rather than re-serialized from parsed
-types, so undocumented device fields are kept. This exists so that when
-something looks wrong in a graph, the inputs that produced it still exist —
-recorded data cannot be backfilled. Logging failures never affect control.
+The control loop never touches SQLite: records go to a bounded queue and a
+writer thread owns the connection. If that queue ever fills, records are dropped
+and counted rather than making the decision path wait. Journal failures never
+affect control.
 
 ## Running
 

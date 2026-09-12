@@ -47,7 +47,7 @@ crossed a boundary without anyone saying what the conversion meant.
 - `src/battery.rs` — Battery state derived from device properties
 - `src/mqtt.rs` — MQTT subscriber, HA discovery, publishing
 - `src/zendure.rs` — Zendure REST API client
-- `src/rawlog.rs` — Append-only NDJSON capture of inputs and decisions
+- `src/journal.rs` — Append-only SQLite record of events, decisions and outcomes
 - `src/rte.rs` — Round-trip efficiency tracking
 
 ## Documentation

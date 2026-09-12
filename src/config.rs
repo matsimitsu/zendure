@@ -1,8 +1,10 @@
 use std::env;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::Weekday;
 use chrono_tz::Tz;
+use serde::{Deserialize, Serialize};
 
 // `SolarPhase` is the meter's own idea of how many wires it watches, so it
 // belongs to the adapter that reads them. Parsing `SOLAR_PHASE` is still this
@@ -93,6 +95,58 @@ pub struct Config {
     pub timezone: Tz,
     /// Time without MQTT updates before forcing idle (safety failsafe)
     pub mqtt_timeout: Duration,
+    /// SQLite journal of events and decisions.
+    pub journal_path: PathBuf,
+    /// How long journal rows are kept. The only thing bounding the file.
+    pub journal_retention_days: i64,
+}
+
+/// The decision-relevant half of [`Config`], recorded once per session so a
+/// replay knows what tuning produced a row.
+///
+/// Built by hand rather than derived on `Config`, and that is the point:
+/// connection settings are not decision inputs, so a fixture carrying them
+/// would be neither hermetic nor safe to pass around. Durations are whole
+/// seconds because `Duration`'s own serde emits `{"secs":_,"nanos":_}`, which
+/// reads badly next to every other bare number in the journal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionConfig {
+    pub charge_margin: PowerMargin,
+    pub discharge_margin: PowerMargin,
+    pub charge_start_threshold: GridPower,
+    pub discharge_start_threshold: GridPower,
+    pub min_mode_duration_secs: u64,
+    pub min_decision_interval_secs: u64,
+    pub idle_timeout_secs: u64,
+    pub min_idle_before_discharge_secs: u64,
+    pub cycle_warn_threshold: u32,
+    pub min_soc: Soc,
+    pub max_soc: Soc,
+    pub balance_weekday: Option<Weekday>,
+    pub solar_discharge_block_threshold: SolarPower,
+    pub mqtt_timeout_secs: u64,
+}
+
+impl Config {
+    /// The tuning knobs, without anything that says how to reach a device.
+    pub fn session(&self) -> SessionConfig {
+        SessionConfig {
+            charge_margin: self.charge_margin,
+            discharge_margin: self.discharge_margin,
+            charge_start_threshold: self.charge_start_threshold,
+            discharge_start_threshold: self.discharge_start_threshold,
+            min_mode_duration_secs: self.min_mode_duration.as_secs(),
+            min_decision_interval_secs: self.min_decision_interval.as_secs(),
+            idle_timeout_secs: self.idle_timeout.as_secs(),
+            min_idle_before_discharge_secs: self.min_idle_before_discharge.as_secs(),
+            cycle_warn_threshold: self.cycle_warn_threshold,
+            min_soc: self.min_soc,
+            max_soc: self.max_soc,
+            balance_weekday: self.balance_weekday,
+            solar_discharge_block_threshold: self.solar_discharge_block_threshold,
+            mqtt_timeout_secs: self.mqtt_timeout.as_secs(),
+        }
+    }
 }
 
 impl Config {
@@ -188,6 +242,17 @@ impl Config {
                 .parse::<Tz>()
                 .map_err(|_| "TIMEZONE must be a valid IANA timezone (e.g. Europe/Amsterdam)")?,
             mqtt_timeout: secs_from_env("MQTT_TIMEOUT", "60")?,
+            journal_path: PathBuf::from(
+                env::var("JOURNAL_PATH")
+                    .unwrap_or_else(|_| "/var/lib/zendure/journal.db".to_string()),
+            ),
+            // Strict, unlike the inline parse this replaces: that one silently
+            // fell back to its default on a typo, so a fat-fingered retention
+            // looked like it had been applied.
+            journal_retention_days: env::var("JOURNAL_RETENTION_DAYS")
+                .unwrap_or_else(|_| "90".to_string())
+                .parse::<i64>()
+                .map_err(|_| "JOURNAL_RETENTION_DAYS must be a number")?,
         })
     }
 }

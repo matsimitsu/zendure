@@ -30,9 +30,8 @@ pub enum Event {
 }
 
 impl Event {
-    /// Unused until the structured journal (step 7); kept alongside the enum
-    /// now so the fixture format doesn't need revisiting later.
-    #[allow(dead_code)]
+    /// Fills the journal's indexed `ts_ms` column — the event's own observed
+    /// time, not the moment it happened to be written.
     pub fn at(&self) -> Timestamp {
         match self {
             Event::Meter { at, .. } => at.now,
@@ -41,9 +40,8 @@ impl Event {
         }
     }
 
-    /// Unused until the structured journal (step 7). Today's strings are
-    /// `"meter"`, `"device_update"` and `"mqtt_timeout"`.
-    #[allow(dead_code)]
+    /// Fills the journal's `kind` column. Kept in step with the serde tag by
+    /// `the_serde_tag_agrees_with_kind`, since the journal uses both.
     pub fn kind(&self) -> &'static str {
         match self {
             Event::Meter { .. } => "meter",

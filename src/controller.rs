@@ -105,7 +105,6 @@ impl Controller {
 
     /// Snapshot the mutable history. Recorded with every decision, so "the state
     /// at time T" is the last decision row at or before T.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn state(&self) -> ControllerState {
         ControllerState {
             last_mode: self.last_mode,
