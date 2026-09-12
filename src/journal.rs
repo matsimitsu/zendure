@@ -3,11 +3,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Utc;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 use serde::de::IgnoredAny;
 use tokio::sync::mpsc;
 
+use crate::config::SessionConfig;
 use crate::device::{ControlPath, Outcome};
 use crate::engine::EngineState;
 use crate::event::Event;
@@ -287,6 +288,188 @@ impl Journal {
             }
         }
     }
+}
+
+/// The kinds of `events` row the engine can fold. The other two — `shelly` and
+/// `zendure_poll` — are captured upstream of the engine, before anything parsed
+/// them, and are not inputs to the fold. Feeding them to a replay would be
+/// feeding it the same reading twice, in two shapes.
+const FOLDABLE: [&str; 3] = ["meter", "device_update", "mqtt_timeout"];
+
+/// A contiguous run of the journal, ready to become a replay fixture.
+///
+/// "Contiguous" is the whole point, and is what `seq` buys: the events start
+/// exactly where the seed's snapshot was taken, with nothing between them.
+pub struct Slice {
+    /// The version that wrote the seed's session, for the fixture's provenance.
+    pub version: String,
+    /// The tuning those rows were decided under.
+    pub config: SessionConfig,
+    /// `None` when no decision was recorded at or before `from` — an empty
+    /// journal, or a range that starts before the first decision. The caller
+    /// decides what to do about it; this module will not invent a snapshot it
+    /// did not record.
+    pub seed: Option<Seed>,
+    pub events: Vec<SeqEvent>,
+    pub decisions: Vec<RecordedDecision>,
+    /// True when the events span a restart. The fixture carries one session's
+    /// tuning, so a range crossing a config change would replay part of itself
+    /// under the wrong knobs.
+    pub spans_sessions: bool,
+}
+
+/// The state a replay resumes from, and where in the file it came from.
+pub struct Seed {
+    pub at: Timestamp,
+    pub state: EngineState,
+}
+
+pub struct SeqEvent {
+    pub seq: i64,
+    pub event: Event,
+}
+
+/// What the daemon actually commanded, reduced to the two columns a replay can
+/// be diffed against.
+///
+/// `outcome` is deliberately absent: it records whether an HTTP write landed,
+/// and a replay performs no writes. Comparing it would mean comparing a replay
+/// against something it structurally cannot produce.
+pub struct RecordedDecision {
+    pub seq: i64,
+    pub device: Option<String>,
+    pub command: Option<String>,
+}
+
+/// Read everything needed to replay the run between two instants.
+///
+/// The range is anchored to a *decision*, not to `from`: a replay has to resume
+/// from a recorded snapshot, and the only snapshots are on decision rows. So the
+/// slice starts at the last decision at or before `from` and runs to `to`,
+/// which means it can begin earlier than asked. That is the honest boundary —
+/// starting at `from` with the state from some other moment would replay
+/// plausible nonsense.
+pub fn read_range(path: &Path, from: Timestamp, to: Timestamp) -> rusqlite::Result<Slice> {
+    let conn = Connection::open(path)?;
+
+    let seed = conn
+        .query_row(
+            "SELECT seq, ts_ms, state_json, session_id FROM decisions
+             WHERE ts_ms <= ?1 ORDER BY seq DESC LIMIT 1",
+            [from.as_millis()],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    // Without a seed there is nothing before `from` to resume from, so the
+    // slice is just the range itself and the caller has to build a starting
+    // state. With one, the events are everything the engine folded after the
+    // snapshot was taken — including any between the seed and `from`, which are
+    // how the run got from one to the other.
+    let (seed_seq, lower_ts) = match &seed {
+        Some((seq, ..)) => (*seq, i64::MIN),
+        None => (0, from.as_millis()),
+    };
+
+    let mut stmt = conn.prepare(&format!(
+        "SELECT seq, payload_json, session_id FROM events
+         WHERE seq > ?1 AND ts_ms >= ?2 AND ts_ms <= ?3 AND kind IN ({})
+         ORDER BY seq",
+        FOLDABLE.map(|_| "?").join(", ")
+    ))?;
+    let mut sessions = std::collections::BTreeSet::new();
+    let mut events = Vec::new();
+    let mut rows = stmt.query(rusqlite::params_from_iter(
+        [seed_seq, lower_ts, to.as_millis()]
+            .map(rusqlite::types::Value::from)
+            .into_iter()
+            .chain(FOLDABLE.map(|k| rusqlite::types::Value::from(k.to_string()))),
+    ))?;
+    while let Some(row) = rows.next()? {
+        let payload: String = row.get(1)?;
+        match serde_json::from_str(&payload) {
+            Ok(event) => events.push(SeqEvent {
+                seq: row.get(0)?,
+                event,
+            }),
+            // A row this build cannot parse is a row from another build. Loud
+            // and skipped beats aborting the whole export over one of them.
+            Err(e) => eprintln!(
+                "skipping unreadable event at seq {}: {e}",
+                row.get::<_, i64>(0)?
+            ),
+        }
+        sessions.insert(row.get::<_, i64>(2)?);
+    }
+    drop(rows);
+    drop(stmt);
+
+    let mut stmt = conn.prepare(
+        "SELECT seq, device, command FROM decisions
+         WHERE seq > ?1 AND ts_ms >= ?2 AND ts_ms <= ?3 ORDER BY seq",
+    )?;
+    let decisions = stmt
+        .query_map([seed_seq, lower_ts, to.as_millis()], |row| {
+            Ok(RecordedDecision {
+                seq: row.get(0)?,
+                device: row.get(1)?,
+                command: row.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    // The session that governs the fixture is the one the seed was written in;
+    // without a seed, the one the first event belongs to. With neither — an
+    // empty range — any session will do, because the caller is about to be told
+    // there is nothing to replay and the tuning will never be used.
+    let session_id = match &seed {
+        Some((.., session_id)) => Some(*session_id),
+        None => sessions.iter().next().copied(),
+    };
+    let (version, config_json) = match session_id {
+        Some(id) => conn.query_row(
+            "SELECT version, config_json FROM sessions WHERE id = ?1",
+            [id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ),
+        None => conn.query_row(
+            "SELECT version, config_json FROM sessions ORDER BY id DESC LIMIT 1",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ),
+    }?;
+    let config: SessionConfig = serde_json::from_str(&config_json).map_err(|e| {
+        rusqlite::Error::InvalidParameterName(format!("session config unreadable: {e}"))
+    })?;
+
+    let seed = seed
+        .map(|(_, at, state_json, _)| {
+            serde_json::from_str(&state_json).map(|state| Seed {
+                at: Timestamp::from_millis(at),
+                state,
+            })
+        })
+        .transpose()
+        .map_err(|e| {
+            rusqlite::Error::InvalidParameterName(format!("seed state unreadable: {e}"))
+        })?;
+
+    Ok(Slice {
+        version,
+        config,
+        seed,
+        events,
+        decisions,
+        spans_sessions: sessions.len() > 1,
+    })
 }
 
 /// Serialize one value for a column, naming it if that fails.

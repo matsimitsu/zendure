@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 use crate::source::shelly::SolarPhase;
 use crate::units::{GridPower, PowerMargin, RetentionDays, Soc, SolarPower};
 
+/// Where the journal lives unless `JOURNAL_PATH` says otherwise. Named because
+/// the export tool has to default to the same file the daemon writes, and two
+/// copies of a path string would eventually stop being the same path.
+pub const DEFAULT_JOURNAL_PATH: &str = "/var/lib/zendure/journal.db";
+
 fn parse_weekday(s: &str) -> Result<Weekday, String> {
     match s.trim().to_ascii_lowercase().as_str() {
         "mon" | "monday" => Ok(Weekday::Mon),
@@ -155,6 +160,36 @@ pub struct SessionConfig {
     pub balance_weekday: Option<Weekday>,
     pub solar_discharge_block_threshold: SolarPower,
     pub mqtt_timeout_secs: u64,
+}
+
+impl SessionConfig {
+    /// The permissive tuning tests decide under: no decision-interval cooldown,
+    /// generous margins, no balance day.
+    ///
+    /// One list, shared by `Controller::test_default` and by any test that
+    /// needs a fixture's `session.config` — which is the point. A replay is
+    /// only a fair comparison if it runs the same knobs the recording did, and
+    /// two hand-written copies of fourteen numbers would eventually disagree
+    /// about one of them and make a passing `--verify` mean nothing.
+    #[cfg(test)]
+    pub(crate) fn test_default() -> Self {
+        Self {
+            charge_margin: PowerMargin::new(50),
+            discharge_margin: PowerMargin::new(5),
+            charge_start_threshold: GridPower(-100.0),
+            discharge_start_threshold: GridPower(0.0),
+            min_mode_duration_secs: 10,
+            min_decision_interval_secs: 0,
+            idle_timeout_secs: 5 * 60,
+            min_idle_before_discharge_secs: 300,
+            cycle_warn_threshold: 200,
+            min_soc: Soc::new(10),
+            max_soc: Soc::new(100),
+            balance_weekday: None,
+            solar_discharge_block_threshold: SolarPower::ZERO,
+            mqtt_timeout_secs: 120,
+        }
+    }
 }
 
 impl Config {
@@ -320,8 +355,7 @@ impl Config {
                 .map_err(|_| "TIMEZONE must be a valid IANA timezone (e.g. Europe/Amsterdam)")?,
             mqtt_timeout: secs_from_env("MQTT_TIMEOUT", "60")?,
             journal_path: PathBuf::from(
-                env::var("JOURNAL_PATH")
-                    .unwrap_or_else(|_| "/var/lib/zendure/journal.db".to_string()),
+                env::var("JOURNAL_PATH").unwrap_or_else(|_| DEFAULT_JOURNAL_PATH.to_string()),
             ),
             journal_retention_days: retention_from_env(),
         })

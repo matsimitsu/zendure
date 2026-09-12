@@ -22,6 +22,20 @@ Smart controller for the Zendure AC 2400+ home battery. Reads net grid power fro
 6. **Tracks round-trip efficiency** (RTE) — measures charge vs discharge energy, persisted to disk
 7. **Publishes to MQTT** — HomeAssistant auto-discovers all sensors
 
+## Running it
+
+With no arguments, `zendure` runs the controller — which is what the systemd
+unit does and what it has always meant. Two offline subcommands read the journal
+instead, and read **no configuration at all**, so they work against a copied
+database on a machine with no broker and no battery:
+
+```
+zendure export --from <when> --to <when> [--db <path>] [--out <file>]
+zendure replay <fixture> [--verify] [--set <knob>=<value>]...
+```
+
+`<when>` is unix milliseconds or RFC 3339. See [Replay](#replay) below.
+
 ## Configuration
 
 All configuration is via environment variables:
@@ -114,7 +128,11 @@ restarting per session, and leaves gaps where a write failed or a prune deleted.
 
 `events.kind` is one of `shelly` and `zendure_poll` (payloads captured verbatim,
 *before* parsing) or `meter`, `device_update` and `mqtt_timeout` (the engine's
-own events, replayable). `decisions.kind` is `decision` or `failsafe`, with one
+own events, replayable). The first row of every session is a `device_update`
+carrying the startup poll, so the world a replay rebuilds from events is the same
+world the controller decided against from its first reading.
+
+`decisions.kind` is `decision` or `failsafe`, with one
 row per device actuated — one today, more once a second battery or a charger
 joins the world. A decision that commanded nothing still gets a row, with a null
 `device`.
@@ -146,6 +164,56 @@ Dropped records and failed writes are both counted and warned about (on the
 first and then at powers of two, so a wedged writer cannot flood the log), and
 summarised on shutdown. `RUST_LOG` overrides the default `zendure=info` filter
 outright, so `RUST_LOG=zendure=debug` shows the per-record detail.
+
+## Replay
+
+A journal is only worth keeping if you can ask it questions. `export` turns a
+stretch of it into a self-contained fixture, and `replay` runs that fixture's
+events back through the decision engine.
+
+```
+zendure export --from 2026-09-12T19:50:00Z --to 2026-09-12T20:10:00Z \
+  --db ./journal.db --out incident.json
+zendure replay incident.json --verify
+```
+
+`--verify` compares the commands the engine produces now against the ones the
+daemon actually issued, and exits non-zero if they differ, naming the first frame
+that diverged. That is the question a refactor raises — *did this change
+behaviour?* — and the answer is a diff of decisions, not of some aggregate
+metric. Without `--verify` it just prints the run:
+
+```
+1789228429227ms: —
+1789228429229ms: TESTSN set_idle
+```
+
+One line per event, with an em dash where the event decided nothing, and the
+device named on every command so a fleet that was only partly commanded cannot
+look like one that was commanded fully.
+
+`--set <knob>=<value>` changes one tuning knob before replaying, for asking what
+a different setting would have done — `zendure replay incident.json --set
+min_soc=40`. The knobs are the ones in `sessions.config_json`, and an unknown
+name is an error rather than a silent no-op.
+
+**A fixture is hermetic.** It carries the tuning it was decided under, the engine
+snapshot to resume from, and the events — and nothing about how to reach a broker
+or a battery, because none of those are decision inputs. Both subcommands read no
+environment variables at all, so a fixture can be copied off the box and replayed
+anywhere.
+
+**The range is anchored to a decision, not to `--from`.** A replay has to resume
+from a recorded snapshot, and those live on decision rows, so the fixture starts
+at the last decision at or before `--from` and can therefore begin a little
+earlier than asked.
+
+**This is decision diff, not simulation.** The recorded meter readings were
+caused in part by the controller's own output, so replaying *different* logic
+against them answers a question about a world that logic would have changed.
+Simulating forward needs a battery model and the old controller removed from the
+recording; `pre_battery_net_w` is stored so that stays possible, but nothing here
+does it.
 
 ## Running
 

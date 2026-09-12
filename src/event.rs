@@ -30,14 +30,26 @@ pub enum Event {
 }
 
 impl Event {
+    /// The whole clock the event was captured with — hour, weekday and day
+    /// ordinal as well as the instant.
+    ///
+    /// Every variant carries one, because the controller's time-dependent
+    /// branches read all four and none of them may be re-derived at replay
+    /// time. A replay that has to build a starting controller state from
+    /// scratch takes its day ordinal from here, which is the only place in a
+    /// fixture that knows one.
+    pub fn clock(&self) -> &Clock {
+        match self {
+            Event::Meter { at, .. } => at,
+            Event::DeviceUpdate { at, .. } => at,
+            Event::MqttTimeout { at } => at,
+        }
+    }
+
     /// Fills the journal's indexed `ts_ms` column — the event's own observed
     /// time, not the moment it happened to be written.
     pub fn at(&self) -> Timestamp {
-        match self {
-            Event::Meter { at, .. } => at.now,
-            Event::DeviceUpdate { at, .. } => at.now,
-            Event::MqttTimeout { at } => at.now,
-        }
+        self.clock().now
     }
 
     /// Fills the journal's `kind` column. Kept in step with the serde tag by
@@ -48,6 +60,64 @@ impl Event {
             Event::DeviceUpdate { .. } => "device_update",
             Event::MqttTimeout { .. } => "mqtt_timeout",
         }
+    }
+}
+
+/// A shared event stream for tests that need a *run* rather than one event.
+///
+/// Lives next to `Event` for the same reason `Clock::test_at` lives next to
+/// `Clock`: two modules need the same journey and a second copy would be a
+/// second thing to keep in step. Its constants are public for the same reason —
+/// a caller building the world this journey is folded into has to agree with it
+/// on the device id and the day, or the midnight reset fires on the first step.
+#[cfg(test)]
+pub(crate) mod journey {
+    use super::*;
+    use crate::battery::BatteryState;
+    use crate::units::{GridPower, Soc};
+
+    pub(crate) const NOW_MS: i64 = 1_000_000_000;
+    pub(crate) const DAY: u32 = 100;
+    pub(crate) const BATTERY_ID: &str = "test-battery";
+
+    pub(crate) fn clock_at(secs: i64) -> Clock {
+        Clock {
+            day_ordinal: DAY,
+            ..Clock::test_at(NOW_MS + secs * 1000)
+        }
+    }
+
+    /// A sequence chosen to write every field of the engine's snapshot: swings
+    /// across both start thresholds (mode changes, cooldown stamps, transition
+    /// counters), a device update, and a timeout/resume pair, so a snapshot
+    /// taken between them has to carry `mqtt_timed_out` too.
+    pub(crate) fn events() -> Vec<Event> {
+        let meter_at = |secs, total| Event::Meter {
+            at: clock_at(secs),
+            grid: MeterReading::total_only(GridPower(total)),
+            solar: SolarPower::new(0.0),
+        };
+        vec![
+            meter_at(0, -500.0),
+            meter_at(20, -800.0),
+            meter_at(40, 300.0),
+            // Deliberately *not* the same battery a fixture world starts with:
+            // an update that changes nothing leaves a restored world
+            // indistinguishable from a fresh one, and the snapshot's `world`
+            // stops being under test.
+            Event::DeviceUpdate {
+                at: clock_at(60),
+                id: DeviceId::new(BATTERY_ID),
+                measurement: Measurement::Battery(BatteryState {
+                    soc: Soc::new(81),
+                    ..BatteryState::test_sample()
+                }),
+            },
+            Event::MqttTimeout { at: clock_at(80) },
+            meter_at(100, 250.0),
+            meter_at(120, -600.0),
+            meter_at(140, 400.0),
+        ]
     }
 }
 

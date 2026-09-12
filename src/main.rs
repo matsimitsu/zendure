@@ -1,5 +1,6 @@
 mod allocate;
 mod battery;
+mod cli;
 mod clock;
 mod command;
 mod config;
@@ -10,6 +11,7 @@ mod event;
 mod journal;
 mod models;
 mod mqtt;
+mod replay;
 mod rte;
 mod source;
 mod units;
@@ -137,8 +139,81 @@ async fn publish_poll_telemetry(
     rte_tracker.save();
 }
 
+/// `zendure export` — a slice of the journal as a replay fixture.
+///
+/// Reads no configuration: a fixture carries the tuning it was decided under,
+/// recorded in the journal's own session row, and nothing about how to reach a
+/// device. That is what makes this runnable against a copied database on a
+/// laptop with no broker in sight.
+fn export(
+    db: &std::path::Path,
+    from: units::Timestamp,
+    to: units::Timestamp,
+    out: Option<&std::path::Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let slice = journal::read_range(db, from, to)?;
+    let fixture = replay::from_slice(slice)?;
+    let json = serde_json::to_string_pretty(&fixture)?;
+
+    match out {
+        Some(path) => {
+            std::fs::write(path, json + "\n")?;
+            eprintln!(
+                "wrote {} events to {} (seeded at {}ms)",
+                fixture.events.len(),
+                path.display(),
+                fixture.seed.at_ms
+            );
+        }
+        None => println!("{json}"),
+    }
+    Ok(())
+}
+
+/// `zendure replay` — the same events through the same fold, printed.
+fn run_replay(
+    path: &std::path::Path,
+    verify: bool,
+    overrides: &[(String, String)],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fixture: replay::Fixture = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+    let frames = replay::run(&fixture, overrides)?;
+
+    println!("{}", replay::render(&frames));
+
+    if verify {
+        if !overrides.is_empty() {
+            // Verifying an overridden replay asks whether a controller tuned
+            // differently would have done the same thing, which is not what
+            // --verify means and is nearly always "no".
+            eprintln!("warning: --verify against --set overrides compares different tuning");
+        }
+        replay::verify(&fixture, &frames)?;
+        eprintln!("verified: {} frames match the recording", frames.len());
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    match cli::parse(std::env::args().skip(1))? {
+        // Falls through to the controller below. No arguments has always meant
+        // "run", and that is how the service invokes it.
+        cli::Invocation::Daemon => {}
+        cli::Invocation::Help => {
+            print!("{}", cli::HELP);
+            return Ok(());
+        }
+        cli::Invocation::Export { from, to, db, out } => {
+            return export(&db, from, to, out.as_deref());
+        }
+        cli::Invocation::Replay {
+            fixture,
+            verify,
+            overrides,
+        } => return run_replay(&fixture, verify, &overrides),
+    }
+
     // `RUST_LOG` wins outright when it is set. It used to be merged with a
     // hard-coded `zendure=info`, and `add_directive` *replaces* a directive with
     // the same target rather than merging — so `RUST_LOG=zendure=debug` was
@@ -255,18 +330,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await;
     });
 
-    // Seed the world from the startup poll, so the first meter reading already
-    // has a battery to decide about. A failure to read it fails startup above,
-    // which is why `decide`'s `None` branch is unreachable in production.
-    let mut world = World::new();
-    world.observe_device(device_id.clone(), Measurement::Battery(battery_state));
-
     let mqtt_timeout = config.mqtt_timeout;
     let mut engine = Engine::new(
         controller::Controller::from_config(&config, &Clock::now(config.timezone)),
-        world,
+        World::new(),
         mqtt_timeout,
     );
+
+    // Seed the world from the startup poll, so the first meter reading already
+    // has a battery to decide about. A failure to read it fails startup above,
+    // which is why `decide`'s `None` branch is unreachable in production.
+    //
+    // As an event through the fold, and journalled like any other, rather than
+    // written into the world directly. Reaching past the engine was the one
+    // place the world came from something the journal had no record of — which
+    // made the opening minutes of every session unreplayable, since a replay
+    // rebuilding the world from events would find no battery and decide
+    // nothing. `step` on a `DeviceUpdate` only folds it in and returns an empty
+    // `Step`, so nothing else about startup changes.
+    let startup = Event::DeviceUpdate {
+        at: Clock::now(config.timezone),
+        id: device_id.clone(),
+        measurement: Measurement::Battery(battery_state),
+    };
+    journal.event(&startup);
+    engine.step(&startup);
 
     let rte_state_path = std::path::PathBuf::from(
         std::env::var("RTE_STATE_PATH")

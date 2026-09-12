@@ -185,12 +185,9 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::command::Command;
+    use crate::event::journey::{BATTERY_ID, DAY, NOW_MS};
     use crate::units::{GridPower, Soc, SolarPower};
     use crate::world::{DeviceId, Measurement};
-
-    const NOW_MS: i64 = 1_000_000_000;
-    const DAY: u32 = 100;
-    const BATTERY_ID: &str = "test-battery";
 
     fn clock() -> Clock {
         // `DAY` spelled out rather than relying on the shared fixture happening
@@ -391,46 +388,6 @@ mod tests {
     /// A clock `secs` after `NOW_MS`, so a sequence can actually advance the
     /// controller's timers. `clock()` alone holds time still, which is fine for
     /// single-step tests and useless for a fold.
-    fn clock_at(secs: i64) -> Clock {
-        Clock {
-            day_ordinal: DAY,
-            ..Clock::test_at(NOW_MS + secs * 1000)
-        }
-    }
-
-    /// A sequence chosen to write every field of the snapshot: swings across
-    /// both start thresholds (mode changes, cooldown stamps, transition
-    /// counters), a device update, and a timeout/resume pair either side of the
-    /// split point so `mqtt_timed_out` has to survive it too.
-    fn journey() -> Vec<Event> {
-        let meter_at = |secs, total| Event::Meter {
-            at: clock_at(secs),
-            grid: meter(total),
-            solar: SolarPower::new(0.0),
-        };
-        vec![
-            meter_at(0, -500.0),
-            meter_at(20, -800.0),
-            meter_at(40, 300.0),
-            // Deliberately *not* the same battery the fixture world starts
-            // with: an update that changes nothing leaves the restored world
-            // indistinguishable from a fresh one, and the snapshot's `world`
-            // stops being under test.
-            Event::DeviceUpdate {
-                at: clock_at(60),
-                id: DeviceId::new(BATTERY_ID),
-                measurement: Measurement::Battery(BatteryState {
-                    soc: Soc::new(81),
-                    ..battery()
-                }),
-            },
-            Event::MqttTimeout { at: clock_at(80) },
-            meter_at(100, 250.0),
-            meter_at(120, -600.0),
-            meter_at(140, 400.0),
-        ]
-    }
-
     /// Split after the timeout, so the second half opens with the engine
     /// latched into the failsafe and the first meter reading after the boundary
     /// has to produce the `"operational"` transition.
@@ -448,7 +405,7 @@ mod tests {
     /// is what proves `mqtt_timed_out` came across with everything else.
     #[test]
     fn a_restored_engine_resumes_the_fold_exactly() {
-        let events = journey();
+        let events = crate::event::journey::events();
 
         let mut continuous = engine();
         let expected: Vec<Step> = events.iter().map(|e| continuous.step(e)).collect();
@@ -485,7 +442,7 @@ mod tests {
     /// exercising any state and the equivalence would be vacuous.
     #[test]
     fn the_same_journey_diverges_without_the_snapshot() {
-        let events = journey();
+        let events = crate::event::journey::events();
 
         let mut continuous = engine();
         let expected: Vec<Step> = events.iter().map(|e| continuous.step(e)).collect();

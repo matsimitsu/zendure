@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::battery::BatteryState;
 use crate::clock::Clock;
-use crate::config::Config;
+use crate::config::{Config, SessionConfig};
 use crate::models::{ControlDecision, ControlMode, CycleCounts};
 use crate::units::{Elapsed, GridPower, PowerMargin, Setpoint, Soc, SolarPower, Timestamp};
 use crate::world::World;
@@ -63,8 +63,22 @@ pub struct Controller {
 
 impl Controller {
     pub fn from_config(config: &Config, clock: &Clock) -> Self {
-        let min_mode_duration = config.min_mode_duration;
-        let min_decision_interval = config.min_decision_interval;
+        Self::from_session(&config.session(), clock)
+    }
+
+    /// Build from the tuning half alone — the same thirteen knobs, taken from
+    /// the shape the journal records and a fixture carries.
+    ///
+    /// This is what makes "a fixture is hermetic" true rather than asserted. A
+    /// replay has no `Config` and must not need one: `SessionConfig` is
+    /// *defined* as the fields a decision depends on, so if the controller can
+    /// be built from it, nothing outside it can be reaching the decision. Going
+    /// through here from `from_config` as well means the two can't drift —
+    /// there is one list, and `Config::session` already makes adding to it a
+    /// compile error.
+    pub fn from_session(session: &SessionConfig, clock: &Clock) -> Self {
+        let min_mode_duration = Duration::from_secs(session.min_mode_duration_secs);
+        let min_decision_interval = Duration::from_secs(session.min_decision_interval_secs);
         Self {
             state: ControllerState {
                 last_mode: ControlMode::Idle,
@@ -78,17 +92,17 @@ impl Controller {
             },
             min_mode_duration,
             min_decision_interval,
-            charge_margin: config.charge_margin,
-            discharge_margin: config.discharge_margin,
-            charge_start_threshold: config.charge_start_threshold,
-            discharge_start_threshold: config.discharge_start_threshold,
-            idle_timeout: config.idle_timeout,
-            min_idle_before_discharge: config.min_idle_before_discharge,
-            cycle_warn_threshold: config.cycle_warn_threshold,
-            min_soc: config.min_soc,
-            max_soc: config.max_soc,
-            balance_weekday: config.balance_weekday,
-            solar_discharge_block_threshold: config.solar_discharge_block_threshold,
+            charge_margin: session.charge_margin,
+            discharge_margin: session.discharge_margin,
+            charge_start_threshold: session.charge_start_threshold,
+            discharge_start_threshold: session.discharge_start_threshold,
+            idle_timeout: Duration::from_secs(session.idle_timeout_secs),
+            min_idle_before_discharge: Duration::from_secs(session.min_idle_before_discharge_secs),
+            cycle_warn_threshold: session.cycle_warn_threshold,
+            min_soc: session.min_soc,
+            max_soc: session.max_soc,
+            balance_weekday: session.balance_weekday,
+            solar_discharge_block_threshold: session.solar_discharge_block_threshold,
         }
     }
 
@@ -120,31 +134,20 @@ impl Controller {
     #[cfg(test)]
     pub(crate) fn test_default(now_ms: i64, day_ordinal: u32) -> Self {
         let now = Timestamp::from_millis(now_ms);
-        Controller {
-            state: ControllerState {
-                last_mode: ControlMode::Idle,
-                last_active_mode: None,
-                last_mode_change: now - Elapsed::of(Duration::from_secs(60)),
-                last_decision: now - Elapsed::of(Duration::from_secs(60)),
-                last_idle_start: None,
-                daily_transitions: 0,
-                daily_cooldown_suppressions: 0,
-                last_cycle_reset_day: day_ordinal,
-            },
-            min_mode_duration: Duration::from_secs(10),
-            min_decision_interval: Duration::ZERO,
-            charge_margin: PowerMargin::new(50),
-            discharge_margin: PowerMargin::new(5),
-            charge_start_threshold: GridPower(-100.0),
-            discharge_start_threshold: GridPower(0.0),
-            idle_timeout: Duration::from_secs(5 * 60),
-            min_idle_before_discharge: Duration::from_secs(300),
-            cycle_warn_threshold: 200,
-            min_soc: Soc::new(10),
-            max_soc: Soc::new(100),
-            balance_weekday: None,
-            solar_discharge_block_threshold: SolarPower::ZERO,
-        }
+        let clock = Clock {
+            day_ordinal,
+            ..Clock::test_at(now_ms)
+        };
+        // Through `from_session` so the knobs come from the one list a fixture
+        // would also carry. Only the history differs from a freshly started
+        // controller, and it differs deliberately: an hour of slack on both
+        // cooldowns and no idle start, so a test's first event is never
+        // suppressed by timing it did not ask about.
+        let mut controller = Self::from_session(&SessionConfig::test_default(), &clock);
+        controller.state.last_mode_change = now - Elapsed::of(Duration::from_secs(60));
+        controller.state.last_decision = now - Elapsed::of(Duration::from_secs(60));
+        controller.state.last_idle_start = None;
+        controller
     }
 
     /// Returns `None` if the minimum decision interval hasn't elapsed, or if there
