@@ -159,22 +159,69 @@ pub struct SessionConfig {
 
 impl Config {
     /// The tuning knobs, without anything that says how to reach a device.
+    ///
+    /// Destructures `self` exhaustively — no `..` — so that adding a field to
+    /// `Config` is a compile error here rather than a knob that silently stops
+    /// being recorded. That failure would be invisible in the worst way: the
+    /// thing you open `config_json` to find out would be the thing missing from
+    /// it. `Controller::restore` takes the same precaution for the same reason.
+    ///
+    /// Everything bound to `_` is deliberate, and the rule is one line long:
+    /// a fixture has to be hermetic, so nothing that says how to *reach* a
+    /// device belongs in it. `timezone` and `solar_phase` are the two that look
+    /// like tuning and are not — every journaled `Event` already carries a
+    /// resolved `Clock` and an already-normalised solar figure, so a replay
+    /// never re-derives either.
     pub fn session(&self) -> SessionConfig {
+        let Config {
+            // Connection settings: how to reach things, not what to decide.
+            mqtt_host: _,
+            mqtt_port: _,
+            mqtt_username: _,
+            mqtt_password: _,
+            mqtt_client_id: _,
+            zendure_ip: _,
+            zendure_sn: _,
+            shelly_topic: _,
+            ha_publish_prefix: _,
+            zendure_poll_interval: _,
+            journal_path: _,
+            journal_retention_days: _,
+            // Resolved into every event before it is journaled.
+            timezone: _,
+            solar_phase: _,
+            // The decision knobs.
+            charge_margin,
+            discharge_margin,
+            charge_start_threshold,
+            discharge_start_threshold,
+            min_mode_duration,
+            min_decision_interval,
+            idle_timeout,
+            cycle_warn_threshold,
+            min_soc,
+            max_soc,
+            balance_weekday,
+            solar_discharge_block_threshold,
+            min_idle_before_discharge,
+            mqtt_timeout,
+        } = self;
+
         SessionConfig {
-            charge_margin: self.charge_margin,
-            discharge_margin: self.discharge_margin,
-            charge_start_threshold: self.charge_start_threshold,
-            discharge_start_threshold: self.discharge_start_threshold,
-            min_mode_duration_secs: self.min_mode_duration.as_secs(),
-            min_decision_interval_secs: self.min_decision_interval.as_secs(),
-            idle_timeout_secs: self.idle_timeout.as_secs(),
-            min_idle_before_discharge_secs: self.min_idle_before_discharge.as_secs(),
-            cycle_warn_threshold: self.cycle_warn_threshold,
-            min_soc: self.min_soc,
-            max_soc: self.max_soc,
-            balance_weekday: self.balance_weekday,
-            solar_discharge_block_threshold: self.solar_discharge_block_threshold,
-            mqtt_timeout_secs: self.mqtt_timeout.as_secs(),
+            charge_margin: *charge_margin,
+            discharge_margin: *discharge_margin,
+            charge_start_threshold: *charge_start_threshold,
+            discharge_start_threshold: *discharge_start_threshold,
+            min_mode_duration_secs: min_mode_duration.as_secs(),
+            min_decision_interval_secs: min_decision_interval.as_secs(),
+            idle_timeout_secs: idle_timeout.as_secs(),
+            min_idle_before_discharge_secs: min_idle_before_discharge.as_secs(),
+            cycle_warn_threshold: *cycle_warn_threshold,
+            min_soc: *min_soc,
+            max_soc: *max_soc,
+            balance_weekday: *balance_weekday,
+            solar_discharge_block_threshold: *solar_discharge_block_threshold,
+            mqtt_timeout_secs: mqtt_timeout.as_secs(),
         }
     }
 }
@@ -278,5 +325,135 @@ impl Config {
             ),
             journal_retention_days: retention_from_env(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// A config with every connection setting set to something unmistakable, so
+    /// a leak into `SessionConfig` is visible rather than plausible.
+    fn config() -> Config {
+        Config {
+            mqtt_host: "SECRET-HOST".to_string(),
+            mqtt_port: 1883,
+            mqtt_username: Some("SECRET-USER".to_string()),
+            mqtt_password: Some("SECRET-PASSWORD".to_string()),
+            mqtt_client_id: "SECRET-CLIENT".to_string(),
+            zendure_ip: "SECRET-IP".to_string(),
+            zendure_sn: "SECRET-SERIAL".to_string(),
+            shelly_topic: "SECRET-TOPIC".to_string(),
+            ha_publish_prefix: "SECRET-PREFIX".to_string(),
+            zendure_poll_interval: Duration::from_secs(30),
+            charge_margin: PowerMargin::new(50),
+            discharge_margin: PowerMargin::new(5),
+            charge_start_threshold: GridPower(-100.0),
+            discharge_start_threshold: GridPower(0.0),
+            min_mode_duration: Duration::from_secs(10),
+            min_decision_interval: Duration::from_secs(5),
+            idle_timeout: Duration::from_secs(300),
+            cycle_warn_threshold: 200,
+            min_soc: Soc::new(10),
+            max_soc: Soc::new(100),
+            balance_weekday: Some(Weekday::Mon),
+            solar_phase: SolarPhase::A,
+            solar_discharge_block_threshold: SolarPower::new(0.0),
+            min_idle_before_discharge: Duration::from_secs(300),
+            timezone: Tz::UTC,
+            mqtt_timeout: Duration::from_secs(60),
+            journal_path: PathBuf::from("/SECRET/journal.db"),
+            journal_retention_days: RetentionDays::new(90).unwrap(),
+        }
+    }
+
+    /// **A fixture has to be hermetic.** `config_json` is written into an
+    /// append-only journal and is meant to be handed around — into a replay, a
+    /// bug report, a test case. Anything describing how to reach a device makes
+    /// that unsafe, and no amount of care at the call site fixes a leak once the
+    /// rows are written.
+    #[test]
+    fn the_session_config_carries_no_connection_settings() {
+        let json = serde_json::to_string(&config().session()).unwrap();
+        for secret in [
+            "SECRET-HOST",
+            "SECRET-USER",
+            "SECRET-PASSWORD",
+            "SECRET-CLIENT",
+            "SECRET-IP",
+            "SECRET-SERIAL",
+            "SECRET-TOPIC",
+            "SECRET-PREFIX",
+            "/SECRET/journal.db",
+        ] {
+            assert!(!json.contains(secret), "{secret} leaked into {json}");
+        }
+    }
+
+    /// Pins the exact bytes, the way `world.rs` and `command_tests.rs` do.
+    ///
+    /// Two things at once: durations are bare seconds rather than serde's
+    /// `{"secs":_,"nanos":_}`, so the journal reads as numbers throughout; and
+    /// the key set is fixed, so a knob quietly dropped from `session()` fails
+    /// here even if `Config` still has it.
+    #[test]
+    fn the_session_config_serializes_to_the_exact_pinned_shape() {
+        assert_eq!(
+            serde_json::to_string(&config().session()).unwrap(),
+            r#"{"charge_margin":50,"discharge_margin":5,"charge_start_threshold":-100.0,"discharge_start_threshold":0.0,"min_mode_duration_secs":10,"min_decision_interval_secs":5,"idle_timeout_secs":300,"min_idle_before_discharge_secs":300,"cycle_warn_threshold":200,"min_soc":10,"max_soc":100,"balance_weekday":"Mon","solar_discharge_block_threshold":0.0,"mqtt_timeout_secs":60}"#
+        );
+    }
+
+    /// It round-trips, so a replay can read back the tuning it was recorded
+    /// with rather than re-deriving it from the environment it happens to run in.
+    #[test]
+    fn the_session_config_round_trips() {
+        let session = config().session();
+        let json = serde_json::to_string(&session).unwrap();
+        assert_eq!(session, serde_json::from_str(&json).unwrap());
+    }
+
+    /// The knobs that reach the controller are the knobs that get recorded.
+    /// `Controller::from_config` reads thirteen fields; `SessionConfig` carries
+    /// those plus `mqtt_timeout`, which `Engine` holds. Stated as a value check
+    /// rather than a comment so it cannot quietly stop being true.
+    #[test]
+    fn the_session_config_matches_what_the_controller_was_built_with() {
+        let config = config();
+        let session = config.session();
+
+        assert_eq!(session.charge_margin, config.charge_margin);
+        assert_eq!(session.discharge_margin, config.discharge_margin);
+        assert_eq!(
+            session.charge_start_threshold,
+            config.charge_start_threshold
+        );
+        assert_eq!(
+            session.discharge_start_threshold,
+            config.discharge_start_threshold
+        );
+        assert_eq!(session.min_soc, config.min_soc);
+        assert_eq!(session.max_soc, config.max_soc);
+        assert_eq!(session.balance_weekday, config.balance_weekday);
+        assert_eq!(session.cycle_warn_threshold, config.cycle_warn_threshold);
+        assert_eq!(
+            session.solar_discharge_block_threshold,
+            config.solar_discharge_block_threshold
+        );
+        assert_eq!(
+            session.min_mode_duration_secs,
+            config.min_mode_duration.as_secs()
+        );
+        assert_eq!(
+            session.min_decision_interval_secs,
+            config.min_decision_interval.as_secs()
+        );
+        assert_eq!(session.idle_timeout_secs, config.idle_timeout.as_secs());
+        assert_eq!(
+            session.min_idle_before_discharge_secs,
+            config.min_idle_before_discharge.as_secs()
+        );
+        assert_eq!(session.mqtt_timeout_secs, config.mqtt_timeout.as_secs());
     }
 }
