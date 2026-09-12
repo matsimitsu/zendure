@@ -288,6 +288,14 @@ impl BatteryPower {
     pub fn as_f64(self) -> f64 {
         f64::from(self.0)
     }
+
+    /// The flow as a plain signed [`Watts`], for a caller that wants the
+    /// whole number back rather than split by direction — `simulation.rs`
+    /// integrating it with [`WattHours::integrate`], which has no notion of
+    /// "charging" or "discharging", only a signed rate.
+    pub fn into_watts(self) -> Watts {
+        Watts(self.0)
+    }
 }
 
 /// Saturating, exactly as `Watts`'s `Add` is: two packs cannot come near
@@ -432,6 +440,30 @@ impl Soc {
         f64::from(self.0.saturating_sub(floor.0)) / 100.0
     }
 
+    /// A state of charge from `stored / capacity`, for `simulation.rs` reading
+    /// its integrated energy back out as a percentage. `Soc` has no
+    /// fractional representation, so this rounds to the nearest whole percent
+    /// and routes through [`Soc::new`] — the same clamp every other
+    /// constructor here goes through, which is what makes a capacity rounding
+    /// error or a stored value that has drifted a hair below zero land at 0 or
+    /// 100 instead of panicking or wrapping.
+    ///
+    /// NaN — a zero-capacity pack computing `0.0 / 0.0` — maps to
+    /// [`Soc::ZERO`] rather than being handed to the rounding and the cast
+    /// below: `NaN as u32` is a defined-but-meaningless `0` in Rust today, and
+    /// this says that explicitly instead of leaning on it.
+    pub fn from_fraction(fraction: f64) -> Self {
+        if fraction.is_nan() {
+            return Soc::ZERO;
+        }
+        // The cast saturates rather than wraps (Rust's `as` has done so for
+        // float-to-int since the 2018 edition), so a negative fraction (stored
+        // dipping a hair below zero from floating-point error) or one above 1
+        // (a rounding blip past full) lands at 0 or `u32::MAX` and `Soc::new`
+        // clamps it the rest of the way to the valid range.
+        Soc::new((fraction * 100.0).round() as u32)
+    }
+
     pub fn get(self) -> u32 {
         self.0
     }
@@ -452,6 +484,47 @@ impl Percent {
     /// As a 0.0–1.0 factor.
     pub fn fraction(self) -> f64 {
         self.0 / 100.0
+    }
+}
+
+/// A round-trip conversion efficiency, in percent, clamped to 1–100.
+///
+/// Not a bare [`Percent`]: `simulation.rs` divides by this to turn a
+/// discharge's stored-energy loss back into the meter-side power that
+/// produced it, and a `0` would mint infinite energy out of a battery that
+/// gave up nothing. Clamping the low end at 1 rather than rejecting keeps it
+/// a peer of `Soc` — a config or fixture with a nonsensical value degrades to
+/// "almost total loss" instead of refusing to build a simulated battery over
+/// it. The high end at 100 is the ordinary ceiling: nothing converts energy
+/// at better than perfect.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct Efficiency(f64);
+
+validating_deserialize!(Efficiency, f64, Efficiency::new);
+
+forward_display!(Efficiency, f64);
+
+impl Efficiency {
+    /// Clamps to 1–100. NaN clamps to neither bound under `f64::clamp` (it
+    /// compares false against both, so an unguarded clamp would return the
+    /// NaN unchanged) and is mapped to 1 instead — the worst-but-defined
+    /// efficiency, rather than a value that turns every energy computation
+    /// downstream into NaN.
+    pub fn new(percent: f64) -> Self {
+        if percent.is_nan() {
+            return Efficiency(1.0);
+        }
+        Efficiency(percent.clamp(1.0, 100.0))
+    }
+
+    /// As a 0.0–1.0 factor, for multiplying a charge or dividing a discharge.
+    pub fn fraction(self) -> f64 {
+        self.0 / 100.0
+    }
+
+    pub fn get(self) -> f64 {
+        self.0
     }
 }
 
@@ -476,6 +549,28 @@ impl WattHours {
 
     pub fn to_kwh(self) -> KiloWattHours {
         KiloWattHours(self.0 / 1000.0)
+    }
+
+    /// Energy back to the average power over an interval — the inverse of
+    /// [`WattHours::integrate`] for a span `simulation.rs` already knows was
+    /// at constant power, which is exactly the shape of `advance_to`'s
+    /// clamped stored-energy delta over the interval it was clamped within.
+    ///
+    /// Guards `dt == 0`: dividing by zero seconds would produce an infinite
+    /// or NaN wattage rather than "no time passed, so nothing flowed."
+    ///
+    /// Rounds rather than truncating: `simulation.rs` gets here by inverting
+    /// an efficiency division and multiplication it just applied, and that
+    /// round trip leaves the odd `999.9999999998`-style float behind even
+    /// when every input was a whole watt. Truncating would turn that into a
+    /// silent, systematic 1 W undercount; rounding recovers the whole number
+    /// the computation actually meant.
+    pub fn over(self, dt: Duration) -> Watts {
+        if dt.is_zero() {
+            return Watts::ZERO;
+        }
+        let hours = dt.as_secs_f64() / 3600.0;
+        Watts((self.0 / hours).round() as i32)
     }
 
     pub fn get(self) -> f64 {

@@ -20,6 +20,7 @@ mod publish;
 mod replay;
 mod rte;
 mod run;
+mod simulation;
 mod source;
 mod sync;
 mod units;

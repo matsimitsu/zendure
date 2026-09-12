@@ -136,6 +136,14 @@ fn battery_flow_is_signed_and_splits_by_direction() {
 }
 
 #[test]
+fn battery_power_converts_to_the_plain_signed_watts_it_wraps() {
+    // `simulation.rs` integrates this with `WattHours::integrate`, which has
+    // no notion of charging or discharging — only a signed rate.
+    assert_eq!(BatteryPower(-800).into_watts(), Watts(-800));
+    assert_eq!(BatteryPower(600).into_watts(), Watts(600));
+}
+
+#[test]
 fn underlying_grid_adds_back_the_batterys_own_effect() {
     // Discharging 400 W while the meter reads 0 means the house is drawing 400.
     assert_eq!(GridPower::ZERO + BatteryPower(400), GridPower(400.0));
@@ -218,6 +226,33 @@ fn fraction_above_saturates_below_the_floor() {
     assert_eq!(Soc::new(5).fraction_above(Soc::new(10)), 0.0);
 }
 
+#[test]
+fn soc_from_fraction_rounds_to_the_nearest_whole_percent() {
+    assert_eq!(Soc::from_fraction(0.5), Soc::new(50));
+    // Rounds, rather than truncating: 0.505 is closer to 51% of the pack than
+    // to 50%.
+    assert_eq!(Soc::from_fraction(0.505), Soc::new(51));
+    assert_eq!(Soc::from_fraction(0.0), Soc::ZERO);
+    assert_eq!(Soc::from_fraction(1.0), Soc::FULL);
+}
+
+#[test]
+fn soc_from_fraction_clamps_out_of_range_values_through_new() {
+    // A rounding blip past full, or stored energy that has drifted a hair
+    // below zero from floating-point error, must land in range rather than
+    // wrap or panic.
+    assert_eq!(Soc::from_fraction(1.2), Soc::FULL);
+    assert_eq!(Soc::from_fraction(-0.05), Soc::ZERO);
+}
+
+#[test]
+fn soc_from_fraction_maps_nan_to_zero() {
+    // A zero-capacity pack computes `0.0 / 0.0`. `NaN as u32` is a defined but
+    // meaningless 0 in Rust; this asserts the type states that explicitly
+    // rather than depending on the cast's incidental behavior.
+    assert_eq!(Soc::from_fraction(f64::NAN), Soc::ZERO);
+}
+
 // --- Energy ---------------------------------------------------------------
 
 #[test]
@@ -241,6 +276,45 @@ fn watt_hours_sum_and_convert_to_kwh() {
 #[test]
 fn percent_converts_to_a_fraction() {
     assert_eq!(Percent(85.0).fraction(), 0.85);
+}
+
+#[test]
+fn watt_hours_over_recovers_the_average_power() {
+    // The inverse of `integrate`: 500 Wh spread over an hour is 500 W.
+    assert_eq!(WattHours(500.0).over(Duration::from_secs(3600)), Watts(500));
+    // Half an hour: the same energy is twice the rate.
+    assert_eq!(
+        WattHours(500.0).over(Duration::from_secs(1800)),
+        Watts(1000)
+    );
+}
+
+#[test]
+fn watt_hours_over_a_zero_interval_mints_nothing() {
+    // Dividing by zero seconds would otherwise produce an infinite wattage.
+    assert_eq!(WattHours(500.0).over(Duration::ZERO), Watts::ZERO);
+}
+
+// --- Efficiency: clamped so discharge can never divide by zero ------------
+
+#[test]
+fn efficiency_clamps_to_one_through_a_hundred_percent() {
+    assert_eq!(Efficiency::new(150.0).get(), 100.0);
+    // Not zero: discharge divides by this, and a zero would mint infinite
+    // energy out of a battery that gave up nothing.
+    assert_eq!(Efficiency::new(0.0).get(), 1.0);
+    assert_eq!(Efficiency::new(-10.0).get(), 1.0);
+    assert_eq!(Efficiency::new(95.0).get(), 95.0);
+}
+
+#[test]
+fn efficiency_maps_nan_to_the_worst_defined_value_rather_than_propagating() {
+    assert_eq!(Efficiency::new(f64::NAN).get(), 1.0);
+}
+
+#[test]
+fn efficiency_converts_to_a_fraction() {
+    assert_eq!(Efficiency::new(95.0).fraction(), 0.95);
 }
 
 // --- Watts arithmetic saturates rather than panicking ---------------------
