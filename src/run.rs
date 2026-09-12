@@ -13,6 +13,15 @@
 //! production ends it on SIGTERM.
 
 use std::future::Future;
+use std::time::Duration;
+
+/// How long a shutdown waits for queued messages to reach the broker.
+///
+/// Bounded rather than unbounded: systemd's `TimeoutStopSec` is the only
+/// other thing that would end the wait, and it ends it with SIGKILL, which
+/// takes the journal's drain down with it. Two seconds is long enough for a
+/// healthy broker to take a full queue and short enough to be invisible.
+const DRAIN_DEADLINE: Duration = Duration::from_secs(2);
 
 use crate::allocate::Directive;
 use crate::clock::Clock;
@@ -22,12 +31,12 @@ use crate::engine::Engine;
 use crate::event::Event;
 use crate::journal::Journal;
 use crate::models::StorageMode;
-use crate::mqtt::{self, MqttEvent};
+use crate::mqtt::{self, MqttEvent, MqttPublisher};
+use crate::publish::Publisher;
 use crate::units::{Soc, WattHours, Watts};
 use crate::world::{Measurement, World};
 use crate::zendure::ZendureClient;
 use crate::{battery, controller, models, rte};
-use rumqttc::AsyncClient;
 use tokio::sync::mpsc;
 
 /// Why the loop stopped.
@@ -89,7 +98,7 @@ pub fn shutdown_signal() -> Result<impl Future<Output = Stopped>, std::io::Error
 /// journal's `kind`.
 async fn apply_and_publish(
     client: &ZendureClient,
-    publisher: &AsyncClient,
+    publisher: &dyn Publisher,
     prefix: &str,
     directives: &[Directive],
     path: ControlPath,
@@ -109,7 +118,7 @@ async fn apply_and_publish(
         } else {
             path.ok_status()
         };
-        mqtt::publish_status(publisher, prefix, status).await;
+        mqtt::publish_status(publisher, prefix, status);
     }
 
     outcomes
@@ -129,7 +138,7 @@ async fn apply_and_publish(
 /// only ever changes here.
 #[allow(clippy::too_many_arguments)]
 async fn publish_poll_telemetry(
-    publisher: &AsyncClient,
+    publisher: &dyn Publisher,
     prefix: &str,
     report: &models::ZendureReport,
     state: &battery::BatteryState,
@@ -156,8 +165,7 @@ async fn publish_poll_telemetry(
         rte_tracker.rte_percent(),
         usable_kwh,
         total_capacity_kwh,
-    )
-    .await;
+    );
 
     let pack_temps: Vec<(usize, u32)> = report
         .pack_data
@@ -170,11 +178,11 @@ async fn publish_poll_telemetry(
                 .collect()
         })
         .unwrap_or_default();
-    mqtt::publish_temperatures(publisher, prefix, report.properties.hyper_tmp, &pack_temps).await;
+    mqtt::publish_temperatures(publisher, prefix, report.properties.hyper_tmp, &pack_temps);
 
-    mqtt::publish_soc_calibrating(publisher, prefix, state.soc_calibrating).await;
-    mqtt::publish_battery_soc(publisher, prefix, state.soc).await;
-    mqtt::publish_battery_power(publisher, prefix, charge, discharge).await;
+    mqtt::publish_soc_calibrating(publisher, prefix, state.soc_calibrating);
+    mqtt::publish_battery_soc(publisher, prefix, state.soc);
+    mqtt::publish_battery_power(publisher, prefix, charge, discharge);
 
     // Persisted every poll, so the rolling 24h window survives a restart.
     rte_tracker.save();
@@ -266,7 +274,9 @@ pub async fn run(
     let journal = std::sync::Arc::new(journal);
 
     let (mqtt_client, eventloop) = mqtt::create_mqtt_client(&config);
-    let publisher_client = mqtt_client.clone();
+    // The sink the decision path publishes through. Its task owns the only
+    // `await` against the broker; nothing below this line can block on one.
+    let (publisher, mut publisher_task) = MqttPublisher::open(mqtt_client.clone());
 
     let (tx, mut rx) = mpsc::channel::<MqttEvent>(64);
 
@@ -277,6 +287,7 @@ pub async fn run(
     let ha_prefix = config.ha_publish_prefix.clone();
     let subscriber_prefix = config.ha_publish_prefix.clone();
     let subscriber_journal = journal.clone();
+    let subscriber_publisher = publisher.clone();
     let subscriber = tokio::spawn(async move {
         mqtt::run_subscriber(
             mqtt_client,
@@ -284,6 +295,7 @@ pub async fn run(
             shelly_topic,
             solar_phase,
             subscriber_prefix,
+            subscriber_publisher,
             tx,
             subscriber_journal,
         )
@@ -378,7 +390,7 @@ pub async fn run(
 
                         if let Some(status) = step.status {
                             tracing::info!("MQTT updates resumed");
-                            mqtt::publish_status(&publisher_client, &ha_prefix, status).await;
+                            mqtt::publish_status(&*publisher, &ha_prefix, status);
                         }
 
                         if let Some(decision) = step.decision {
@@ -399,7 +411,7 @@ pub async fn run(
 
                             let outcomes = apply_and_publish(
                                 &zendure_client,
-                                &publisher_client,
+                                &*publisher,
                                 &ha_prefix,
                                 &step.directives,
                                 ControlPath::Objective,
@@ -419,13 +431,12 @@ pub async fn run(
                                 &outcomes,
                             );
 
-                            mqtt::publish_decision(&publisher_client, &ha_prefix, &decision).await;
+                            mqtt::publish_decision(&*publisher, &ha_prefix, &decision);
                             mqtt::publish_cycle_counts(
-                                &publisher_client,
+                                &*publisher,
                                 &ha_prefix,
                                 &engine.cycle_counts(),
-                            )
-                            .await;
+                            );
                         }
                     }
                 }
@@ -450,7 +461,7 @@ pub async fn run(
                     // not leave the others running through the outage.
                     let outcomes = apply_and_publish(
                         &zendure_client,
-                        &publisher_client,
+                        &*publisher,
                         &ha_prefix,
                         &step.directives,
                         ControlPath::Failsafe,
@@ -465,7 +476,7 @@ pub async fn run(
                         &outcomes,
                     );
 
-                    mqtt::publish_decision(&publisher_client, &ha_prefix, &decision).await;
+                    mqtt::publish_decision(&*publisher, &ha_prefix, &decision);
                 }
             }
             _ = poll_timer.tick() => {
@@ -489,7 +500,7 @@ pub async fn run(
                         );
 
                         publish_poll_telemetry(
-                            &publisher_client,
+                            &*publisher,
                             &ha_prefix,
                             &report,
                             &state,
@@ -515,7 +526,31 @@ pub async fn run(
         }
     }
 
-    // Order matters. The writer stops when every sender is gone, and the
+    // Order matters, and it is not the order it looks like it should be.
+    //
+    // The publisher drains *first*, while the subscriber is still running,
+    // because the subscriber owns the MQTT eventloop and the eventloop is the
+    // only thing that actually moves bytes to the broker. Aborting it first
+    // would leave the publisher task awaiting a channel nobody drains, so every
+    // shutdown would stall for the full deadline and deliver nothing.
+    let queued = publisher.close();
+    if tokio::time::timeout(DRAIN_DEADLINE, &mut publisher_task)
+        .await
+        .is_err()
+    {
+        publisher_task.abort();
+        // The task prints this summary itself when it ends normally; aborting
+        // it is the one path where nobody would.
+        tracing::warn!(
+            "MQTT drain did not finish in {}s — {queued} messages still queued, \
+             {} dropped and {} failed this session",
+            DRAIN_DEADLINE.as_secs(),
+            publisher.dropped(),
+            publisher.failed(),
+        );
+    }
+
+    // Then the journal. The writer stops when every sender is gone, and the
     // subscriber task holds one, so it has to be finished before the last
     // `Arc<Journal>` can drop. `abort` alone only schedules cancellation —
     // awaiting it is what guarantees the task and its captured clone are gone.

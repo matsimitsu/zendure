@@ -14,6 +14,7 @@ mod fixtures;
 mod journal;
 mod models;
 mod mqtt;
+mod publish;
 mod replay;
 mod rte;
 mod run;
