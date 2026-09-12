@@ -14,7 +14,7 @@ use crate::publish::{Accepted, Message, Publisher};
 use crate::source::MeterObservation;
 use crate::source::shelly::{self, SolarPhase};
 use crate::sync::guard;
-use crate::units::{KiloWattHours, Percent, Soc, Watts};
+use crate::units::{DeciKelvin, KiloWattHours, Percent, Soc, Watts};
 
 /// How many messages may be waiting for the broker before we start dropping.
 ///
@@ -312,7 +312,48 @@ fn ha_device() -> serde_json::Value {
     })
 }
 
-/// One sensor's discovery document, as the bytes Home Assistant expects.
+/// One sensor, and the only place its id is spelled.
+///
+/// The id is needed twice by nature: once in the discovery document that tells
+/// Home Assistant which topic to watch, and once in the publish that puts a
+/// value on that topic. Spelling it twice made a typo silent in both
+/// directions — an entity that never receives a value, or a value nothing
+/// subscribes to — and the announce-once map keys on the same string, so a
+/// mismatch would also quietly defeat that. With one constant per sensor a
+/// mismatch does not compile.
+struct Sensor {
+    id: &'static str,
+    name: &'static str,
+    unit: &'static str,
+    device_class: Option<&'static str>,
+}
+
+impl Sensor {
+    const fn new(
+        id: &'static str,
+        name: &'static str,
+        unit: &'static str,
+        device_class: Option<&'static str>,
+    ) -> Self {
+        Sensor {
+            id,
+            name,
+            unit,
+            device_class,
+        }
+    }
+
+    /// This sensor's discovery document, as the bytes Home Assistant expects.
+    fn discovery(&self, prefix: &str) -> Message {
+        sensor_discovery(prefix, self.id, self.name, self.unit, self.device_class)
+    }
+}
+
+/// The document itself, for the sensors whose id is only known at runtime.
+///
+/// Pack temperatures cannot be table entries — the pack count comes from a poll
+/// — so the table's rows delegate here rather than the dynamic case
+/// duplicating the shape.
 fn sensor_discovery(
     prefix: &str,
     id: &str,
@@ -341,91 +382,102 @@ fn sensor_discovery(
     )
 }
 
-pub fn publish_ha_discovery(publisher: &dyn Publisher, announcer: &Announcer, prefix: &str) {
-    let sensors = [
-        ("decision_mode", "Battery Decision Mode", "", None),
-        (
-            "decision_power",
-            "Battery Decision Power",
-            "W",
-            Some("power"),
-        ),
-        ("decision_reason", "Battery Decision Reason", "", None),
-        (
-            "decision_grid_power",
-            "Grid Power (at decision)",
-            "W",
-            Some("power"),
-        ),
-        ("rte_percent", "Battery Round-Trip Efficiency", "%", None),
-        (
-            "rte_usable_kwh",
-            "Battery Usable Energy",
-            "kWh",
-            Some("energy"),
-        ),
-        (
-            "rte_total_capacity_kwh",
-            "Battery Total Capacity",
-            "kWh",
-            Some("energy"),
-        ),
-        (
-            "enclosure_temp",
-            "Battery Enclosure Temperature",
-            "°C",
-            Some("temperature"),
-        ),
-        (
-            "battery_soc",
-            "Battery State of Charge",
-            "%",
-            Some("battery"),
-        ),
-        (
-            "battery_charge_power",
-            "Battery Actual Charge Power",
-            "W",
-            Some("power"),
-        ),
-        (
-            "battery_discharge_power",
-            "Battery Actual Discharge Power",
-            "W",
-            Some("power"),
-        ),
-        ("controller_status", "Controller Status", "", None),
-        ("daily_cycles", "Battery Daily Mode Transitions", "", None),
-        (
-            "daily_cooldown_suppressions",
-            "Battery Daily Cooldown Suppressions",
-            "",
-            None,
-        ),
-    ];
+const POWER: Option<&str> = Some("power");
+const ENERGY: Option<&str> = Some("energy");
 
-    for (id, name, unit, device_class) in &sensors {
-        announcer.announce(publisher, id, || {
-            sensor_discovery(prefix, id, name, unit, *device_class)
-        });
+const DECISION_MODE: Sensor = Sensor::new("decision_mode", "Battery Decision Mode", "", None);
+const DECISION_POWER: Sensor = Sensor::new("decision_power", "Battery Decision Power", "W", POWER);
+const DECISION_REASON: Sensor = Sensor::new("decision_reason", "Battery Decision Reason", "", None);
+const DECISION_GRID_POWER: Sensor = Sensor::new(
+    "decision_grid_power",
+    "Grid Power (at decision)",
+    "W",
+    POWER,
+);
+const RTE_PERCENT: Sensor = Sensor::new("rte_percent", "Battery Round-Trip Efficiency", "%", None);
+const RTE_USABLE_KWH: Sensor =
+    Sensor::new("rte_usable_kwh", "Battery Usable Energy", "kWh", ENERGY);
+const RTE_TOTAL_CAPACITY_KWH: Sensor = Sensor::new(
+    "rte_total_capacity_kwh",
+    "Battery Total Capacity",
+    "kWh",
+    ENERGY,
+);
+const ENCLOSURE_TEMP: Sensor = Sensor::new(
+    "enclosure_temp",
+    "Battery Enclosure Temperature",
+    "°C",
+    Some("temperature"),
+);
+const BATTERY_SOC: Sensor = Sensor::new(
+    "battery_soc",
+    "Battery State of Charge",
+    "%",
+    Some("battery"),
+);
+const BATTERY_CHARGE_POWER: Sensor = Sensor::new(
+    "battery_charge_power",
+    "Battery Actual Charge Power",
+    "W",
+    POWER,
+);
+const BATTERY_DISCHARGE_POWER: Sensor = Sensor::new(
+    "battery_discharge_power",
+    "Battery Actual Discharge Power",
+    "W",
+    POWER,
+);
+const CONTROLLER_STATUS: Sensor = Sensor::new("controller_status", "Controller Status", "", None);
+const DAILY_CYCLES: Sensor =
+    Sensor::new("daily_cycles", "Battery Daily Mode Transitions", "", None);
+const DAILY_COOLDOWN_SUPPRESSIONS: Sensor = Sensor::new(
+    "daily_cooldown_suppressions",
+    "Battery Daily Cooldown Suppressions",
+    "",
+    None,
+);
+
+/// Everything announced on connect. Pack temperatures are not here: the pack
+/// count is only known from a poll, so they are announced from the telemetry
+/// path instead.
+const SENSORS: &[Sensor] = &[
+    DECISION_MODE,
+    DECISION_POWER,
+    DECISION_REASON,
+    DECISION_GRID_POWER,
+    RTE_PERCENT,
+    RTE_USABLE_KWH,
+    RTE_TOTAL_CAPACITY_KWH,
+    ENCLOSURE_TEMP,
+    BATTERY_SOC,
+    BATTERY_CHARGE_POWER,
+    BATTERY_DISCHARGE_POWER,
+    CONTROLLER_STATUS,
+    DAILY_CYCLES,
+    DAILY_COOLDOWN_SUPPRESSIONS,
+];
+
+/// The one binary sensor. Its own type of discovery document, hence its own
+/// constant rather than a row in the table above.
+const SOC_CALIBRATING: &str = "soc_calibrating";
+
+pub fn publish_ha_discovery(publisher: &dyn Publisher, announcer: &Announcer, prefix: &str) {
+    for sensor in SENSORS {
+        announcer.announce(publisher, sensor.id, || sensor.discovery(prefix));
     }
 
-    // Binary sensors
-    let binary_config = || {
-        serde_json::json!({
-        "name": "Battery SOC Calibrating",
-        "state_topic": format!("{prefix}/soc_calibrating"),
-        "unique_id": "zendure_soc_calibrating",
-        "payload_on": "ON",
-        "payload_off": "OFF",
-        "device": ha_device(),
-        })
-    };
-
-    announcer.announce(publisher, "soc_calibrating", || {
+    announcer.announce(publisher, SOC_CALIBRATING, || {
+        let config = serde_json::json!({
+            "name": "Battery SOC Calibrating",
+            "state_topic": format!("{prefix}/{SOC_CALIBRATING}"),
+            "unique_id": format!("zendure_{SOC_CALIBRATING}"),
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "device": ha_device(),
+        });
         Message::discovery(
-            "homeassistant/binary_sensor/zendure_soc_calibrating/config".to_string(),
-            binary_config().to_string(),
+            format!("homeassistant/binary_sensor/zendure_{SOC_CALIBRATING}/config"),
+            config.to_string(),
         )
     });
 }
@@ -444,10 +496,13 @@ pub fn publish_decision(publisher: &dyn Publisher, prefix: &str, decision: &Cont
         publisher,
         prefix,
         vec![
-            ("decision_mode", decision.mode.to_string()),
-            ("decision_power", decision.power_watts.to_string()),
-            ("decision_reason", decision.reason.clone()),
-            ("decision_grid_power", format!("{:.0}", decision.grid_power)),
+            (DECISION_MODE.id, decision.mode.to_string()),
+            (DECISION_POWER.id, decision.power_watts.to_string()),
+            (DECISION_REASON.id, decision.reason.clone()),
+            (
+                DECISION_GRID_POWER.id,
+                format!("{:.0}", decision.grid_power),
+            ),
         ],
     );
 }
@@ -457,9 +512,9 @@ pub fn publish_cycle_counts(publisher: &dyn Publisher, prefix: &str, counts: &Cy
         publisher,
         prefix,
         vec![
-            ("daily_cycles", counts.daily_transitions.to_string()),
+            (DAILY_CYCLES.id, counts.daily_transitions.to_string()),
             (
-                "daily_cooldown_suppressions",
+                DAILY_COOLDOWN_SUPPRESSIONS.id,
                 counts.daily_cooldown_suppressions.to_string(),
             ),
         ],
@@ -478,11 +533,11 @@ pub fn publish_rte(
         prefix,
         vec![
             (
-                "rte_percent",
+                RTE_PERCENT.id,
                 rte_percent.map_or("unknown".to_string(), |v| format!("{v:.1}")),
             ),
-            ("rte_usable_kwh", format!("{usable:.2}")),
-            ("rte_total_capacity_kwh", format!("{total_capacity:.2}")),
+            (RTE_USABLE_KWH.id, format!("{usable:.2}")),
+            (RTE_TOTAL_CAPACITY_KWH.id, format!("{total_capacity:.2}")),
         ],
     );
 }
@@ -492,7 +547,7 @@ pub fn publish_soc_calibrating(publisher: &dyn Publisher, prefix: &str, calibrat
     publish_values(
         publisher,
         prefix,
-        vec![("soc_calibrating", value.to_string())],
+        vec![(SOC_CALIBRATING, value.to_string())],
     );
 }
 
@@ -506,8 +561,8 @@ pub fn publish_battery_power(
         publisher,
         prefix,
         vec![
-            ("battery_charge_power", charge.to_string()),
-            ("battery_discharge_power", discharge.to_string()),
+            (BATTERY_CHARGE_POWER.id, charge.to_string()),
+            (BATTERY_DISCHARGE_POWER.id, discharge.to_string()),
         ],
     );
 }
@@ -516,37 +571,41 @@ pub fn publish_status(publisher: &dyn Publisher, prefix: &str, status: &str) {
     publish_values(
         publisher,
         prefix,
-        vec![("controller_status", status.to_string())],
+        vec![(CONTROLLER_STATUS.id, status.to_string())],
     );
 }
 
 pub fn publish_battery_soc(publisher: &dyn Publisher, prefix: &str, soc: Soc) {
-    publish_values(publisher, prefix, vec![("battery_soc", soc.to_string())]);
+    publish_values(publisher, prefix, vec![(BATTERY_SOC.id, soc.to_string())]);
 }
 
-/// Convert a Zendure temperature (tenths of Kelvin) to degrees Celsius.
-fn tenths_kelvin_to_celsius(value: u32) -> f64 {
-    (value as f64 / 10.0) - 273.15
+/// One pack's temperature reading. A named pair rather than `(usize, u32)`,
+/// which said neither what the index was counting nor what unit the number was
+/// in.
+pub struct PackTemperature {
+    pub index: usize,
+    pub temp: DeciKelvin,
 }
 
 pub fn publish_temperatures(
     publisher: &dyn Publisher,
     announcer: &Announcer,
     prefix: &str,
-    enclosure_temp: Option<u32>,
-    pack_temps: &[(usize, u32)],
+    enclosure_temp: Option<DeciKelvin>,
+    pack_temps: &[PackTemperature],
 ) {
     // Per-pack sensors are announced from here rather than with the static list
     // because the pack count is only known from a poll. This is the one caller
     // that needs the announcer for a reason other than retrying.
-    for &(idx, raw_temp) in pack_temps {
+    for pack in pack_temps {
+        let idx = pack.index;
         let id = format!("pack{idx}_temp");
         announcer.announce(publisher, &id, || {
             let name = format!("Battery Pack {idx} Temperature");
             sensor_discovery(prefix, &id, &name, "°C", Some("temperature"))
         });
 
-        let celsius = tenths_kelvin_to_celsius(raw_temp);
+        let celsius = pack.temp.to_celsius();
         publish_values(
             publisher,
             prefix,
@@ -556,11 +615,11 @@ pub fn publish_temperatures(
 
     // Publish enclosure temperature state
     if let Some(raw_temp) = enclosure_temp {
-        let celsius = tenths_kelvin_to_celsius(raw_temp);
+        let celsius = raw_temp.to_celsius();
         publish_values(
             publisher,
             prefix,
-            vec![("enclosure_temp", format!("{celsius:.1}"))],
+            vec![(ENCLOSURE_TEMP.id, format!("{celsius:.1}"))],
         );
     }
 }
@@ -571,6 +630,7 @@ mod tests {
     use crate::models::ControlMode;
     use crate::publish::{Delivery, RecordingPublisher};
     use crate::units::Setpoint;
+    use std::collections::BTreeSet;
     use std::time::Duration;
     use tokio::time::timeout;
 
@@ -715,8 +775,17 @@ mod tests {
             &p,
             &Announcer::new(),
             "zendure",
-            Some(3001),
-            &[(0, 2981), (1, 2995)],
+            Some(DeciKelvin(3001)),
+            &[
+                PackTemperature {
+                    index: 0,
+                    temp: DeciKelvin(2981),
+                },
+                PackTemperature {
+                    index: 1,
+                    temp: DeciKelvin(2995),
+                },
+            ],
         );
 
         assert_eq!(p.payload("zendure/enclosure_temp").unwrap(), "27.0");
@@ -749,6 +818,61 @@ mod tests {
         assert_eq!(doc["unique_id"], "zendure_battery_soc");
         assert_eq!(doc["device_class"], "battery");
         assert_eq!(doc["state_class"], "measurement");
+    }
+
+    /// Every announced sensor gets values, and every value has a sensor.
+    ///
+    /// The ids are constants now, so a typo will not compile — but a sensor
+    /// added to the table and never published, or published and never
+    /// announced, still compiles fine. Both are silent in production: an entity
+    /// that sits at "unknown" for ever, or a topic nothing subscribes to.
+    #[test]
+    fn every_announced_sensor_is_published_and_the_reverse() {
+        let announced = RecordingPublisher::new();
+        publish_ha_discovery(&announced, &Announcer::new(), "zendure");
+
+        let announced: BTreeSet<String> = announced
+            .sent()
+            .iter()
+            .map(|m| {
+                let doc: serde_json::Value = serde_json::from_str(&m.payload).unwrap();
+                doc["state_topic"].as_str().unwrap().to_string()
+            })
+            .collect();
+
+        // Every helper, with values chosen only to make them all fire.
+        let p = RecordingPublisher::new();
+        publish_decision(&p, "zendure", &ControlDecision::test_sample());
+        publish_cycle_counts(
+            &p,
+            "zendure",
+            &CycleCounts {
+                daily_transitions: 0,
+                daily_cooldown_suppressions: 0,
+            },
+        );
+        publish_rte(&p, "zendure", None, KiloWattHours(0.0), KiloWattHours(0.0));
+        publish_soc_calibrating(&p, "zendure", false);
+        publish_battery_power(&p, "zendure", Watts::ZERO, Watts::ZERO);
+        publish_status(&p, "zendure", "operational");
+        publish_battery_soc(&p, "zendure", Soc::ZERO);
+        // Enclosure only: pack sensors are dynamic and not in the static table.
+        publish_temperatures(
+            &p,
+            &Announcer::new(),
+            "zendure",
+            Some(DeciKelvin(3001)),
+            &[],
+        );
+
+        let published: BTreeSet<String> = p
+            .sent()
+            .iter()
+            .filter(|m| m.delivery == Delivery::Telemetry)
+            .map(|m| m.topic.clone())
+            .collect();
+
+        assert_eq!(announced, published);
     }
 
     // --- the wedge ------------------------------------------------------

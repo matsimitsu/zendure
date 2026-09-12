@@ -423,3 +423,26 @@ fn retention_days_still_serializes_as_a_bare_number() {
         "90",
     );
 }
+
+/// The vendor encoding every Zendure temperature arrives in, and the unit
+/// anyone actually reads. These were a bare `u32` and a bare `f64` with a cast
+/// between them — the one place CLAUDE.md's rule was not applied.
+#[test]
+fn deci_kelvin_converts_to_celsius_at_one_decimal() {
+    // The values the wire format is pinned on.
+    assert_eq!(format!("{:.1}", DeciKelvin(3001).to_celsius()), "27.0");
+    assert_eq!(format!("{:.1}", DeciKelvin(2981).to_celsius()), "25.0");
+    assert_eq!(format!("{:.1}", DeciKelvin(2995).to_celsius()), "26.4");
+    // Just below freezing. Renders as "-0.0", which is what the f64 rounds to
+    // and what the old bare-`f64` code published — pinned so a future switch to
+    // a decimal type is a visible change rather than a silent one.
+    assert_eq!(format!("{:.1}", DeciKelvin(2731).to_celsius()), "-0.0");
+}
+
+/// `Display` forwards the formatter rather than rendering through `{}`, so a
+/// precision at the call site is not silently dropped.
+#[test]
+fn celsius_keeps_the_precision_it_is_given() {
+    assert_eq!(format!("{:.1}", Celsius(1.2345)), "1.2");
+    assert_eq!(format!("{}", Celsius(1.2345)), "1.2345");
+}

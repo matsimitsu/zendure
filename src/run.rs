@@ -34,7 +34,7 @@ use crate::journal::Journal;
 use crate::models::StorageMode;
 use crate::mqtt::{self, MqttEvent, MqttPublisher};
 use crate::publish::Publisher;
-use crate::units::{Soc, WattHours, Watts};
+use crate::units::{DeciKelvin, Soc, WattHours, Watts};
 use crate::world::{Measurement, World};
 use crate::zendure::ZendureClient;
 use crate::{battery, controller, models, rte};
@@ -169,14 +169,19 @@ async fn publish_poll_telemetry(
         total_capacity_kwh,
     );
 
-    let pack_temps: Vec<(usize, u32)> = report
+    let pack_temps: Vec<mqtt::PackTemperature> = report
         .pack_data
         .as_ref()
         .map(|packs| {
             packs
                 .iter()
                 .enumerate()
-                .filter_map(|(i, p)| p.max_temp.map(|t| (i, t)))
+                .filter_map(|(index, p)| {
+                    p.max_temp.map(|t| mqtt::PackTemperature {
+                        index,
+                        temp: DeciKelvin(t),
+                    })
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -184,7 +189,7 @@ async fn publish_poll_telemetry(
         publisher,
         announcer,
         prefix,
-        report.properties.hyper_tmp,
+        report.properties.hyper_tmp.map(DeciKelvin),
         &pack_temps,
     );
 

@@ -101,6 +101,33 @@ macro_rules! validating_deserialize_result {
 
 pub(crate) use validating_deserialize_result;
 
+// --- temperature -----------------------------------------------------------
+
+/// Tenths of a Kelvin, which is how the Zendure reports every temperature.
+///
+/// A vendor encoding rather than a unit anyone thinks in, and it existed only
+/// as a bare `u32` travelling next to a `f64` Celsius with a cast between them
+/// — the one place in the crate where CLAUDE.md's rule was not applied. Naming
+/// it puts the conversion in one function and makes the pair unmixable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DeciKelvin(pub u32);
+
+impl DeciKelvin {
+    pub fn to_celsius(self) -> Celsius {
+        // `from`, not `as`: `u32` to `f64` is lossless and saying so keeps the
+        // decision-path rule about casts honest here too.
+        Celsius(f64::from(self.0) / 10.0 - 273.15)
+    }
+}
+
+/// Degrees Celsius. What a person and Home Assistant both read.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Celsius(pub f64);
+
+forward_display!(Celsius, f64);
+
 // --- Watts: the integer-watt arithmetic unit -------------------------------
 
 /// Integer watts. The unit the device speaks and the controller computes in —
