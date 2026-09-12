@@ -89,14 +89,18 @@ All configuration is via environment variables:
 ## Raw capture
 
 Every Shelly reading, every Zendure poll response, and every decision (with the
-command sent and whether the device accepted it) is appended to a daily NDJSON
-file under `JOURNAL_RAW_PATH`:
+world it was decided from and the outcome of the command sent to each device)
+is appended to a daily NDJSON file under `JOURNAL_RAW_PATH`:
 
 ```
 {"ts_ms":1757620800123,"kind":"shelly","payload":{"total_act_power":150.5,...}}
 {"ts_ms":1757620800456,"kind":"zendure_poll","payload":{"electricLevel":64,...}}
-{"ts_ms":1757620801789,"kind":"decision","payload":{"decision":{...},"command":"set_discharge(145W)","outcome":"ok"}}
+{"ts_ms":1757620801789,"kind":"decision","payload":{"commands":[{"device":"HEC4NENCN490270","command":"set_discharge(145W)","outcome":"ok","error":null}],"decision":{"mode":"Discharge","power_watts":145,"reason":"...","grid_power":150.5},"world":{"grid":{"total":150.5,"phases":[10.0,20.0,120.5]},"solar":0.0,"devices":{"HEC4NENCN490270":{"class":"battery","soc":64,...}}}}}
 ```
+
+`commands` has one entry per device actuated that step — one today, more once
+a second battery or a charger joins the world. The failsafe path (an MQTT
+timeout forcing every battery idle) logs the same shape under `kind: "failsafe"`.
 
 Payloads are stored exactly as received rather than re-serialized from parsed
 types, so undocumented device fields are kept. This exists so that when

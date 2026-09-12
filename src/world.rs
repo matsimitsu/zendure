@@ -191,3 +191,71 @@ impl World {
         self.grid.total + self.battery_flow()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::battery::BatteryState;
+    use crate::units::{BatteryPower, PowerCap, Soc};
+
+    /// Every field distinct from its default and from every other field of
+    /// the same type, so a round-trip that silently dropped, swapped or
+    /// defaulted one would show up as an equality failure rather than hide
+    /// behind a coincidental match — three different phase readings, a phase
+    /// total that agrees with none of them, non-zero solar, and a battery
+    /// whose flags disagree with each other.
+    fn sample_world() -> World {
+        let mut world = World::new();
+        world.observe_meter(
+            MeterReading::new(
+                GridPower(150.5),
+                [GridPower(10.0), GridPower(-200.0), GridPower(340.5)],
+            ),
+            SolarPower::new(200.0),
+        );
+        world.observe_device(
+            DeviceId::new("SN123"),
+            Measurement::Battery(BatteryState {
+                soc: Soc::new(50),
+                max_discharge_power: PowerCap::new(800),
+                max_charge_power: PowerCap::new(2400),
+                current_power: BatteryPower(-300),
+                soc_calibrating: true,
+                soc_limit_reached: false,
+                fault: true,
+            }),
+        );
+        world
+    }
+
+    /// Superseded in step 7 by: snapshot/restore equivalence
+    ///
+    /// `World` is the thing step 7 records as `world_json` and later replays
+    /// from, so it has to survive a JSON round-trip identically. This is the
+    /// writable half of that: it needs no `ControllerState` to restore
+    /// against, just `World`'s own `Deserialize`.
+    #[test]
+    fn round_trips_through_json_identically() {
+        let world = sample_world();
+        let json = serde_json::to_string(&world).unwrap();
+        assert_eq!(world, serde_json::from_str(&json).unwrap());
+    }
+
+    /// Superseded in step 7 by: snapshot/restore equivalence
+    ///
+    /// Pins the exact wire shape, the same way `command_tests.rs` pins
+    /// `Command`'s `Display` and `ControlDecision`'s JSON: `Measurement` is
+    /// internally tagged (`"class":"battery"`, not a wrapper object) and
+    /// `DeviceId` is a bare string key rather than `{"0":"SN123"}`. Both are
+    /// what keeps step 7's `world_json` readable. Do not "fix" this if it
+    /// starts failing — a diff here means the format actually moved, which is
+    /// exactly what this test exists to catch.
+    #[test]
+    fn serializes_to_the_exact_pinned_shape() {
+        let world = sample_world();
+        assert_eq!(
+            serde_json::to_string(&world).unwrap(),
+            r#"{"grid":{"total":150.5,"phases":[10.0,-200.0,340.5]},"solar":200.0,"devices":{"SN123":{"class":"battery","soc":50,"max_discharge_power":800,"max_charge_power":2400,"current_power":-300,"soc_calibrating":true,"soc_limit_reached":false,"fault":true}}}"#
+        );
+    }
+}

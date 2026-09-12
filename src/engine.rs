@@ -298,6 +298,68 @@ mod tests {
         assert_eq!(step.status, None);
     }
 
+    /// Superseded in step 7 by: snapshot/restore equivalence
+    ///
+    /// Two `Engine`s built identically and fed the same events must decide
+    /// identically at every step, in order. `step` takes `&self` state and a
+    /// borrowed event and nothing else, so this is really a test that no
+    /// hidden clock read or thread-local snuck into the decision path — a
+    /// leak there would make the two engines agree at first and drift once
+    /// their private timers ticked at different wall-clock moments, which a
+    /// single-engine test could never expose. Step 7's snapshot/restore test
+    /// strengthens this same property by proving it across a process
+    /// restart, not just across two in-memory instances.
+    ///
+    /// The sequence exercises several branches on purpose: a meter reading
+    /// that may decide, a device update that never does, a timeout that
+    /// forces idle and reports it, a repeat timeout that forces idle again
+    /// but stays quiet, and a resuming meter reading that reports again.
+    #[test]
+    fn the_fold_is_deterministic() {
+        let events = [
+            Event::Meter {
+                at: clock(),
+                grid: meter(500.0),
+                solar: SolarPower::new(0.0),
+            },
+            Event::DeviceUpdate {
+                at: clock(),
+                id: DeviceId::new(BATTERY_ID),
+                measurement: Measurement::Battery(battery()),
+            },
+            Event::MqttTimeout { at: clock() },
+            Event::MqttTimeout { at: clock() },
+            Event::Meter {
+                at: clock(),
+                grid: meter(500.0),
+                solar: SolarPower::new(0.0),
+            },
+        ];
+
+        let mut engine_a = engine();
+        let mut engine_b = engine();
+
+        for event in &events {
+            let step_a = engine_a.step(event);
+            let step_b = engine_b.step(event);
+
+            assert_eq!(step_a.commands, step_b.commands);
+            assert_eq!(
+                step_a.decision.as_ref().map(|d| d.mode),
+                step_b.decision.as_ref().map(|d| d.mode),
+            );
+            assert_eq!(
+                step_a.decision.as_ref().map(|d| d.power_watts),
+                step_b.decision.as_ref().map(|d| d.power_watts),
+            );
+            assert_eq!(
+                step_a.decision.as_ref().map(|d| &d.reason),
+                step_b.decision.as_ref().map(|d| &d.reason),
+            );
+            assert_eq!(step_a.status, step_b.status);
+        }
+    }
+
     #[test]
     fn battery_update_refreshes_state_without_a_decision() {
         let mut engine = engine();
