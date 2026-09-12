@@ -281,12 +281,9 @@ impl Journal {
             return;
         };
         if tx.try_send(record).is_err() {
-            let n = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
-            // Every power of two, so a persistent stall is loud without a
-            // wedged writer flooding the log at one line per reading.
-            if n.is_power_of_two() {
-                tracing::warn!("Journal queue full — {n} records dropped so far");
-            }
+            crate::backpressure::tally(&self.dropped, |n| {
+                tracing::warn!("Journal queue full — {n} records dropped so far")
+            });
         }
     }
 }
@@ -478,6 +475,11 @@ fn writer(
             // line per record *silently dropped* was the alternative, and that
             // is how journalling stopped for the life of a process with logs
             // identical to a healthy run.
+            //
+            // Not `backpressure::tally`, which the other three counters share:
+            // this one is a plain local on the single writer thread, and making
+            // it atomic purely to reuse four lines would be paying for
+            // synchronisation nothing needs.
             if failed.is_power_of_two() {
                 tracing::warn!("Journal: write failed ({failed} so far): {e}");
             }
@@ -714,8 +716,7 @@ mod tests {
     use crate::controller::Controller;
     use crate::device::Applied;
     use crate::engine::Engine;
-    use crate::models::ControlMode;
-    use crate::units::{BatteryPower, GridPower, Setpoint, SolarPower, Timestamp};
+    use crate::units::{BatteryPower, GridPower, SolarPower, Timestamp};
     use crate::world::{DeviceId, Measurement, MeterReading, World};
 
     const NOW_MS: i64 = 1_757_000_000_000;
@@ -754,15 +755,6 @@ mod tests {
             world: world(),
             controller: Controller::test_default(NOW_MS, 255).state(),
             mqtt_timed_out: false,
-        }
-    }
-
-    fn decision() -> ControlDecision {
-        ControlDecision {
-            mode: ControlMode::Discharge,
-            power_watts: Setpoint::new(145),
-            reason: "Grid demand".to_string(),
-            grid_power: GridPower(150.5),
         }
     }
 
@@ -811,7 +803,7 @@ mod tests {
         journal.decision(
             at(),
             ControlPath::Failsafe,
-            &decision(),
+            &ControlDecision::test_sample(),
             &engine_state(),
             &[outcome("SN123", Applied::Ok, None)],
         );
@@ -1027,7 +1019,7 @@ mod tests {
         journal.decision(
             at(),
             ControlPath::Objective,
-            &decision(),
+            &ControlDecision::test_sample(),
             &engine_state(),
             &[
                 outcome("battery-a", Applied::Ok, None),
@@ -1077,7 +1069,7 @@ mod tests {
         journal.decision(
             at(),
             ControlPath::Failsafe,
-            &decision(),
+            &ControlDecision::test_sample(),
             &engine_state(),
             &[],
         );
@@ -1115,7 +1107,7 @@ mod tests {
         journal.decision(
             at(),
             ControlPath::Failsafe,
-            &decision(),
+            &ControlDecision::test_sample(),
             &state,
             &[outcome("SN123", Applied::Ok, None)],
         );
@@ -1163,7 +1155,7 @@ mod tests {
         journal.decision(
             at(),
             ControlPath::Objective,
-            &decision(),
+            &ControlDecision::test_sample(),
             &engine_state(),
             &[outcome("SN123", Applied::Error, Some("boom"))],
         );
@@ -1177,7 +1169,7 @@ mod tests {
 
         assert_eq!(
             serde_json::from_str::<ControlDecision>(&payload).unwrap(),
-            decision()
+            ControlDecision::test_sample()
         );
         assert_eq!(
             serde_json::from_str::<Applied>(&format!("\"{applied}\"")).unwrap(),
@@ -1196,7 +1188,7 @@ mod tests {
         journal.decision(
             at(),
             ControlPath::Objective,
-            &decision(),
+            &ControlDecision::test_sample(),
             &engine_state(),
             &[],
         );
@@ -1235,7 +1227,7 @@ mod tests {
         journal.decision(
             at(),
             ControlPath::Objective,
-            &decision(),
+            &ControlDecision::test_sample(),
             &engine_state(),
             &[outcome("SN123", Applied::Ok, None)],
         );
@@ -1302,7 +1294,7 @@ mod tests {
         journal.decision(
             at(),
             ControlPath::Objective,
-            &decision(),
+            &ControlDecision::test_sample(),
             &engine_state(),
             &[],
         );
@@ -1347,7 +1339,7 @@ mod tests {
         journal.decision(
             at(),
             ControlPath::Objective,
-            &decision(),
+            &ControlDecision::test_sample(),
             &engine_state(),
             &[],
         );

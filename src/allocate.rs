@@ -131,7 +131,7 @@ mod tests {
     use super::*;
     use crate::battery::BatteryState;
     use crate::models::ControlMode;
-    use crate::units::{BatteryPower, GridPower, PowerCap, Setpoint, Soc};
+    use crate::units::{BatteryPower, PowerCap, Setpoint, Soc};
     use crate::world::Measurement;
 
     fn battery() -> BatteryState {
@@ -161,8 +161,7 @@ mod tests {
         ControlDecision {
             mode,
             power_watts: Setpoint::new(watts),
-            reason: "test".to_string(),
-            grid_power: GridPower(0.0),
+            ..ControlDecision::test_sample()
         }
     }
 

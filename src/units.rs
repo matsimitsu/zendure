@@ -99,6 +99,8 @@ macro_rules! validating_deserialize_result {
     };
 }
 
+pub(crate) use validating_deserialize_result;
+
 // --- Watts: the integer-watt arithmetic unit -------------------------------
 
 /// Integer watts. The unit the device speaks and the controller computes in —

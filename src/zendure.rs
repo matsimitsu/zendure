@@ -4,6 +4,7 @@ use std::time::Duration;
 use crate::command::Command;
 use crate::device::{AC2400_PLUS, BatteryController, BatterySpec};
 use crate::models::{StorageMode, ZendureReport, ZendureWriteRequest};
+use crate::sync::guard;
 use crate::world::DeviceId;
 
 #[allow(dead_code)]
@@ -79,7 +80,7 @@ impl ZendureClient {
     #[allow(dead_code)]
     pub async fn ensure_ram_mode(&self) -> Result<(), reqwest::Error> {
         {
-            let mode = self.storage_mode.lock().unwrap();
+            let mode = guard(&self.storage_mode);
             if *mode == StorageMode::Ram {
                 return Ok(());
             }
@@ -87,14 +88,14 @@ impl ZendureClient {
         self.write_properties(serde_json::json!({ "smartMode": 1 }))
             .await?;
         tokio::time::sleep(Duration::from_secs(5)).await;
-        *self.storage_mode.lock().unwrap() = StorageMode::Ram;
+        *guard(&self.storage_mode) = StorageMode::Ram;
         Ok(())
     }
 
     /// Update the tracked storage mode after an external write.
     #[allow(dead_code)]
     pub fn set_storage_mode(&self, mode: StorageMode) {
-        *self.storage_mode.lock().unwrap() = mode;
+        *guard(&self.storage_mode) = mode;
     }
 
     /// Write the charge/discharge power-cap setpoints to the device.
@@ -144,7 +145,7 @@ impl ZendureClient {
                 self.write_properties(props).await
             }
             Command::SetIdle => {
-                *self.last_ac_mode.lock().unwrap() = None;
+                *guard(&self.last_ac_mode) = None;
                 self.write_properties(serde_json::json!({
                     "inputLimit": 0,
                     "outputLimit": 0,
@@ -152,7 +153,7 @@ impl ZendureClient {
                 .await
             }
             Command::SetStandby => {
-                *self.last_ac_mode.lock().unwrap() = None;
+                *guard(&self.last_ac_mode) = None;
                 self.set_storage_mode(StorageMode::Flash);
                 self.write_properties(serde_json::json!({
                     "smartMode": 0,
@@ -166,7 +167,7 @@ impl ZendureClient {
 
     /// Updates the tracked acMode, returns true if it changed (and should be sent).
     fn set_ac_mode(&self, mode: u32) -> bool {
-        let mut last = self.last_ac_mode.lock().unwrap();
+        let mut last = guard(&self.last_ac_mode);
         let changed = *last != Some(mode);
         *last = Some(mode);
         changed

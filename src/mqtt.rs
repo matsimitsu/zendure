@@ -6,6 +6,7 @@ use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS};
 use tokio::sync::mpsc;
 
 use crate::announce::Announcer;
+use crate::backpressure::tally;
 use crate::config::Config;
 use crate::journal::Journal;
 use crate::models::{ControlDecision, CycleCounts};
@@ -146,27 +147,25 @@ impl Publisher for MqttPublisher {
             None => Refused::ShuttingDown,
         };
 
-        let n = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
         match refused {
-            // Every power of two, so a persistent stall is loud without a dead
-            // broker flooding the log at a dozen lines per poll.
-            Refused::QueueFull => {
-                if n.is_power_of_two() {
-                    tracing::warn!("MQTT queue full — {n} messages dropped so far");
-                }
-            }
+            Refused::QueueFull => tally(&self.dropped, |n| {
+                tracing::warn!("MQTT queue full — {n} messages dropped so far")
+            }),
             // Once, latched. Reporting this as backpressure would be a lie in
             // the one direction that costs an operator the most: the queue is
             // not full, the sink is gone, and nothing will ever be published
             // again.
             Refused::SinkGone => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
                 if !self.sink_gone.swap(true, Ordering::Relaxed) {
                     tracing::error!(
                         "MQTT delivery task has gone — every publish from here is discarded",
                     );
                 }
             }
-            Refused::ShuttingDown => {}
+            Refused::ShuttingDown => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+            }
         }
 
         Accepted::Dropped
@@ -191,13 +190,12 @@ async fn deliver(
             .await;
 
         if let Err(e) = result {
-            let n = failed.fetch_add(1, Ordering::Relaxed) + 1;
-            if n.is_power_of_two() {
+            tally(&failed, |n| {
                 tracing::warn!(
                     "Failed to publish {} — {n} publishes failed so far: {e}",
                     message.topic,
-                );
-            }
+                )
+            });
         }
     }
 
@@ -572,18 +570,9 @@ mod tests {
     use super::*;
     use crate::models::ControlMode;
     use crate::publish::{Delivery, RecordingPublisher};
-    use crate::units::{GridPower, Setpoint};
+    use crate::units::Setpoint;
     use std::time::Duration;
     use tokio::time::timeout;
-
-    fn decision() -> ControlDecision {
-        ControlDecision {
-            mode: ControlMode::Charge,
-            power_watts: Setpoint::new(1200),
-            reason: "solar surplus".to_string(),
-            grid_power: GridPower(-1250.5),
-        }
-    }
 
     /// A client pointed at a port with nothing behind it, whose eventloop is
     /// returned to the caller and never polled.
@@ -614,16 +603,21 @@ mod tests {
     #[test]
     fn a_decision_publishes_four_values() {
         let p = RecordingPublisher::new();
-        publish_decision(&p, "zendure", &decision());
+        let decision = ControlDecision {
+            mode: ControlMode::Charge,
+            power_watts: Setpoint::new(1200),
+            ..ControlDecision::test_sample()
+        };
+        publish_decision(&p, "zendure", &decision);
 
         assert_eq!(
             telemetry(&p),
             vec![
                 ("zendure/decision_mode".into(), "charge".into()),
                 ("zendure/decision_power".into(), "1200".into()),
-                ("zendure/decision_reason".into(), "solar surplus".into()),
+                ("zendure/decision_reason".into(), "Grid demand".into()),
                 // Rounded to whole watts, and the meter reports fractions.
-                ("zendure/decision_grid_power".into(), "-1250".into()),
+                ("zendure/decision_grid_power".into(), "150".into()),
             ],
         );
     }

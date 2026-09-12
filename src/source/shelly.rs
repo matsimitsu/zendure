@@ -11,6 +11,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::units::validating_deserialize_result;
+
 use super::MeterObservation;
 use crate::units::{GridPower, SolarPower};
 use crate::world::MeterReading;
@@ -80,16 +82,11 @@ impl SolarPhase {
     }
 }
 
-/// Routed through `parse` rather than derived, so the one gate stays the one
-/// gate. A derived enum `Deserialize` would be a second, stricter gate — it
-/// would reject `"a"` and `" A "`, which the environment has always accepted
-/// and which a hand-written config file will contain.
-impl<'de> Deserialize<'de> for SolarPhase {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let raw = String::deserialize(d)?;
-        SolarPhase::parse(&raw).map_err(serde::de::Error::custom)
-    }
-}
+// Routed through `parse` rather than derived, so the one gate stays the one
+// gate. A derived enum `Deserialize` would be a second, stricter gate — it
+// would reject `"a"` and `" A "`, which the environment has always accepted and
+// which a hand-written config file will contain.
+validating_deserialize_result!(SolarPhase, String, |s: String| SolarPhase::parse(&s));
 
 /// Parse a Shelly Pro 3EM `status/em:0` payload into a normalized observation.
 pub fn parse(
