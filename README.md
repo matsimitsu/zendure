@@ -124,6 +124,68 @@ to a failure too**. Ansible runs it as a `validate:` hook before a rendered
 config is moved into place, so a typo fails the deploy instead of quietly
 degrading a running controller.
 
+### Migrating from environment variables
+
+Configuration was replaced by a TOML file in version 0.3.0. If you had
+environment variables set, this table maps each one to its new location:
+
+| Old env var | New TOML location | Notes |
+|-------------|-------------------|-------|
+| `MQTT_HOST` | `[mqtt] host` | |
+| `MQTT_PORT` | `[mqtt] port` | |
+| `MQTT_USERNAME` | `[mqtt] username` | |
+| `MQTT_PASSWORD` | `[mqtt] password` | |
+| `MQTT_CLIENT_ID` | `[mqtt] client_id` | |
+| `ZENDURE_IP` | `[[device]] ip` | Now in array; see below |
+| `ZENDURE_SN` | `[[device]] sn` | Now in array; see below |
+| `ZENDURE_POLL_INTERVAL` | `[[device]] poll_interval_secs` | Now in array; unit is already seconds |
+| `SHELLY_TOPIC` | `[shelly] topic` | |
+| `SOLAR_PHASE` | `[shelly] solar_phase` | |
+| `HA_PUBLISH_PREFIX` | `[homeassistant] publish_prefix` | |
+| `TIMEZONE` | `[clock] timezone` | |
+| `CHARGE_START_THRESHOLD` | `[tuning] charge_start_threshold` | |
+| `DISCHARGE_START_THRESHOLD` | `[tuning] discharge_start_threshold` | |
+| `CHARGE_MARGIN` | `[tuning] charge_margin` | |
+| `DISCHARGE_MARGIN` | `[tuning] discharge_margin` | |
+| `MIN_SOC` | `[tuning] min_soc` | |
+| `MAX_SOC` | `[tuning] max_soc` | |
+| `BALANCE_WEEKDAY` | `[tuning] balance_weekday` | |
+| `SOLAR_DISCHARGE_BLOCK_THRESHOLD` | `[tuning] solar_discharge_block_threshold` | |
+| `MIN_IDLE_BEFORE_DISCHARGE` | `[tuning] min_idle_before_discharge_secs` | Unit is seconds; name clarified |
+| `MIN_MODE_DURATION` | `[tuning] min_mode_duration_secs` | Unit is seconds; name clarified |
+| `MIN_DECISION_INTERVAL` | `[tuning] min_decision_interval_secs` | Unit is seconds; name clarified |
+| `IDLE_TIMEOUT_MINUTES` | `[tuning] idle_timeout_secs` | **Unit change: multiply by 60.** Was minutes, now seconds. `IDLE_TIMEOUT_MINUTES=10` becomes `idle_timeout_secs = 600` |
+| `CYCLE_WARN_THRESHOLD` | `[tuning] cycle_warn_threshold` | |
+| `MQTT_TIMEOUT` | `[tuning] mqtt_timeout_secs` | Unit is seconds; name clarified |
+| `JOURNAL_PATH` | `[journal] path` | |
+| `JOURNAL_RETENTION_DAYS` | `[journal] retention_days` | |
+| `RTE_STATE_PATH` | `[rte] state_path` | |
+| `RUST_LOG` | Environment variable | Still works; overrides `[logging] filter` when set |
+| `JOURNAL_RAW_PATH` | — | Removed; this variable is gone and does nothing |
+
+**Why `[[device]]` is an array:** The TOML format exists precisely so a device
+list can be expressed — one entry today, more when a second battery or charger
+joins the system. Configuration as environment variables could not represent
+that, which is why this migration exists.
+
+**Deploying a new config:** The config file and systemd unit must move
+together. A systemd unit built for the old binary (`MQTT_HOST=…` in
+`EnvironmentFile=`) will fail when the new binary runs with `--config`, because
+the binary does not recognise those environment variables and the unit does not
+pass `--config`. That mismatch causes the binary to exit with an unknown-argument
+error, and systemd will restart-loop it. Make sure both arrive in the same
+deployment.
+
+`zendure --check --config <path>` validates a new config file before it is
+deployed. It exits non-zero on anything that would be fatal at runtime, and
+also on anything that would only warn — so a typo fails early, during testing,
+not after the file is already in place. Run it as part of your deployment
+validation:
+
+```bash
+zendure --check --config /etc/zendure/config.toml
+```
+
 ## Journal
 
 Every Shelly reading, every Zendure poll response, every event the engine folds
