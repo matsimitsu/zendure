@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use chrono::Weekday;
+use serde::{Deserialize, Serialize};
 
 use crate::battery::BatteryState;
 use crate::clock::Clock;
@@ -10,6 +11,31 @@ use crate::units::{Elapsed, GridPower, PowerMargin, Setpoint, Soc, SolarPower, T
 use crate::world::World;
 
 const RAMP_FACTOR: f64 = 0.75;
+
+/// The controller's mutable history, split out so a decision can be replayed.
+///
+/// `Controller`'s other fields are configuration — read once from [`Config`] and
+/// never written — so they belong to the session, not to the moment, and travel
+/// in the journal's `sessions` row instead of on every decision. What is left
+/// here is exactly the state that makes the same input produce a different
+/// output depending on what came before: the hysteresis and cooldown history,
+/// the idle timers, and the daily counters.
+///
+/// Restoring these into a controller built from the same config reproduces the
+/// decision. Dropping any one of them does not fail loudly — it replays *almost*
+/// right, which is worse, so the equivalence test in this module exists to make
+/// an omission fail.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ControllerState {
+    pub last_mode: ControlMode,
+    pub last_active_mode: Option<ControlMode>,
+    pub last_mode_change: Timestamp,
+    pub last_decision: Timestamp,
+    pub last_idle_start: Option<Timestamp>,
+    pub daily_transitions: u32,
+    pub daily_cooldown_suppressions: u32,
+    pub last_cycle_reset_day: u32,
+}
 
 /// Reactive self-consumption control. Deliberately free of clock reads: every
 /// decision takes a [`Clock`] captured at the edge, which is what makes the
@@ -75,6 +101,48 @@ impl Controller {
             daily_transitions: self.daily_transitions,
             daily_cooldown_suppressions: self.daily_cooldown_suppressions,
         }
+    }
+
+    /// Snapshot the mutable history. Recorded with every decision, so "the state
+    /// at time T" is the last decision row at or before T.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn state(&self) -> ControllerState {
+        ControllerState {
+            last_mode: self.last_mode,
+            last_active_mode: self.last_active_mode,
+            last_mode_change: self.last_mode_change,
+            last_decision: self.last_decision,
+            last_idle_start: self.last_idle_start,
+            daily_transitions: self.daily_transitions,
+            daily_cooldown_suppressions: self.daily_cooldown_suppressions,
+            last_cycle_reset_day: self.last_cycle_reset_day,
+        }
+    }
+
+    /// Put a snapshot back. The config half is whatever this controller was
+    /// built with — `restore` deliberately cannot change it, so a replay against
+    /// different tuning is a different `Controller`, constructed as such, rather
+    /// than a half-overwritten one.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn restore(&mut self, state: ControllerState) {
+        let ControllerState {
+            last_mode,
+            last_active_mode,
+            last_mode_change,
+            last_decision,
+            last_idle_start,
+            daily_transitions,
+            daily_cooldown_suppressions,
+            last_cycle_reset_day,
+        } = state;
+        self.last_mode = last_mode;
+        self.last_active_mode = last_active_mode;
+        self.last_mode_change = last_mode_change;
+        self.last_decision = last_decision;
+        self.last_idle_start = last_idle_start;
+        self.daily_transitions = daily_transitions;
+        self.daily_cooldown_suppressions = daily_cooldown_suppressions;
+        self.last_cycle_reset_day = last_cycle_reset_day;
     }
 
     /// A controller with permissive defaults (no cooldown-relevant history,
@@ -442,6 +510,63 @@ mod tests {
     use super::*;
     use crate::units::{BatteryPower, PowerCap};
     use crate::world::{DeviceId, Measurement, MeterReading};
+
+    /// A snapshot whose every field differs from a freshly built controller's,
+    /// so that dropping any one of them from `state`/`restore` is visible.
+    /// The values are arbitrary and deliberately all distinct.
+    fn distinctive_state() -> ControllerState {
+        ControllerState {
+            last_mode: ControlMode::Discharge,
+            last_active_mode: Some(ControlMode::Charge),
+            last_mode_change: Timestamp::from_millis(11),
+            last_decision: Timestamp::from_millis(22),
+            last_idle_start: Some(Timestamp::from_millis(33)),
+            daily_transitions: 44,
+            daily_cooldown_suppressions: 55,
+            last_cycle_reset_day: 66,
+        }
+    }
+
+    /// `state` and `restore` have to be exact inverses, field for field.
+    ///
+    /// This is stated here as a round trip rather than left to the behavioural
+    /// test in `engine.rs`, because behaviour cannot reach all of it: no single
+    /// event sequence moves every field away from its default at once — a
+    /// midnight reset zeroes the daily counters, and `last_idle_start` is only
+    /// set while `last_mode` is `Idle`, which is the default. A field that no
+    /// journey happens to consult would drop out of the snapshot silently and
+    /// surface later as a replay that is subtly, unreproducibly wrong.
+    ///
+    /// `restore` destructures its argument, so *adding* a field is a compile
+    /// error rather than a silent omission. This test covers the other
+    /// direction: a field that is carried but not assigned.
+    #[test]
+    fn state_and_restore_are_exact_inverses() {
+        let mut controller = Controller::test_default(1_000_000_000, 100);
+        assert_ne!(
+            controller.state(),
+            distinctive_state(),
+            "fixture must differ from a fresh controller or this proves nothing"
+        );
+
+        controller.restore(distinctive_state());
+        assert_eq!(controller.state(), distinctive_state());
+    }
+
+    /// The snapshot is JSON in the journal, so the trip through serde has to
+    /// close too — including `last_mode`, whose `Deserialize` exists only for
+    /// this, and the `Option` fields, where a `None`/absent mix-up would read
+    /// back as a controller that had never idled.
+    #[test]
+    fn controller_state_round_trips_through_json() {
+        let state = distinctive_state();
+        let json = serde_json::to_string(&state).unwrap();
+        assert_eq!(state, serde_json::from_str(&json).unwrap());
+
+        let fresh = Controller::test_default(1_000_000_000, 100).state();
+        let json = serde_json::to_string(&fresh).unwrap();
+        assert_eq!(fresh, serde_json::from_str(&json).unwrap());
+    }
 
     /// A one-battery world, the shape every test in this module decides against.
     /// `MeterReading::total_only` zeroes the phases, which is exact rather than
