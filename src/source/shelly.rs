@@ -9,7 +9,7 @@
 //! meter would still mean edits in `mqtt.rs`, `run_subscriber`, `Config` and
 //! `main.rs` — see `source/mod.rs` for the list.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::MeterObservation;
 use crate::units::{GridPower, SolarPower};
@@ -56,7 +56,7 @@ pub struct ShellyReading {
 /// It lives with the adapter rather than with `Config` because A/B/C is a fact
 /// about this meter, not about the controller: a single-phase P1 meter has no
 /// such knob to configure.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum SolarPhase {
     A,
     B,
@@ -64,13 +64,30 @@ pub enum SolarPhase {
 }
 
 impl SolarPhase {
+    /// The one gate. Case-insensitive and trimming, because the value is typed
+    /// by a person into a configuration file.
+    ///
+    /// The message names what is wrong, not where it was read from: the caller
+    /// knows whether it was an environment variable or a TOML key, and this
+    /// does not.
     pub(crate) fn parse(s: &str) -> Result<Self, String> {
         match s.trim().to_ascii_uppercase().as_str() {
             "A" => Ok(SolarPhase::A),
             "B" => Ok(SolarPhase::B),
             "C" => Ok(SolarPhase::C),
-            _ => Err("SOLAR_PHASE must be one of A, B, or C".to_string()),
+            _ => Err("must be one of A, B, or C".to_string()),
         }
+    }
+}
+
+/// Routed through `parse` rather than derived, so the one gate stays the one
+/// gate. A derived enum `Deserialize` would be a second, stricter gate — it
+/// would reject `"a"` and `" A "`, which the environment has always accepted
+/// and which a hand-written config file will contain.
+impl<'de> Deserialize<'de> for SolarPhase {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        SolarPhase::parse(&raw).map_err(serde::de::Error::custom)
     }
 }
 
@@ -208,7 +225,28 @@ mod tests {
         assert_eq!(SolarPhase::parse("c").unwrap(), SolarPhase::C);
         assert_eq!(
             SolarPhase::parse("D").unwrap_err(),
-            "SOLAR_PHASE must be one of A, B, or C"
+            "must be one of A, B, or C"
         );
+    }
+
+    /// Serde goes through `parse`, so the file format accepts exactly what the
+    /// environment always did.
+    #[test]
+    fn solar_phase_deserializes_through_the_same_gate() {
+        assert_eq!(
+            serde_json::from_str::<SolarPhase>("\" a \"").unwrap(),
+            SolarPhase::A,
+        );
+        assert_eq!(
+            serde_json::from_str::<SolarPhase>("\"c\"").unwrap(),
+            SolarPhase::C
+        );
+        assert!(
+            serde_json::from_str::<SolarPhase>("\"D\"")
+                .unwrap_err()
+                .to_string()
+                .contains("must be one of A, B, or C"),
+        );
+        assert_eq!(serde_json::to_string(&SolarPhase::B).unwrap(), "\"B\"");
     }
 }

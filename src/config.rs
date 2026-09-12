@@ -32,10 +32,9 @@ fn parse_weekday(s: &str) -> Result<Weekday, String> {
         "fri" | "friday" => Ok(Weekday::Fri),
         "sat" | "saturday" => Ok(Weekday::Sat),
         "sun" | "sunday" => Ok(Weekday::Sun),
-        _ => Err(
-            "BALANCE_WEEKDAY must be one of Mon, Tue, Wed, Thu, Fri, Sat, Sun, or 'none'"
-                .to_string(),
-        ),
+        // Names what is wrong, not where it was read from — the caller knows
+        // whether that was an environment variable or a TOML key.
+        _ => Err("must be one of Mon, Tue, Wed, Thu, Fri, Sat, Sun, or 'none'".to_string()),
     }
 }
 
@@ -342,12 +341,13 @@ impl Config {
                 ) {
                     None
                 } else {
-                    Some(parse_weekday(&raw)?)
+                    Some(parse_weekday(&raw).map_err(|e| format!("BALANCE_WEEKDAY {e}"))?)
                 }
             },
             solar_phase: SolarPhase::parse(
                 &env::var("SOLAR_PHASE").unwrap_or_else(|_| "A".to_string()),
-            )?,
+            )
+            .map_err(|e| format!("SOLAR_PHASE {e}"))?,
             solar_discharge_block_threshold: SolarPower::new(
                 env::var("SOLAR_DISCHARGE_BLOCK_THRESHOLD")
                     .unwrap_or_else(|_| "0".to_string())
