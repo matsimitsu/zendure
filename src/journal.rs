@@ -51,11 +51,12 @@ const SCHEMA_VERSION: i64 = 1;
 pub struct Journal {
     tx: mpsc::Sender<Record>,
     dropped: Arc<AtomicU64>,
-    /// Only tests need to know when the writer has finished. Production never
-    /// joins it: the process exits and SQLite's WAL is already consistent.
-    #[cfg(test)]
-    writer: Option<tokio::task::JoinHandle<()>>,
 }
+
+/// The writer's handle, returned alongside the journal rather than held inside
+/// it. Awaiting it is how a caller waits for the queue to drain, and that only
+/// works once every `Journal` — and so every sender — has been dropped.
+pub type Writer = tokio::task::JoinHandle<()>;
 
 /// One row, already serialized. Serialization happens on the calling side so a
 /// malformed value costs the caller a `debug!` rather than killing the writer.
@@ -118,7 +119,7 @@ impl Journal {
         retention: RetentionDays,
         version: &str,
         session_config: &T,
-    ) -> Option<Self> {
+    ) -> Option<(Self, Writer)> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
             && let Err(e) = std::fs::create_dir_all(parent)
@@ -155,16 +156,9 @@ impl Journal {
             let dropped = Arc::clone(&dropped);
             move || writer(conn, session_id, rx, retention, &dropped)
         });
-        #[cfg(not(test))]
-        drop(handle);
 
         tracing::info!("Journal open at {}", path.display());
-        Some(Self {
-            tx,
-            dropped,
-            #[cfg(test)]
-            writer: Some(handle),
-        })
+        Some((Self { tx, dropped }, handle))
     }
 
     /// Record an engine event. Called *before* the event is stepped, so a crash
@@ -559,20 +553,20 @@ mod tests {
 
     /// Opens a journal in a temp dir and returns it with a connection for
     /// reading back. The journal is dropped by the caller to end the writer.
-    fn open(dir: &tempfile::TempDir) -> (Journal, std::path::PathBuf) {
+    fn open(dir: &tempfile::TempDir) -> (Journal, Writer, std::path::PathBuf) {
         let path = dir.path().join("journal.db");
-        let journal = Journal::open(&path, days(90), "0.0.0-test", &serde_json::json!({"k": 1}))
-            .expect("journal opens in a temp dir");
-        (journal, path)
+        let (journal, writer) =
+            Journal::open(&path, days(90), "0.0.0-test", &serde_json::json!({"k": 1}))
+                .expect("journal opens in a temp dir");
+        (journal, writer, path)
     }
 
     /// Closes the sender and *waits for the writer to finish*, then reopens the
     /// file for reading. Sleeping instead would make every test here a race
     /// that happens to pass on a fast machine.
-    async fn drain(mut journal: Journal, path: &Path) -> Connection {
-        let handle = journal.writer.take().expect("writer handle");
+    async fn drain(journal: Journal, writer: Writer, path: &Path) -> Connection {
         drop(journal);
-        handle.await.expect("writer panicked");
+        writer.await.expect("writer panicked");
         Connection::open(path).unwrap()
     }
 
@@ -587,8 +581,8 @@ mod tests {
     #[tokio::test]
     async fn opening_records_a_session_row() {
         let dir = tempfile::tempdir().unwrap();
-        let (journal, path) = open(&dir);
-        let conn = drain(journal, &path).await;
+        let (journal, writer, path) = open(&dir);
+        let conn = drain(journal, writer, &path).await;
 
         let (version, config): (String, String) = conn
             .query_row("SELECT version, config_json FROM sessions", [], |r| {
@@ -648,9 +642,9 @@ mod tests {
     #[tokio::test]
     async fn raw_payloads_are_stored_verbatim() {
         let dir = tempfile::tempdir().unwrap();
-        let (journal, path) = open(&dir);
+        let (journal, writer, path) = open(&dir);
         journal.raw("shelly", r#"{"total_act_power":150.5,"unmodelled":"kept"}"#);
-        let conn = drain(journal, &path).await;
+        let conn = drain(journal, writer, &path).await;
 
         let stored: String = conn
             .query_row(
@@ -667,10 +661,10 @@ mod tests {
     #[tokio::test]
     async fn malformed_payloads_are_kept_as_a_string() {
         let dir = tempfile::tempdir().unwrap();
-        let (journal, path) = open(&dir);
+        let (journal, writer, path) = open(&dir);
         journal.raw("zendure_poll", r#"{"electricLevel": 4"#);
         journal.raw("shelly", r#"{"ok":true}"#);
-        let conn = drain(journal, &path).await;
+        let conn = drain(journal, writer, &path).await;
 
         let stored: String = conn
             .query_row(
@@ -690,14 +684,14 @@ mod tests {
     #[tokio::test]
     async fn events_round_trip_through_the_database() {
         let dir = tempfile::tempdir().unwrap();
-        let (journal, path) = open(&dir);
+        let (journal, writer, path) = open(&dir);
         let event = Event::Meter {
             at: clock(),
             grid: MeterReading::total_only(GridPower(150.5)),
             solar: SolarPower::new(200.0),
         };
         journal.event(&event);
-        let conn = drain(journal, &path).await;
+        let conn = drain(journal, writer, &path).await;
 
         let (ts_ms, kind, payload): (i64, String, String) = conn
             .query_row("SELECT ts_ms, kind, payload_json FROM events", [], |r| {
@@ -718,7 +712,7 @@ mod tests {
     #[tokio::test]
     async fn a_decision_writes_one_row_per_device() {
         let dir = tempfile::tempdir().unwrap();
-        let (journal, path) = open(&dir);
+        let (journal, writer, path) = open(&dir);
         journal.decision(
             NOW_MS,
             DecisionKind::Decision,
@@ -729,7 +723,7 @@ mod tests {
                 outcome("battery-b", Applied::Error, Some("timed out")),
             ],
         );
-        let conn = drain(journal, &path).await;
+        let conn = drain(journal, writer, &path).await;
 
         let mut stmt = conn
             .prepare("SELECT device, outcome, error FROM decisions ORDER BY device")
@@ -768,7 +762,7 @@ mod tests {
     #[tokio::test]
     async fn a_decision_that_commanded_nothing_still_gets_a_row() {
         let dir = tempfile::tempdir().unwrap();
-        let (journal, path) = open(&dir);
+        let (journal, writer, path) = open(&dir);
         journal.decision(
             NOW_MS,
             DecisionKind::Failsafe,
@@ -776,7 +770,7 @@ mod tests {
             &engine_state(),
             &[],
         );
-        let conn = drain(journal, &path).await;
+        let conn = drain(journal, writer, &path).await;
 
         let (kind, device): (String, Option<String>) = conn
             .query_row("SELECT kind, device FROM decisions", [], |r| {
@@ -800,7 +794,7 @@ mod tests {
     #[tokio::test]
     async fn a_decision_row_restores_a_working_engine() {
         let dir = tempfile::tempdir().unwrap();
-        let (journal, path) = open(&dir);
+        let (journal, writer, path) = open(&dir);
 
         // Latched, so the field that used to be dropped is not its default.
         let state = EngineState {
@@ -814,7 +808,7 @@ mod tests {
             &state,
             &[outcome("SN123", Applied::Ok, None)],
         );
-        let conn = drain(journal, &path).await;
+        let conn = drain(journal, writer, &path).await;
 
         let (state_json, pre_net): (String, f64) = conn
             .query_row(
@@ -849,7 +843,7 @@ mod tests {
     #[tokio::test]
     async fn rows_are_attributed_to_their_session() {
         let dir = tempfile::tempdir().unwrap();
-        let (journal, path) = open(&dir);
+        let (journal, writer, path) = open(&dir);
         journal.raw("shelly", r#"{"ok":true}"#);
         journal.decision(
             NOW_MS,
@@ -858,7 +852,7 @@ mod tests {
             &engine_state(),
             &[],
         );
-        let conn = drain(journal, &path).await;
+        let conn = drain(journal, writer, &path).await;
 
         let session: i64 = conn
             .query_row("SELECT id FROM sessions", [], |r| r.get(0))
@@ -888,7 +882,7 @@ mod tests {
     #[tokio::test]
     async fn prune_deletes_beyond_the_retention_window() {
         let dir = tempfile::tempdir().unwrap();
-        let (journal, path) = open(&dir);
+        let (journal, writer, path) = open(&dir);
         journal.raw("shelly", r#"{"old":true}"#);
         journal.decision(
             NOW_MS,
@@ -897,7 +891,7 @@ mod tests {
             &engine_state(),
             &[outcome("SN123", Applied::Ok, None)],
         );
-        let conn = drain(journal, &path).await;
+        let conn = drain(journal, writer, &path).await;
         assert_eq!(count(&conn, "SELECT count(*) FROM decisions"), 1);
 
         backdate(&conn, 100);
@@ -923,7 +917,6 @@ mod tests {
         let journal = Journal {
             tx,
             dropped: Arc::new(AtomicU64::new(0)),
-            writer: None,
         };
 
         for _ in 0..50 {
@@ -945,9 +938,9 @@ mod tests {
     #[tokio::test]
     async fn prune_keeps_rows_inside_the_window() {
         let dir = tempfile::tempdir().unwrap();
-        let (journal, path) = open(&dir);
+        let (journal, writer, path) = open(&dir);
         journal.raw("shelly", r#"{"recent":true}"#);
-        let conn = drain(journal, &path).await;
+        let conn = drain(journal, writer, &path).await;
 
         backdate(&conn, 10);
         prune(&conn, days(90));

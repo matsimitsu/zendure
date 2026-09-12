@@ -154,13 +154,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // On by default: by the time you think to enable logging, the bug you
     // wanted it for has already happened. Any failure here disables the journal
     // and leaves control untouched.
-    let journal = Journal::open(
+    let (journal, journal_writer) = match Journal::open(
         &config.journal_path,
         config.journal_retention_days,
         env!("CARGO_PKG_VERSION"),
         &config.session(),
-    )
-    .map(std::sync::Arc::new);
+    ) {
+        Some((journal, writer)) => (Some(std::sync::Arc::new(journal)), Some(writer)),
+        None => (None, None),
+    };
 
     let (mqtt_client, eventloop) = mqtt::create_mqtt_client(&config);
     let publisher_client = mqtt_client.clone();
@@ -174,7 +176,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ha_prefix = config.ha_publish_prefix.clone();
     let subscriber_prefix = config.ha_publish_prefix.clone();
     let subscriber_journal = journal.clone();
-    tokio::spawn(async move {
+    let subscriber = tokio::spawn(async move {
         mqtt::run_subscriber(
             mqtt_client,
             eventloop,
@@ -218,10 +220,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ready and the loop spun for the whole outage.
     let mut mqtt_deadline = tokio::time::Instant::now() + mqtt_timeout;
 
+    // systemd stops this process with SIGTERM. Without an arm for it the process
+    // simply died, and everything still queued for the journal's writer died
+    // with it — a durability regression against the NDJSON capture, which wrote
+    // synchronously on the calling thread and so survived any kill. The row most
+    // worth having is the last decision before a restart.
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+
     tracing::info!("Coordinator running, waiting for MQTT data...");
 
     loop {
         tokio::select! {
+            _ = sigterm.recv() => {
+                tracing::info!("SIGTERM — draining the journal and stopping");
+                break;
+            }
+            _ = sigint.recv() => {
+                tracing::info!("SIGINT — draining the journal and stopping");
+                break;
+            }
             event = rx.recv() => {
                 // A closed channel means the subscriber task is gone, which is
                 // not something this loop can recover from: stop.
@@ -468,6 +486,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+    }
+
+    // Order matters. The writer stops when every sender is gone, and the
+    // subscriber task holds one, so it has to be finished before the last
+    // `Arc<Journal>` can drop. `abort` alone only schedules cancellation —
+    // awaiting it is what guarantees the task and its captured clone are gone.
+    subscriber.abort();
+    let _ = subscriber.await;
+    drop(journal);
+    if let Some(writer) = journal_writer {
+        let _ = writer.await;
     }
 
     Ok(())
