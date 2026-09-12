@@ -625,6 +625,15 @@ pub async fn run(
 /// above argue for something the code did not do: an unbounded wait ends at
 /// systemd's `TimeoutStopSec`, and that ends with SIGKILL, which loses the rows
 /// the wait was protecting. A deadline at least gets to say what was lost.
+///
+/// What the MQTT half guarantees, precisely: **hand-off, not delivery.** The
+/// delivery task's `publish` returns once the request is in rumqttc's channel,
+/// so the task can finish with up to fifty messages still in front of the
+/// socket, and aborting the subscriber drops the eventloop that would have
+/// written them. In practice the subscriber is live throughout the window and
+/// flushes most of it, which is why the ordering is what it is — but a tail can
+/// be lost, and the journal, not the broker, is the record that has to be
+/// right.
 async fn shut_down(
     publisher: &MqttPublisher,
     publisher_task: &mut PublisherTask,
