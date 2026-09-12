@@ -127,7 +127,13 @@ backfilled.
 The control loop never touches SQLite: records go to a bounded queue and a
 writer thread owns the connection. If that queue ever fills, records are dropped
 and counted rather than making the decision path wait. Journal failures never
-affect control.
+affect control — including a bad `JOURNAL_RETENTION_DAYS`, which warns and keeps
+the default rather than stopping the controller.
+
+Dropped records and failed writes are both counted and warned about (on the
+first and then at powers of two, so a wedged writer cannot flood the log), and
+summarised on shutdown. `RUST_LOG` overrides the default `zendure=info` filter
+outright, so `RUST_LOG=zendure=debug` shows the per-record detail.
 
 ## Running
 

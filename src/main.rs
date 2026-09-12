@@ -71,12 +71,16 @@ async fn apply_and_publish(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("zendure=info".parse().unwrap()),
-        )
-        .init();
+    // `RUST_LOG` wins outright when it is set. It used to be merged with a
+    // hard-coded `zendure=info`, and `add_directive` *replaces* a directive with
+    // the same target rather than merging — so `RUST_LOG=zendure=debug` was
+    // silently overwritten back to `info` and the module's debug lines were
+    // unreachable by the one incantation an operator would try.
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(spec) if !spec.trim().is_empty() => tracing_subscriber::EnvFilter::new(spec),
+        _ => tracing_subscriber::EnvFilter::new("zendure=info"),
+    };
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let config = Config::from_env()?;
     tracing::info!("Starting Zendure controller for {}", config.zendure_sn);

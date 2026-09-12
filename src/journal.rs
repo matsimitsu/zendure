@@ -304,6 +304,11 @@ fn prepare(conn: &Connection, version: &str, config_json: &str) -> rusqlite::Res
     // the last transactions; WAL still recovers a consistent database, and the
     // alternative is SD-card fsync latency on a box that writes every second.
     conn.pragma_update(None, "synchronous", "NORMAL")?;
+    // WAL lets readers run without blocking us, but anything taking a write
+    // lock — an operator's `VACUUM`, a second process — would otherwise make
+    // the very next insert fail instantly with SQLITE_BUSY, since the default
+    // timeout is zero.
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS sessions (
@@ -366,11 +371,23 @@ fn writer(
     let mut last_prune = Utc::now().date_naive();
     prune(&conn, retention);
 
+    // Counted, not just logged. A writer failing *every* insert drains the
+    // queue faster than a healthy one, so the queue never fills and the dropped
+    // counter never moves — the failure that most needs announcing was the one
+    // that announced itself least.
+    let mut failed: u64 = 0;
+
     while let Some(record) = rx.blocking_recv() {
         if let Err(e) = write(&conn, session_id, &record) {
-            // Debug, not warn: a failing database would otherwise emit a line
-            // per reading. The dropped counter above is the loud signal.
-            tracing::debug!("Journal: write failed: {e}");
+            failed += 1;
+            // First one always, then powers of two. A full disk or a read-only
+            // SD card fails every insert, so a line per record would flood; a
+            // line per record *silently dropped* was the alternative, and that
+            // is how journalling stopped for the life of a process with logs
+            // identical to a healthy run.
+            if failed.is_power_of_two() {
+                tracing::warn!("Journal: write failed ({failed} so far): {e}");
+            }
         }
 
         // Once a day, on whichever record happens to cross midnight.
@@ -381,9 +398,9 @@ fn writer(
         }
     }
 
-    let n = dropped.load(Ordering::Relaxed);
-    if n > 0 {
-        tracing::warn!("Journal closing — {n} records were dropped");
+    let dropped = dropped.load(Ordering::Relaxed);
+    if dropped > 0 || failed > 0 {
+        tracing::warn!("Journal closing — {dropped} records dropped, {failed} writes failed");
     }
 }
 
@@ -424,13 +441,24 @@ fn write(conn: &Connection, session_id: i64, record: &Record) -> rusqlite::Resul
 fn prune(conn: &Connection, retention: RetentionDays) {
     let cutoff = retention.cutoff(Utc::now()).as_millis();
     let mut removed = 0usize;
-    for table in ["events", "decisions"] {
-        match conn.execute(&format!("DELETE FROM {table} WHERE ts_ms < ?1"), [cutoff]) {
+    // `sessions` is in the list because the doc below claims retention is the
+    // only thing bounding this file, and it was not: one row per restart
+    // accumulated forever. Its time column is named differently, hence the pair.
+    //
+    // `continue`, not `return`: failing on the first table used to skip
+    // `decisions` — the larger one, the one retention exists to bound — and the
+    // vacuum with it, until the next midnight.
+    for (table, column) in [
+        ("events", "ts_ms"),
+        ("decisions", "ts_ms"),
+        ("sessions", "started_ms"),
+    ] {
+        match conn.execute(
+            &format!("DELETE FROM {table} WHERE {column} < ?1"),
+            [cutoff],
+        ) {
             Ok(n) => removed += n,
-            Err(e) => {
-                tracing::warn!("Journal: cannot prune {table}: {e}");
-                return;
-            }
+            Err(e) => tracing::warn!("Journal: cannot prune {table}: {e}"),
         }
     }
     if removed > 0 {
@@ -444,13 +472,16 @@ fn prune(conn: &Connection, retention: RetentionDays) {
     }
 }
 
-/// Unused: proves `prune` deletes by date rather than by row count, without
-/// making a test wait a day.
+/// Ages every row so `prune` can be exercised against a real date boundary
+/// without a test waiting a day. `sessions` is keyed on `started_ms` rather than
+/// `ts_ms`, which is the schema's one asymmetry.
 #[cfg(test)]
 fn backdate(conn: &Connection, days: i64) {
     let ts = (Utc::now() - chrono::Duration::days(days)).timestamp_millis();
     conn.execute("UPDATE events SET ts_ms = ?1", [ts]).unwrap();
     conn.execute("UPDATE decisions SET ts_ms = ?1", [ts])
+        .unwrap();
+    conn.execute("UPDATE sessions SET started_ms = ?1", [ts])
         .unwrap();
 }
 
@@ -720,6 +751,15 @@ mod tests {
                 ),
             ]
         );
+
+        // Pinned alongside `"failsafe"` below, so both vocabulary strings the
+        // `kind` column can hold are guarded rather than just one.
+        assert_eq!(
+            conn.query_row("SELECT DISTINCT kind FROM decisions", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "decision"
+        );
     }
 
     /// A decision that commanded nothing is still a decision. This is reachable
@@ -850,11 +890,54 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (journal, path) = open(&dir);
         journal.raw("shelly", r#"{"old":true}"#);
+        journal.decision(
+            NOW_MS,
+            DecisionKind::Decision,
+            &decision(),
+            &engine_state(),
+            &[outcome("SN123", Applied::Ok, None)],
+        );
         let conn = drain(journal, &path).await;
+        assert_eq!(count(&conn, "SELECT count(*) FROM decisions"), 1);
 
         backdate(&conn, 100);
         prune(&conn, days(90));
+        // All three tables, not just `events`: a prune that forgot `decisions`
+        // — the table holding the large rows, the one retention exists to bound
+        // — used to pass this test.
         assert_eq!(count(&conn, "SELECT count(*) FROM events"), 0);
+        assert_eq!(count(&conn, "SELECT count(*) FROM decisions"), 0);
+        assert_eq!(count(&conn, "SELECT count(*) FROM sessions"), 0);
+    }
+
+    /// **The property the whole architecture exists for**, and it had no test.
+    ///
+    /// The control loop must never wait on the journal, so a queue that cannot
+    /// be drained has to drop and count rather than block. Proven by never
+    /// starting a writer: the receiver is dropped on the spot, so every `send`
+    /// fails exactly as a wedged writer would, and the calls still return.
+    #[tokio::test]
+    async fn a_full_queue_drops_records_instead_of_blocking() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let journal = Journal {
+            tx,
+            dropped: Arc::new(AtomicU64::new(0)),
+            writer: None,
+        };
+
+        for _ in 0..50 {
+            journal.raw("shelly", r#"{"ok":true}"#);
+        }
+        journal.decision(
+            NOW_MS,
+            DecisionKind::Decision,
+            &decision(),
+            &engine_state(),
+            &[],
+        );
+
+        assert_eq!(journal.dropped.load(Ordering::Relaxed), 51);
     }
 
     /// The complement: a row inside the window survives a prune. Without this,
