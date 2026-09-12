@@ -17,7 +17,7 @@
 
 use std::future::Future;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::allocate::Directive;
 use crate::command::Command;
@@ -78,7 +78,7 @@ pub trait BatteryController {
 /// `snake_case` so it serializes as the `"ok"` / `"error"` the journal already
 /// carries — step 7's `decisions.outcome` column and the README example read
 /// the same bytes as before.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Applied {
     Ok,
@@ -157,7 +157,7 @@ impl std::fmt::Display for ControlPath {
 
 /// One command's fate, as recorded. `command` is the `Display` string, which is
 /// the format `command_tests.rs` pins and the raw log already quotes.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Outcome {
     pub device: DeviceId,
     pub command: String,
