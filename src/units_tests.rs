@@ -382,3 +382,44 @@ fn validating_deserialize_leaves_the_wire_format_alone() {
     let setpoint: Setpoint = serde_json::from_str("145").unwrap();
     assert_eq!(serde_json::to_string(&setpoint).unwrap(), "145");
 }
+
+/// The hole a configuration file would have fallen into.
+///
+/// `RetentionDays` derived `Deserialize` transparently, which builds the field
+/// directly and skips `new` — so a `0` read off a wire produced the value whose
+/// own doc comment says it is impossible to express, and `prune` would have
+/// deleted the whole journal at every startup and every midnight.
+#[test]
+fn retention_days_refuses_through_serde_what_its_constructor_refuses() {
+    for bad in ["0", "-5"] {
+        let err = serde_json::from_str::<RetentionDays>(bad)
+            .expect_err("a retention that deletes everything is not a retention");
+        assert!(
+            err.to_string()
+                .contains("must be a positive number of days"),
+            "the constructor's own message should reach the caller, got: {err}",
+        );
+    }
+
+    assert_eq!(
+        serde_json::from_str::<RetentionDays>("30").unwrap(),
+        RetentionDays::new(30).unwrap(),
+    );
+    // An absurd upper value is still clamped rather than refused: the intent
+    // there is unambiguous.
+    assert_eq!(
+        serde_json::from_str::<RetentionDays>("99999")
+            .unwrap()
+            .days(),
+        RetentionDays::MAX_DAYS,
+    );
+}
+
+/// Serialization is untouched, so the journal's own round trip still works.
+#[test]
+fn retention_days_still_serializes_as_a_bare_number() {
+    assert_eq!(
+        serde_json::to_string(&RetentionDays::new(90).unwrap()).unwrap(),
+        "90",
+    );
+}

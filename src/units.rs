@@ -81,6 +81,24 @@ macro_rules! validating_deserialize {
     };
 }
 
+/// The same, for a constructor that *rejects* rather than clamps.
+///
+/// A sibling rather than a generalisation of the macro above: those
+/// constructors are infallible by design — a SOC of 200 is a number someone
+/// meant as a percentage and clamping it is the kind reading — while this one
+/// has values it must refuse outright, and the refusal has to reach the
+/// deserializer as an error rather than become a silent default.
+macro_rules! validating_deserialize_result {
+    ($t:ty, $inner:ty, $ctor:expr) => {
+        impl<'de> Deserialize<'de> for $t {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                <$inner as Deserialize<'de>>::deserialize(d)
+                    .and_then(|v| $ctor(v).map_err(serde::de::Error::custom))
+            }
+        }
+    };
+}
+
 // --- Watts: the integer-watt arithmetic unit -------------------------------
 
 /// Integer watts. The unit the device speaks and the controller computes in —
@@ -570,9 +588,20 @@ impl PartialOrd<Duration> for Elapsed {
 ///
 /// Both are impossible to express now: the constructor is the only way in, it
 /// clamps once, and `cutoff` owns the arithmetic so no call site repeats it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+///
+/// `Deserialize` is routed through that constructor rather than derived, for
+/// the reason [`validating_deserialize`] gives — and this type is the sharpest
+/// case of it. A transparent derive builds the field directly, so
+/// `retention_days = 0` read off a wire would produce `RetentionDays(0)`, put
+/// `cutoff` at *now*, and delete the entire journal at startup and every
+/// midnight: the exact failure the paragraph above says is impossible to
+/// express. Nothing deserialized one while the only source was the environment,
+/// which is why it went unnoticed; a configuration file is a wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct RetentionDays(i64);
+
+validating_deserialize_result!(RetentionDays, i64, RetentionDays::new);
 
 impl RetentionDays {
     /// Longest window we will honour. Far past any useful retention, and far
