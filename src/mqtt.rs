@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use crate::config::Config;
 use crate::journal::Journal;
 use crate::models::{ControlDecision, CycleCounts};
-use crate::publish::{Message, Publisher};
+use crate::publish::{Delivery, Message, Publisher};
 use crate::source::MeterObservation;
 use crate::source::shelly::{self, SolarPhase};
 use crate::units::{KiloWattHours, Percent, Soc, Watts};
@@ -79,6 +79,9 @@ pub struct MqttPublisher {
     tx: std::sync::Mutex<Option<mpsc::Sender<Message>>>,
     dropped: Arc<AtomicU64>,
     failed: Arc<AtomicU64>,
+    /// Retained discovery documents this connection has already accepted, by
+    /// topic. Cleared on every ConnAck — see [`MqttPublisher::reconnected`].
+    discovered: std::sync::Mutex<std::collections::HashMap<String, String>>,
 }
 
 impl MqttPublisher {
@@ -96,9 +99,36 @@ impl MqttPublisher {
             tx: std::sync::Mutex::new(Some(tx)),
             dropped,
             failed,
+            discovered: std::sync::Mutex::new(std::collections::HashMap::new()),
         });
 
         (publisher, task)
+    }
+
+    /// A publisher with no delivery task, so a test can read back exactly what
+    /// `publish` queued. Nothing else differs: this is the real queue and the
+    /// real `Publisher` impl, only without a broker on the other end.
+    #[cfg(test)]
+    pub(crate) fn queued(capacity: usize) -> (Arc<Self>, mpsc::Receiver<Message>) {
+        let (tx, rx) = mpsc::channel::<Message>(capacity);
+        let publisher = Arc::new(MqttPublisher {
+            tx: std::sync::Mutex::new(Some(tx)),
+            dropped: Arc::new(AtomicU64::new(0)),
+            failed: Arc::new(AtomicU64::new(0)),
+            discovered: std::sync::Mutex::new(std::collections::HashMap::new()),
+        });
+        (publisher, rx)
+    }
+
+    /// Forget which discovery documents have been published.
+    ///
+    /// Called on every ConnAck, because a broker that restarted may have lost
+    /// its retained store — and a broker we merely reconnected to may be a
+    /// different broker. Re-announcing on connect is cheap; not re-announcing
+    /// when the store is gone means every sensor silently disappears from Home
+    /// Assistant until the controller is restarted.
+    pub fn reconnected(&self) {
+        lock(&self.discovered).clear();
     }
 
     /// Stop accepting messages and let the task finish what is already queued,
@@ -122,11 +152,35 @@ impl MqttPublisher {
 
 impl Publisher for MqttPublisher {
     fn publish(&self, message: Message) {
+        // A retained document the broker already holds, with the same bytes, is
+        // not worth the slot. Only discovery is deduplicated: telemetry is a
+        // value that means "this is true now", and suppressing a repeat would
+        // be suppressing the news that nothing changed.
+        let remember = if message.delivery == Delivery::Discovery {
+            if lock(&self.discovered).get(&message.topic) == Some(&message.payload) {
+                return;
+            }
+            Some((message.topic.clone(), message.payload.clone()))
+        } else {
+            None
+        };
+
         let sent = match lock(&self.tx).as_ref() {
             Some(tx) => tx.try_send(message).is_ok(),
             // Closed: shutdown has begun and this is a late publish.
             None => false,
         };
+
+        if sent {
+            // Recorded on acceptance, never on attempt. A discovery document
+            // dropped under backpressure has not reached the broker, and
+            // remembering it here would suppress every retry for the life of
+            // the connection — the sensor would be missing from Home Assistant
+            // with nothing in the log to say why.
+            if let Some((topic, payload)) = remember {
+                lock(&self.discovered).insert(topic, payload);
+            }
+        }
 
         if !sent {
             let n = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
@@ -197,6 +251,9 @@ pub async fn run_subscriber(
                 if let Err(e) = client.subscribe(&shelly_topic, QoS::AtMostOnce).await {
                     tracing::error!("Failed to subscribe to {shelly_topic}: {e}");
                 }
+                // Before the documents, not after: a broker that lost its
+                // retained store needs all of them again.
+                publisher.reconnected();
                 publish_ha_discovery(&*publisher, &ha_prefix);
             }
             Ok(Event::Incoming(Packet::Publish(publish))) => {
@@ -517,6 +574,19 @@ mod tests {
         AsyncClient::new(opts, 50)
     }
 
+    /// Everything sitting in the queue right now.
+    fn drain(rx: &mut mpsc::Receiver<Message>) -> Vec<Message> {
+        let mut out = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            out.push(m);
+        }
+        out
+    }
+
+    fn count(messages: &[Message], topic: &str) -> usize {
+        messages.iter().filter(|m| m.topic == topic).count()
+    }
+
     fn telemetry(publisher: &RecordingPublisher) -> Vec<(String, String)> {
         publisher
             .sent()
@@ -645,6 +715,88 @@ mod tests {
         assert_eq!(doc["unique_id"], "zendure_battery_soc");
         assert_eq!(doc["device_class"], "battery");
         assert_eq!(doc["state_class"], "measurement");
+    }
+
+    // --- discovery, once per connection ---------------------------------
+
+    /// A 4-pack device published 4 retained discovery documents on *every*
+    /// poll — 4 of the 16 messages a poll sends, on the very channel whose
+    /// depth caused the wedge.
+    #[tokio::test]
+    async fn a_discovery_document_is_published_once_per_connection() {
+        let (publisher, mut rx) = MqttPublisher::queued(64);
+
+        for _ in 0..5 {
+            publish_temperatures(&*publisher, "zendure", None, &[(0, 2981)]);
+        }
+
+        let queued = drain(&mut rx);
+        // Five polls, five state values, one announcement.
+        assert_eq!(
+            count(&queued, "homeassistant/sensor/zendure_pack0_temp/config"),
+            1,
+        );
+        assert_eq!(count(&queued, "zendure/pack0_temp"), 5);
+    }
+
+    #[tokio::test]
+    async fn a_reconnect_announces_everything_again() {
+        let (publisher, mut rx) = MqttPublisher::queued(64);
+
+        publish_temperatures(&*publisher, "zendure", None, &[(0, 2981)]);
+        publisher.reconnected();
+        publish_temperatures(&*publisher, "zendure", None, &[(0, 2981)]);
+
+        assert_eq!(
+            count(
+                &drain(&mut rx),
+                "homeassistant/sensor/zendure_pack0_temp/config",
+            ),
+            2,
+        );
+    }
+
+    /// A changed document is a different document, dedup or not.
+    #[tokio::test]
+    async fn a_document_whose_bytes_changed_is_published_again() {
+        let (publisher, mut rx) = MqttPublisher::queued(64);
+        let topic = "homeassistant/sensor/zendure_battery_soc/config";
+
+        publisher.publish(Message::discovery(topic.to_string(), "{\"v\":1}".into()));
+        publisher.publish(Message::discovery(topic.to_string(), "{\"v\":1}".into()));
+        publisher.publish(Message::discovery(topic.to_string(), "{\"v\":2}".into()));
+
+        assert_eq!(count(&drain(&mut rx), topic), 2);
+    }
+
+    /// The dedup records what the queue *accepted*, not what was attempted.
+    ///
+    /// Recording on attempt would mean a discovery document dropped under
+    /// backpressure is suppressed for the life of the connection — the sensor
+    /// missing from Home Assistant, with nothing in the log to say why. Here
+    /// the queue is closed, so every send is refused: the second attempt must
+    /// still be made, which shows as a second drop rather than a silent skip.
+    #[tokio::test]
+    async fn a_dropped_discovery_document_is_attempted_again() {
+        let (client, _eventloop) = unreachable_client();
+        let (publisher, _task) = MqttPublisher::open(client);
+        publisher.close();
+
+        let doc = || {
+            Message::discovery(
+                "homeassistant/sensor/zendure_battery_soc/config".to_string(),
+                "{}".to_string(),
+            )
+        };
+        publisher.publish(doc());
+        assert_eq!(publisher.dropped(), 1);
+
+        publisher.publish(doc());
+        assert_eq!(
+            publisher.dropped(),
+            2,
+            "a document that never left is not a document that was published",
+        );
     }
 
     // --- the wedge ------------------------------------------------------
