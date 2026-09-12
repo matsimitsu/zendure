@@ -19,8 +19,9 @@ use std::future::Future;
 
 use serde::{Deserialize, Serialize};
 
+use crate::battery::BatteryState;
 use crate::command::Command;
-use crate::units::PowerCap;
+use crate::units::{DeciKelvin, PackTemperature, PowerCap, Soc, WattHours, Watts};
 use crate::world::DeviceId;
 
 /// A battery model's rated limits. What the hardware can do, as distinct from
@@ -68,6 +69,123 @@ pub trait BatteryController {
     fn id(&self) -> &DeviceId;
 
     fn apply(&self, command: &Command) -> impl Future<Output = Result<(), Self::Error>> + Send;
+}
+
+/// Bytes exactly as they arrived, before anything parsed them.
+///
+/// Carried *out* of the adapter rather than journalled from inside it. An
+/// adapter that wrote to the journal itself would have to know the journal
+/// exists — a dependency this module has never had — and the caller already
+/// owns the rule that matters: capture before parse, so a payload that fails
+/// to decode is still on record. `run.rs` had that ordering right where the
+/// HTTP call was; handing the bytes back preserves it rather than making
+/// `zendure.rs` re-derive it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawCapture {
+    pub kind: &'static str,
+    pub body: String,
+}
+
+/// Everything a poll produces that no decision reads.
+///
+/// Round-trip efficiency, pack temperatures, the enclosure and pack
+/// temperatures and the device's own minimum SOC are all derived from these
+/// and published for graphing; the engine never consults them. Naming the
+/// group is what lets a caller take one `BatteryReading` instead of a
+/// vendor-shaped report and reaching into its fields itself.
+#[derive(Debug)]
+pub struct BatteryTelemetry {
+    pub charge: Watts,
+    pub discharge: Watts,
+    /// `None` when this report carried none — the caller keeps its last known
+    /// set rather than publishing a capacity of zero.
+    pub pack_capacities: Option<Vec<WattHours>>,
+    pub pack_temps: Vec<PackTemperature>,
+    pub enclosure_temp: Option<DeciKelvin>,
+    pub min_soc: Option<Soc>,
+}
+
+/// One reading: what the controller decides on, plus everything else a poll
+/// or the startup handshake produced.
+#[derive(Debug)]
+pub struct BatteryReading {
+    pub state: BatteryState,
+    pub telemetry: BatteryTelemetry,
+    pub raw: Option<RawCapture>,
+}
+
+/// A failure that still carries whatever bytes arrived.
+///
+/// `RawCapture` exists as its own type, rather than living only on the
+/// success path, for exactly this: a response the process failed to decode is
+/// the one most worth having on record, since it is the one a person will
+/// want to look at by hand. A failure with nothing to show for it — the
+/// request itself never came back — carries `None` instead.
+#[derive(Debug)]
+pub struct PollError {
+    pub raw: Option<RawCapture>,
+    pub error: String,
+}
+
+/// Reading a battery's state.
+///
+/// A separate trait from [`BatteryController`], not a second method bolted
+/// onto it, because the two call sites want different things from an
+/// adapter. `registry::actuate` drives every device through `apply` alone —
+/// a directive never asks a battery what it is doing before telling it what
+/// to do next — so a trait with only `apply` is all `actuate` and its tests
+/// need. And [`RecordingBattery`], the write-only double `actuate`'s tests
+/// share, would otherwise have had to invent a `prepare` and a `poll` it
+/// never calls, just to keep satisfying one merged trait — turning a double
+/// built to answer "did the command land" into one that also has to fake
+/// being readable. Two traits mean each call site implements only the one it
+/// uses.
+///
+/// Same shape as `BatteryController`'s, for the reasons argued there: `&self`,
+/// since `ZendureClient` keeps its mutable state behind a `Mutex` so the poll
+/// loop can hold it immutably inside `tokio::select!`; `-> impl Future<..> +
+/// Send` rather than `async fn`, so a generic caller sees the future's
+/// `Send`-ness spelled out instead of inferred, which matters the moment
+/// polling moves onto a spawned task the way actuation already anticipates.
+///
+/// No associated `Error` type, unlike `BatteryController`: every adapter
+/// reports a failure as [`PollError`], not its own error type, because the
+/// raw bytes a failure carries are exactly what the caller journals — an
+/// adapter-specific error type would have to be unwrapped back into that
+/// shape at the boundary anyway, so there is nothing an associated type would
+/// buy here that `BatteryController::Error` buys for `apply`.
+pub trait BatteryMonitor {
+    /// Which device this adapter reads from. Mirrors
+    /// [`BatteryController::id`] — the same identity answers for both halves
+    /// of one physical box.
+    fn id(&self) -> &DeviceId;
+
+    /// The rated limits of the box on the other end, for turning a raw report
+    /// into a `BatteryState`.
+    ///
+    /// Every current caller gets a `BatteryState` already built — `prepare`
+    /// and `poll` do that conversion themselves, with the adapter's own
+    /// `spec` — so nothing outside an adapter calls this yet, the same way
+    /// `Devices::batteries()` sat unused for one commit before `allocate`
+    /// existed. Part of the trait's surface regardless: a caller that only
+    /// has a reading and wants to know what the box is *rated* for, as
+    /// distinct from what it just reported, has nowhere else to ask.
+    #[allow(dead_code)]
+    fn spec(&self) -> &BatterySpec;
+
+    /// The startup handshake, then the first reading.
+    ///
+    /// Not merely "the first poll": a device like the Zendure has to be woken
+    /// into a writable mode and have its power caps (re)written before its
+    /// first report can be trusted, and that sequence runs once, at process
+    /// start, never again. Folding it into `poll` would either repeat the
+    /// wake-and-write handshake on every tick — exactly what "only at
+    /// startup" forbids — or push the caller back into knowing which call is
+    /// the special one, which is the coupling this split exists to remove.
+    fn prepare(&self) -> impl Future<Output = Result<BatteryReading, PollError>> + Send;
+
+    /// One reading, on the interval the coordinator polls at.
+    fn poll(&self) -> impl Future<Output = Result<BatteryReading, PollError>> + Send;
 }
 
 /// Whether a command landed. A two-state role, so it gets a type: as a

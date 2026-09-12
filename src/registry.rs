@@ -59,8 +59,11 @@ use std::collections::BTreeMap;
 use crate::allocate::Directive;
 use crate::command::Command;
 #[cfg(test)]
-use crate::device::RecordingBattery;
-use crate::device::{Applied, BatteryController, ControlPath, Outcome};
+use crate::device::{AC2400_PLUS, RecordingBattery};
+use crate::device::{
+    Applied, BatteryController, BatteryMonitor, BatteryReading, BatterySpec, ControlPath, Outcome,
+    PollError,
+};
 use crate::world::DeviceId;
 use crate::zendure::ZendureClient;
 
@@ -74,6 +77,23 @@ pub enum Battery {
     Zendure(ZendureClient),
     #[cfg(test)]
     Recording(RecordingBattery),
+}
+
+impl Battery {
+    /// The one supported adapter, wired up here rather than in `run.rs`. This
+    /// is the only place a vendor is named when building the registry — the
+    /// coordinator hands this a host and a serial and gets back an opaque
+    /// `Battery`, the same way it already never sees `ZendureClient` once a
+    /// directive is routed through `actuate`.
+    ///
+    /// Still a fixed choice, not a config-driven one: there is only the one
+    /// adapter, so this takes the same two arguments `ZendureClient::new`
+    /// does rather than a `Config` it would have to depend on. The `Virtual`
+    /// variant this module's doc comment anticipates is what turns this into
+    /// a real choice.
+    pub fn zendure(ip: &str, sn: String) -> Self {
+        Battery::Zendure(ZendureClient::new(ip, sn))
+    }
 }
 
 /// `Error = String`: each arm's own error type is stringified here, at
@@ -102,6 +122,72 @@ impl BatteryController for Battery {
     }
 }
 
+/// The read side of the same seam, delegating exactly as `BatteryController`
+/// does above: `run.rs` reaches through here for `prepare`/`poll` instead of
+/// naming `ZendureClient`, so a second device is one more match arm rather
+/// than a second name threaded through the coordinator loop.
+///
+/// `id` repeats `BatteryController`'s match rather than sharing it through a
+/// helper: both traits name a same-shaped `id(&self) -> &DeviceId`, on
+/// purpose, so the two capabilities agree on what a device is called — but
+/// that means a call site with *both* traits in scope, as this module is, has
+/// to say which one it means. `Devices::new` says so with a qualified call;
+/// `run.rs` never imports `BatteryController` at all, so its `.id()` is
+/// unambiguous and reaches this impl instead.
+impl BatteryMonitor for Battery {
+    fn id(&self) -> &DeviceId {
+        match self {
+            Battery::Zendure(client) => client.id(),
+            #[cfg(test)]
+            Battery::Recording(battery) => battery.id(),
+        }
+    }
+
+    fn spec(&self) -> &BatterySpec {
+        match self {
+            Battery::Zendure(client) => client.spec(),
+            // `RecordingBattery` is the write-only double `actuate`'s tests
+            // share (see its doc comment in `device.rs`) — it answers for a
+            // device id and records commands, and was deliberately not
+            // burdened with a spec or a read capability it does not need.
+            // This constant is never read in production; it exists only so
+            // this match is exhaustive in a test build.
+            #[cfg(test)]
+            Battery::Recording(_) => &AC2400_PLUS,
+        }
+    }
+
+    async fn prepare(&self) -> Result<BatteryReading, PollError> {
+        match self {
+            Battery::Zendure(client) => client.prepare().await,
+            #[cfg(test)]
+            Battery::Recording(battery) => Err(unreadable(battery.id())),
+        }
+    }
+
+    async fn poll(&self) -> Result<BatteryReading, PollError> {
+        match self {
+            Battery::Zendure(client) => client.poll().await,
+            #[cfg(test)]
+            Battery::Recording(battery) => Err(unreadable(battery.id())),
+        }
+    }
+}
+
+/// The error a `RecordingBattery` reports for either read call — reachable
+/// only if a test asks a write-only double for a reading, which none of
+/// `actuate`'s tests today do. An `Err`, not a panic: consistent with the
+/// registry's rule (see `actuate`'s "no adapter registered" arm) that a
+/// misuse this module can name stays a reported failure rather than one that
+/// takes the test binary down with it.
+#[cfg(test)]
+fn unreadable(id: &DeviceId) -> PollError {
+    PollError {
+        raw: None,
+        error: format!("{id} is a write-only test double and cannot be read"),
+    }
+}
+
 /// Every battery this process drives, keyed by the id its directives carry.
 ///
 /// A `BTreeMap` rather than a `Vec` for the same reason `World` keeps its
@@ -116,11 +202,17 @@ pub struct Devices {
 impl Devices {
     /// Keys each battery by its own `id()`, so the registry and the adapter
     /// can never disagree about which slot it lives in.
+    ///
+    /// Qualified as `BatteryController::id` rather than `battery.id()`: with
+    /// both `BatteryController` and `BatteryMonitor` in scope in this module,
+    /// plain method-call syntax on a bare `Battery` is ambiguous — either
+    /// trait's `id` would do, and picking one here is arbitrary but has to be
+    /// written down.
     pub fn new(batteries: impl IntoIterator<Item = Battery>) -> Self {
         Devices {
             batteries: batteries
                 .into_iter()
-                .map(|battery| (battery.id().clone(), battery))
+                .map(|battery| (BatteryController::id(&battery).clone(), battery))
                 .collect(),
         }
     }

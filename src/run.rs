@@ -10,13 +10,15 @@
 //!
 //! **The loop still has no test, and this module does not yet make one
 //! possible.** [`run`] takes its stop condition as a parameter, which is one of
-//! the two seams a test needs; the other is the device, and `run` still reaches
-//! a real Zendure over HTTP in its first eighty lines. Until the read path is
-//! behind a trait — `registry::actuate` already routes through [`Devices`], so
-//! only the poll is missing — driving `run` from a test means owning a
-//! battery. Saying otherwise would be worse than saying nothing: the next
-//! person looking for a regression test for a `select!` defect would believe
-//! the seam is here and stop looking.
+//! the two seams a test needs; the other is the device. Both directions are
+//! now behind traits — [`crate::device::BatteryController`] for writes,
+//! [`crate::device::BatteryMonitor`] for reads — so `registry::actuate` and
+//! this module's own startup and poll code both reach a device only through
+//! [`Devices`]. That is not the same as being testable: there is exactly one
+//! adapter, `run` builds it itself with `Battery::zendure`, and nothing yet
+//! lets a test hand `run` a fake in its place. Saying otherwise would be
+//! worse than saying nothing: the next person looking for a regression test
+//! for a `select!` defect would believe the seam is here and stop looking.
 //!
 //! What is testable and is tested: [`shut_down`], whose ordering is the
 //! subtlest thing in the file.
@@ -28,20 +30,18 @@ use crate::allocate::Directive;
 use crate::announce::Announcer;
 use crate::clock::Clock;
 use crate::config::Config;
-use crate::device::{Applied, ControlPath};
+use crate::device::{Applied, BatteryMonitor, BatteryReading, ControlPath};
 use crate::engine::Engine;
 use crate::event::Event;
 use crate::journal::Journal;
 use crate::journal::Writer;
 use crate::models::ControlDecision;
-use crate::models::StorageMode;
 use crate::mqtt::{self, MqttEvent, MqttPublisher, PublisherTask};
 use crate::publish::Publisher;
 use crate::registry::{self, Battery, Devices};
-use crate::units::{DeciKelvin, Soc, Timestamp, WattHours, Watts};
+use crate::units::{Soc, Timestamp, WattHours};
 use crate::world::{Measurement, World};
-use crate::zendure::ZendureClient;
-use crate::{battery, controller, models, rte};
+use crate::{controller, rte};
 use tokio::sync::mpsc;
 
 /// How long each half of a shutdown waits before giving up and saying so.
@@ -171,11 +171,15 @@ async fn apply_decision(
 /// Everything a poll advances and publishes that no decision ever reads.
 ///
 /// Round-trip efficiency, pack temperatures, SOC and battery power are all
-/// derived from `ZendureReport` fields the objective does not consult, and they
-/// are published for graphing rather than fed to the engine. Seventy-odd lines
-/// of that once sat inline in a `select!` branch, four levels deep, between
-/// parsing the response and folding it into the world — so the arm's one job
-/// was the hardest thing in it to see.
+/// derived from a [`BatteryReading`]'s telemetry, which the objective does not
+/// consult, and they are published for graphing rather than fed to the
+/// engine. Seventy-odd lines of that once sat inline in a `select!` branch,
+/// four levels deep, between parsing the device's response and folding it
+/// into the world — so the arm's one job was the hardest thing in it to see.
+/// Reaching into a vendor-shaped report was the same problem one layer
+/// further down: the adapter now hands back a `BatteryReading` with the
+/// telemetry already extracted, so this struct works from one device-neutral
+/// shape instead of the device's own wire type.
 ///
 /// A struct rather than three `&mut` out-parameters behind an
 /// `#[allow(clippy::too_many_arguments)]`. The three move together, only ever
@@ -211,23 +215,27 @@ impl PollTelemetry {
     /// queue, and `save` is a plain file write. It was `async` with no `.await`
     /// in it for one commit, which is worse than useless — it puts a suspension
     /// point in the reader's head that the code does not have.
+    ///
+    /// Takes the whole [`BatteryReading`] rather than a report and a state
+    /// separately — the last two parameters this function had that named a
+    /// vendor type. Both halves come from the one adapter call that produced
+    /// them, and asking for them as one value is what let `run` stop
+    /// reaching into the device's own wire type itself.
     fn record_and_publish(
         &mut self,
         publisher: &dyn Publisher,
         announcer: &Announcer,
         prefix: &str,
-        report: &models::ZendureReport,
-        state: &battery::BatteryState,
+        reading: &BatteryReading,
     ) {
-        let charge = Watts::from_device(report.properties.output_pack_power.unwrap_or(0));
-        let discharge = Watts::from_device(report.properties.pack_input_power.unwrap_or(0));
-        self.rte.record(charge, discharge);
+        let telemetry = &reading.telemetry;
+        self.rte.record(telemetry.charge, telemetry.discharge);
 
-        if report.pack_data.is_some() {
-            self.pack_capacities = rte::pack_capacities(&report.pack_data);
+        if let Some(pack_capacities) = &telemetry.pack_capacities {
+            self.pack_capacities = pack_capacities.clone();
         }
-        if let Some(ms) = report.properties.min_soc {
-            self.min_soc = Soc::from_tenths(ms);
+        if let Some(min_soc) = telemetry.min_soc {
+            self.min_soc = min_soc;
         }
 
         let total_capacity_kwh = self
@@ -236,9 +244,9 @@ impl PollTelemetry {
             .copied()
             .sum::<WattHours>()
             .to_kwh();
-        let usable_kwh = self
-            .rte
-            .usable_kwh(state.soc, self.min_soc, &self.pack_capacities);
+        let usable_kwh =
+            self.rte
+                .usable_kwh(reading.state.soc, self.min_soc, &self.pack_capacities);
         mqtt::publish_rte(
             publisher,
             prefix,
@@ -247,33 +255,17 @@ impl PollTelemetry {
             total_capacity_kwh,
         );
 
-        let pack_temps: Vec<mqtt::PackTemperature> = report
-            .pack_data
-            .as_ref()
-            .map(|packs| {
-                packs
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, p)| {
-                        p.max_temp.map(|t| mqtt::PackTemperature {
-                            index,
-                            temp: DeciKelvin(t),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
         mqtt::publish_temperatures(
             publisher,
             announcer,
             prefix,
-            report.properties.hyper_tmp.map(DeciKelvin),
-            &pack_temps,
+            telemetry.enclosure_temp,
+            &telemetry.pack_temps,
         );
 
-        mqtt::publish_soc_calibrating(publisher, prefix, state.soc_calibrating);
-        mqtt::publish_battery_soc(publisher, prefix, state.soc);
-        mqtt::publish_battery_power(publisher, prefix, charge, discharge);
+        mqtt::publish_soc_calibrating(publisher, prefix, reading.state.soc_calibrating);
+        mqtt::publish_battery_soc(publisher, prefix, reading.state.soc);
+        mqtt::publish_battery_power(publisher, prefix, telemetry.charge, telemetry.discharge);
 
         // Persisted every poll, so the rolling 24h window survives a restart.
         self.rte.save();
@@ -288,7 +280,10 @@ pub async fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Starting Zendure controller for {}", config.zendure_sn);
 
-    let zendure_client = ZendureClient::new(&config.zendure_ip, config.zendure_sn.clone());
+    // The one place a vendor is named while wiring up the registry. Every
+    // call site below reaches this device only through `Devices` and the
+    // `BatteryController`/`BatteryMonitor` traits it implements.
+    let battery = Battery::zendure(&config.zendure_ip, config.zendure_sn.clone());
 
     // The battery's identity in the world, fixed for the life of the process,
     // and taken from the adapter that will answer for it — the world's key and
@@ -296,57 +291,51 @@ pub async fn run(
     // against, so there is one source for it. The serial is what a journal
     // reader would recognise it by, and it is stable across restarts in a way
     // an index into a list would not be.
-    let device_id = zendure_client.id().clone();
-    let initial_report = zendure_client
-        .get_properties()
-        .await
-        .map_err(|e| e.to_string())?;
+    let device_id = battery.id().clone();
 
-    // Sync tracked storage mode with the device's actual state. The client
-    // defaults to RAM, but the device may have been left in Flash/standby
-    // (e.g. after an idle-timeout standby before a restart). Without this,
-    // ensure_ram_mode() short-circuits and never wakes the device, so it keeps
-    // reporting chargeMaxLimit=0 / inverseMaxPower=0 and every command clamps to 0W.
-    let initial_storage_mode = if initial_report.properties.smart_mode == Some(1) {
-        StorageMode::Ram
-    } else {
-        StorageMode::Flash
+    // One battery, held in the registry rather than as a bare local — the
+    // next device this process drives is a second entry here, not a second
+    // local variable threaded through every call site below.
+    let devices = Devices::new([battery]);
+    let Some((_, primary)) = devices.primary() else {
+        unreachable!("devices was just constructed with exactly the one battery above")
     };
-    zendure_client.set_storage_mode(initial_storage_mode);
-    tracing::info!("Device storage mode at startup: {initial_storage_mode:?}");
 
-    // Write the charge/discharge power caps once, here at startup. The device
-    // stores these as setpoints it can reset to 0; we deliberately only write
-    // them at startup (never mid-run) so a device-initiated 0 stops power flow
-    // until a human restarts the process, rather than being silently overwritten.
-    if let Err(e) = zendure_client.write_power_caps().await {
-        tracing::warn!("Failed to write power caps at startup: {e}");
+    // On by default: by the time you think to enable logging, the bug you
+    // wanted it for has already happened. Any failure here disables the journal
+    // and leaves control untouched. Opened before the startup handshake below
+    // so its raw capture has somewhere to go.
+    let (journal, journal_writer) = Journal::open(
+        &config.journal_path,
+        config.journal_retention_days,
+        env!("CARGO_PKG_VERSION"),
+        &config.session(),
+    );
+    let journal = std::sync::Arc::new(journal);
+
+    // The startup handshake, then the first reading — see `BatteryMonitor::prepare`
+    // (`zendure.rs`) for the ordering and failure policy this now runs, which
+    // used to live inline here.
+    let reading = primary.prepare().await.map_err(|e| {
+        if let Some(raw) = &e.raw {
+            journal.raw(raw.kind, &raw.body);
+        }
+        e.error
+    })?;
+    if let Some(raw) = &reading.raw {
+        journal.raw(raw.kind, &raw.body);
     }
 
-    // Re-read so battery_state reflects the caps we just wrote, otherwise the
-    // first decisions would use the pre-write (possibly 0) limits.
-    let battery_report = match zendure_client.get_properties().await {
-        Ok(report) => report,
-        Err(e) => {
-            tracing::warn!("Failed to re-read properties after writing caps: {e}");
-            initial_report.clone()
-        }
-    };
-    // The rated limits come from the adapter, which knows which box it is
-    // talking to. Naming a model here instead put a hardware fact in the
-    // coordinator, twice, where a second battery of another model would have
-    // been clamped to this one's rating.
-    let battery_state =
-        battery::BatteryState::from_properties(&battery_report.properties, zendure_client.spec());
+    let BatteryReading {
+        state: battery_state,
+        telemetry: initial_telemetry,
+        ..
+    } = reading;
 
     let mut telemetry = PollTelemetry::new(
         config.rte_state_path.clone(),
-        rte::pack_capacities(&initial_report.pack_data),
-        initial_report
-            .properties
-            .min_soc
-            .map(Soc::from_tenths)
-            .unwrap_or(Soc::ZERO),
+        initial_telemetry.pack_capacities.unwrap_or_default(),
+        initial_telemetry.min_soc.unwrap_or(Soc::ZERO),
     );
     tracing::info!(
         "Battery: SOC={}%, max_discharge={}W, max_charge={}W, current_power={}W, packs={}",
@@ -356,34 +345,6 @@ pub async fn run(
         battery_state.current_power,
         telemetry.pack_count(),
     );
-
-    // One battery, held in the registry rather than as a bare local — the
-    // next device this process drives is a second entry here, not a second
-    // local variable threaded through every call site below.
-    let devices = Devices::new([Battery::Zendure(zendure_client)]);
-
-    // `Devices`/`BatteryController` has no read capability yet — `apply` is
-    // the only thing behind the enum so far — so the startup handshake above
-    // reached `zendure_client`'s inherent methods directly, and the poll arm
-    // below still needs to. Rather than keep a second owned `ZendureClient`
-    // alongside the registry (two names for the one battery, free to drift),
-    // this reaches back into the registry for the concrete adapter it holds.
-    // Temporary: the next commit adds a read trait and this match goes away
-    // in favour of calling it on whichever adapter is being polled.
-    let Some((_, Battery::Zendure(zendure_client))) = devices.primary() else {
-        unreachable!("devices was just constructed with exactly the one Zendure battery above")
-    };
-
-    // On by default: by the time you think to enable logging, the bug you
-    // wanted it for has already happened. Any failure here disables the journal
-    // and leaves control untouched.
-    let (journal, journal_writer) = Journal::open(
-        &config.journal_path,
-        config.journal_retention_days,
-        env!("CARGO_PKG_VERSION"),
-        &config.session(),
-    );
-    let journal = std::sync::Arc::new(journal);
 
     let (mqtt_client, eventloop) = mqtt::create_mqtt_client(&config);
     // The sink the decision path publishes through. Its task owns the only
@@ -569,43 +530,42 @@ pub async fn run(
                 }
             }
             _ = poll_timer.tick() => {
-                // Capture the response verbatim before parsing, so undocumented
-                // device fields survive even though our types drop them.
-                let fetched = match zendure_client.get_properties_raw().await {
-                    Ok(body) => {
-                        journal.raw("zendure_poll", &body);
-                        serde_json::from_str::<models::ZendureReport>(&body)
-                            .map_err(|e| format!("parse error: {e}"))
-                    }
-                    Err(e) => Err(format!("request failed: {e}")),
-                };
-                match fetched {
-                    Ok(report) => {
-                        let state = battery::BatteryState::from_properties(&report.properties, zendure_client.spec());
+                // The raw capture happens inside `poll` itself, before
+                // parsing — the adapter keeps that ordering, and hands the
+                // bytes back rather than journalling them itself, so this is
+                // still the one place that writes to the journal.
+                match primary.poll().await {
+                    Ok(reading) => {
+                        if let Some(raw) = &reading.raw {
+                            journal.raw(raw.kind, &raw.body);
+                        }
+
                         tracing::debug!(
                             "Battery poll: SOC={}%, current_power={}W",
-                            state.soc,
-                            state.current_power,
+                            reading.state.soc,
+                            reading.state.current_power,
                         );
 
                         telemetry.record_and_publish(
                             &*publisher,
                             &announcer,
                             &ha_prefix,
-                            &report,
-                            &state,
+                            &reading,
                         );
 
                         let event = Event::DeviceUpdate {
                             at: Clock::now(config.timezone),
                             id: device_id.clone(),
-                            measurement: Measurement::Battery(state),
+                            measurement: Measurement::Battery(reading.state),
                         };
                         journal.event(&event);
                         engine.step(&event);
                     }
                     Err(e) => {
-                        tracing::warn!("Failed to poll battery state: {e}");
+                        if let Some(raw) = &e.raw {
+                            journal.raw(raw.kind, &raw.body);
+                        }
+                        tracing::warn!("Failed to poll battery state: {}", e.error);
                     }
                 }
             }

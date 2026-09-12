@@ -259,32 +259,6 @@ fn unix_now() -> f64 {
         .as_secs_f64()
 }
 
-/// Map a Zendure `pack_type` to its nominal capacity in Wh.
-pub fn pack_type_capacity_wh(pack_type: u32) -> WattHours {
-    match pack_type {
-        // AB1000 / AB1000S
-        500 => WattHours(960.0),
-        // AB2000 / AB2000S
-        501 => WattHours(1920.0),
-        // Unknown — assume AB2000 as conservative default
-        _ => {
-            tracing::warn!("Unknown pack_type {pack_type}, assuming 1920 Wh");
-            WattHours(1920.0)
-        }
-    }
-}
-
-/// Extract per-pack capacities from ZendureReport pack_data.
-pub fn pack_capacities(pack_data: &Option<Vec<crate::models::PackData>>) -> Vec<WattHours> {
-    match pack_data {
-        Some(packs) => packs
-            .iter()
-            .map(|p| pack_type_capacity_wh(p.pack_type.unwrap_or(501)))
-            .collect(),
-        None => vec![],
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,12 +414,6 @@ mod tests {
         // Should not panic, just log a warning and start fresh
         let tracker = RteTracker::new(path);
         assert!(tracker.rte_percent().is_none());
-    }
-
-    #[test]
-    fn test_pack_type_capacity() {
-        assert_eq!(pack_type_capacity_wh(500).get(), 960.0);
-        assert_eq!(pack_type_capacity_wh(501).get(), 1920.0);
     }
 
     /// The old-format JSON is a live file in production holding a 24h window.

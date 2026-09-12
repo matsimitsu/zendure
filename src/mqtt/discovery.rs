@@ -3,7 +3,7 @@
 use crate::announce::Announcer;
 use crate::models::{ControlDecision, CycleCounts};
 use crate::publish::{Message, Publisher};
-use crate::units::{DeciKelvin, KiloWattHours, Percent, Soc, Watts};
+use crate::units::{DeciKelvin, KiloWattHours, PackTemperature, Percent, Soc, Watts};
 
 /// The Home Assistant device every sensor is attached to.
 fn ha_device() -> serde_json::Value {
@@ -280,14 +280,6 @@ pub fn publish_status(publisher: &dyn Publisher, prefix: &str, status: &str) {
 
 pub fn publish_battery_soc(publisher: &dyn Publisher, prefix: &str, soc: Soc) {
     publish_values(publisher, prefix, vec![(BATTERY_SOC.id, soc.to_string())]);
-}
-
-/// One pack's temperature reading. A named pair rather than `(usize, u32)`,
-/// which said neither what the index was counting nor what unit the number was
-/// in.
-pub struct PackTemperature {
-    pub index: usize,
-    pub temp: DeciKelvin,
 }
 
 pub fn publish_temperatures(

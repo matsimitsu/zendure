@@ -12,8 +12,8 @@ pub mod publisher;
 pub mod subscriber;
 
 pub use discovery::{
-    PackTemperature, publish_battery_power, publish_battery_soc, publish_cycle_counts,
-    publish_decision, publish_rte, publish_soc_calibrating, publish_status, publish_temperatures,
+    publish_battery_power, publish_battery_soc, publish_cycle_counts, publish_decision,
+    publish_rte, publish_soc_calibrating, publish_status, publish_temperatures,
 };
 pub use publisher::{MqttPublisher, PublisherTask};
 pub use subscriber::{MqttEvent, create_mqtt_client, run_subscriber};

@@ -128,6 +128,21 @@ pub struct Celsius(pub f64);
 
 forward_display!(Celsius, f64);
 
+/// One pack's temperature reading. A named pair rather than `(usize, u32)`,
+/// which said neither what the index was counting nor what unit the number
+/// was in.
+///
+/// A device reading, not a wire-format concern — it used to live in
+/// `mqtt/discovery.rs`, which meant a `device.rs` adapter producing one would
+/// have had to depend on `mqtt` to name its own return type. It belongs here,
+/// beside the `DeciKelvin` it wraps: the adapter constructs it, and
+/// `discovery.rs` only ever borrows what it's handed to publish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackTemperature {
+    pub index: usize,
+    pub temp: DeciKelvin,
+}
+
 // --- Watts: the integer-watt arithmetic unit -------------------------------
 
 /// Integer watts. The unit the device speaks and the controller computes in —
