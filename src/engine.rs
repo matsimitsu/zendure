@@ -79,13 +79,18 @@ impl Engine {
         }
     }
 
-    /// Idempotent: only the first timeout since the last resume produces a
-    /// command and a decision. A repeated timeout (we're already standing
-    /// down) is a no-op, rather than being guarded by a flag at the call site.
+    /// Latches the *reporting*, not the command. Idle is re-asserted on every
+    /// timeout tick because the engine cannot know whether the write landed:
+    /// latching on the decision meant a single failed `apply_command` left the
+    /// device running its last command for the rest of the outage, with the
+    /// controller believing it had stood down. The two failures correlate in
+    /// practice — whatever kills the meter feed often takes the battery's
+    /// network with it.
+    ///
+    /// `status` is first-tick-only, so the warning and the `mqtt_timeout`
+    /// transition are logged once per outage rather than once per interval.
     fn step_mqtt_timeout(&mut self) -> Step {
-        if self.mqtt_timed_out {
-            return Step::default();
-        }
+        let first_tick = !self.mqtt_timed_out;
         self.mqtt_timed_out = true;
 
         let decision = ControlDecision {
@@ -102,7 +107,7 @@ impl Engine {
         Step {
             commands: vec![command],
             decision: Some(decision),
-            status: Some("mqtt_timeout"),
+            status: first_tick.then_some("mqtt_timeout"),
         }
     }
 }
@@ -156,14 +161,42 @@ mod tests {
     }
 
     #[test]
-    fn repeated_timeout_emits_nothing() {
+    fn repeated_timeout_re_asserts_idle_but_reports_once() {
         let mut engine = engine();
         engine.step(&Event::MqttTimeout { at: clock() });
         let step = engine.step(&Event::MqttTimeout { at: clock() });
 
-        assert!(step.commands.is_empty());
-        assert!(step.decision.is_none());
+        // The command keeps being issued: the engine never learns whether the
+        // first write landed, so a failed one must not disable the failsafe.
+        assert_eq!(step.commands, vec![Command::SetIdle]);
+        assert_eq!(step.decision.unwrap().mode, ControlMode::Idle);
+        // ...but the transition is reported only once per outage.
         assert_eq!(step.status, None);
+    }
+
+    #[test]
+    fn timeout_re_asserts_idle_for_as_long_as_the_outage_lasts() {
+        let mut engine = engine();
+        for _ in 0..5 {
+            let step = engine.step(&Event::MqttTimeout { at: clock() });
+            assert_eq!(step.commands, vec![Command::SetIdle]);
+        }
+    }
+
+    #[test]
+    fn status_is_reported_again_after_a_resume() {
+        let mut engine = engine();
+        engine.step(&Event::MqttTimeout { at: clock() });
+        engine.step(&Event::MqttTimeout { at: clock() });
+        engine.step(&Event::GridPower {
+            at: clock(),
+            total: GridPower(500.0),
+            solar: SolarPower::new(0.0),
+        });
+
+        // A second outage is a new episode, so it announces itself again.
+        let step = engine.step(&Event::MqttTimeout { at: clock() });
+        assert_eq!(step.status, Some("mqtt_timeout"));
     }
 
     #[test]
