@@ -10,16 +10,19 @@
 //!
 //! **The loop now has a test.** [`run`] always took its stop condition as a
 //! parameter — one of the two seams a test needs — and the other, the device,
-//! closed once [`registry::from_config`] could build a
-//! [`crate::simulation::VirtualBattery`] from `[[device]] kind = "virtual"`
-//! instead of `run` reaching for `Battery::zendure` itself. Paired with a
-//! synthetic meter (`[meter] kind = "synthetic"`, `source::synthetic`) feeding
-//! the same `MqttEvent` channel a real Shelly subscriber would, and a
-//! [`crate::publish::NullPublisher`] standing in for a broker, `run` now runs
-//! entirely off configuration with nothing real on the other end of any of its
-//! three external seams — see `tests::run_drives_real_decisions_against_a_virtual_battery`.
-//! That test also carries its own honest limit: it uses real time, not
-//! paused, and says why.
+//! closed once [`Devices`] became a parameter too instead of something `run`
+//! built for itself out of `Config` via `registry::from_config`. A caller that
+//! holds the registry it built can hold a clone of what is inside it — see
+//! `run`'s own doc comment. Paired with a synthetic meter (`[meter] kind =
+//! "synthetic"`, `source::synthetic`) feeding the same `MqttEvent` channel a
+//! real Shelly subscriber would, and a [`crate::publish::NullPublisher`]
+//! standing in for a broker, `run` now runs entirely off configuration with
+//! nothing real on the other end of any of its three external seams — see
+//! `tests::run_drives_real_decisions_against_a_virtual_battery`, which asserts
+//! directly against a [`crate::simulation::VirtualBattery`] it kept a clone
+//! of, and `tests::a_run_against_the_simulator_replays_byte_identically`,
+//! which proves the same run's journal replays byte-identically through
+//! [`crate::replay`].
 //!
 //! [`shut_down`]'s ordering — the subtlest thing in the file — is still
 //! covered separately, by its own unit test below.
@@ -281,24 +284,29 @@ impl PollTelemetry {
     }
 }
 
-/// Start the devices, the journal, and whichever combination of a broker
-/// connection and a meter source `config` asks for, then fold events until
-/// `stop` resolves or every feeder task goes away.
+/// Start the journal, and whichever combination of a broker connection and a
+/// meter source `config` asks for, then fold events until `stop` resolves or
+/// every feeder task goes away.
+///
+/// `devices` is built by the caller (`main.rs`'s `registry::from_config`) and
+/// handed in, rather than built here, for the same reason `stop` already was:
+/// both are the process's real edges — signals and hardware — and building
+/// them inside `run` would leave no seam for a test to hold a handle on
+/// either one. `main` is the only production call site and it always passes
+/// the registry it just built; the seam exists for
+/// `tests::run_drives_real_decisions_against_a_virtual_battery`, which
+/// constructs its own `Devices`, keeps an `Arc<VirtualBattery>` clone the
+/// registry also holds, and asserts on the battery directly once the loop
+/// exits — no journal, no SQLite, in that assertion's path at all.
 pub async fn run(
     config: Config,
+    devices: Devices,
     stop: impl Future<Output = StopReason>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(
         "Starting Zendure controller for {}",
         config.device.identity()
     );
-
-    // Built from configuration rather than a fixed `Battery::zendure` call —
-    // `registry::from_config` is the one place a `DeviceConfig` becomes a
-    // live adapter. Every call site below reaches this device only through
-    // `Devices` and the `BatteryController`/`BatteryMonitor` traits it
-    // implements.
-    let devices = registry::from_config(&config);
 
     let Some((_, primary)) = devices.primary() else {
         unreachable!("devices was just constructed with exactly the one battery above")
@@ -755,6 +763,7 @@ mod tests {
     use crate::config::{DeviceConfig, SessionConfig};
     use crate::fixtures;
     use crate::journal;
+    use crate::simulation::VirtualBattery;
     use crate::units::{Efficiency, GridPower, PowerMargin, RetentionDays, SolarPower, Watts};
 
     /// The two signal arms became one, so the wording an operator greps for is
@@ -839,43 +848,18 @@ mod tests {
         );
     }
 
-    /// The end-to-end test: the real `run()`, with a virtual battery, a null
-    /// publisher and a synthetic meter — no network, no broker, no hardware.
-    /// This module's own doc comment used to say plainly that nothing drove
-    /// `run` end to end; this is what closes that gap.
-    ///
-    /// **Real time, bounded to a few ticks — not paused time.** Paused time
-    /// was tried first, and rejected for a specific, confirmed reason rather
-    /// than a vague "it didn't work": the journal's writer
-    /// (`journal::writer`) is a `spawn_blocking` task whose `blocking_recv`
-    /// loop only ends when every `Journal` sender is dropped, so for the
-    /// whole life of this test one such task is permanently alive. With
-    /// `#[tokio::test(start_paused = true)]`, tokio only auto-advances its
-    /// clock when the runtime is fully idle, and an outstanding
-    /// `spawn_blocking` task apparently keeps it from ever reaching that
-    /// state — confirmed by bisection: pointing `journal_path` at an
-    /// unwritable location (so `Journal::open` disables itself and spawns no
-    /// writer at all) let the very same test complete instantly under paused
-    /// time, and restoring a real journal reproduced an unconditional hang,
-    /// with no decisions logged past the first tick. Since the whole point of
-    /// this test is asserting against a *real* journal, disabling it to make
-    /// paused time work would have thrown away the thing being tested. Real
-    /// time it is instead: `run_synthetic_meter`'s ticks are 1s regardless, so
-    /// three real seconds is enough for several of them, and short enough not
-    /// to make the suite noticeably slower.
-    ///
-    /// Asserted against the **journal**, per the brief: not "it didn't
-    /// crash," but that a real decision was recorded, with the mode a
-    /// constant importing load and no solar can only produce (discharge) and
-    /// a non-zero commanded power.
-    #[tokio::test]
-    async fn run_drives_real_decisions_against_a_virtual_battery() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let config = Config {
+    /// Builds the `Config` the wiring tests below share: a virtual battery, a
+    /// null publisher (no `[mqtt]`) and a synthetic meter — no network, no
+    /// broker, no hardware. `capacity` is a parameter because the two callers
+    /// want different things from it: the wiring test wants it small enough
+    /// to see the SOC move, the round-trip test does not care and uses
+    /// whatever is convenient.
+    fn virtual_config(dir: &tempfile::TempDir, capacity: WattHours) -> Config {
+        Config {
             mqtt: None,
             device: DeviceConfig::Virtual {
                 id: "sim".to_string(),
-                packs: vec![WattHours(10_000.0)],
+                packs: vec![capacity],
                 soc: Soc::new(50),
                 charge_efficiency: Efficiency::new(95.0),
                 discharge_efficiency: Efficiency::new(95.0),
@@ -896,7 +880,7 @@ mod tests {
             // No cooldowns: the tuning knobs a real deployment leans on to
             // avoid chattering, turned down here so the test does not have
             // to wait out a cooldown window to see a second decision within
-            // its few real seconds.
+            // its short run.
             min_mode_duration: Duration::from_secs(0),
             min_decision_interval: Duration::from_secs(0),
             idle_timeout: Duration::from_secs(300),
@@ -912,47 +896,197 @@ mod tests {
             journal_retention_days: RetentionDays::new(90).unwrap(),
             rte_state_path: dir.path().join("rte_state.json"),
             log_filter: "zendure=off".to_string(),
-        };
-        let journal_path = config.journal_path.clone();
+        }
+    }
 
-        // A few real ticks of the 1s synthetic meter, and nowhere near the
-        // virtual device's 10s poll interval — this test's decisions all come
-        // from meter events, not from a poll.
+    /// Builds the registry `virtual_config`'s device describes, and hands
+    /// back the same `Arc<VirtualBattery>` the registry holds — the seam
+    /// `run`'s own doc comment describes, exercised directly rather than
+    /// through `main`.
+    fn virtual_devices(config: &Config) -> (Devices, std::sync::Arc<VirtualBattery>) {
+        let devices = registry::from_config(config);
+        let battery = match devices.primary() {
+            Some((_, Battery::Virtual(battery))) => battery.clone(),
+            _ => panic!("virtual_config must always build a DeviceConfig::Virtual"),
+        };
+        (devices, battery)
+    }
+
+    /// The end-to-end wiring test: the real `run()`, with a virtual battery, a
+    /// null publisher and a synthetic meter — no network, no broker, no
+    /// hardware. This module's own doc comment used to say plainly that
+    /// nothing drove `run` end to end; this is what closes that gap.
+    ///
+    /// **Observed at the device, not through the journal.** The first shape
+    /// of this test asserted on rows read back out of a real SQLite journal —
+    /// which drags in the bounded channel, the `spawn_blocking` writer, an
+    /// `INSERT`, and a reopen-and-`SELECT` on every run, none of which is what
+    /// the test is actually about. The question this test exists to answer —
+    /// did an event leave the meter, cross the channel, produce a decision, get
+    /// allocated to a directive, and land on a device — is answerable by
+    /// asking the device directly: `devices` is built here, not inside `run`
+    /// (see `run`'s own doc comment for why that seam exists), so this test
+    /// keeps its own `Arc<VirtualBattery>` clone and reads `flow()` and
+    /// `reading()` off it once `run` returns. No journal row is read anywhere
+    /// in this test.
+    ///
+    /// **The journal is deliberately disabled here, and paused time then
+    /// works.** This is not the same claim as "paused time works with `run`".
+    /// Demonstrated directly, with a throwaway reproduction of nothing but the
+    /// journal's own shape (a `spawn_blocking` task parked on
+    /// `std::sync::mpsc::Receiver::recv`, no SQLite involved): under
+    /// `#[tokio::test(start_paused = true)]`, a single outstanding
+    /// `spawn_blocking` task is *sufficient by itself* to make a bare
+    /// `tokio::time::sleep(1s)` never resolve — not slow, not eventually,
+    /// never, for as long as that task is running. That is mechanism (a) from
+    /// this module's old doc comment (auto-advance never fires because the
+    /// runtime is never idle), demonstrated directly rather than inferred
+    /// from a correlation, and it is a property of `spawn_blocking` versus
+    /// paused time in general, not of the journal, its channel depth, or how
+    /// fast SQLite writes. Rebuilding `run_drives_real_decisions_against_a_virtual_battery`
+    /// with the assertion moved onto the device but a *real, writable*
+    /// `journal_path` reproduced the identical hang: the outer
+    /// `tokio::time::sleep` guarding this test's own `stop` future never
+    /// returned, confirmed by a trace print placed immediately before it that
+    /// never printed its matching "done" line. Mechanism (b) (the meter
+    /// outracing a bounded queue) cannot be what happened here — a single
+    /// one-second sleep, before any meter tick has had a chance to fire, is
+    /// already enough to reproduce it.
+    ///
+    /// So this test's own `journal_path` points at a location `Journal::open`
+    /// cannot create (see the setup below), taking the documented disabled
+    /// path rather than the real one — deliberately, not as a workaround:
+    /// this test's subject is device wiring, not the journal, and
+    /// `a_run_against_the_simulator_replays_byte_identically` below is what
+    /// keeps a real one. With no `spawn_blocking` task ever spawned, this
+    /// test completes in milliseconds under a paused clock.
+    ///
+    /// **The capacity, worked out.** `AC2400_PLUS` (`registry::from_config`'s
+    /// fixed rating for every virtual device) caps discharge at 800 W, and a
+    /// 2 kW constant load with no solar keeps the objective pinned at that
+    /// cap for the run's whole duration (`controller.rs`'s feedback term never
+    /// brings the residual import near the 800 W cap). At 95% discharge
+    /// efficiency the pack gives up `800 / 0.95 = 842.1 Wh` to deliver 800 Wh
+    /// at the meter — `0.2339 Wh` per simulated second. Against the 10,000 Wh
+    /// pack this test used to use, that is `0.0023%` of capacity per second:
+    /// invisible over any run this suite could afford, which is exactly why
+    /// nothing here ever asserted on the SOC before. A 1,000 Wh pack instead
+    /// makes it `0.0234%/s`; over 300 simulated seconds — free under a paused
+    /// clock, unlike the real seconds this test used to spend — that is
+    /// `~70.2 Wh`, or about 7 whole points of SOC from a 50% start: orders of
+    /// margin above the single point this test needs to see, so a partial
+    /// idle tick here or there cannot make it flaky.
+    #[tokio::test(start_paused = true)]
+    async fn run_drives_real_decisions_against_a_virtual_battery() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut config = virtual_config(&dir, WattHours(1_000.0));
+        // Deliberately unopenable: `blocker` is a plain file, so
+        // `Journal::open`'s `create_dir_all(parent)` fails and it falls back
+        // to its documented disabled state — no channel, no writer thread, no
+        // SQLite. See this test's own doc comment for why that is the right
+        // choice here, not a workaround.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"unwritable as a directory").unwrap();
+        config.journal_path = blocker.join("journal.db");
+        let (devices, battery) = virtual_devices(&config);
+
+        let soc_before = battery.reading().soc;
+
         let stop = async {
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            tokio::time::sleep(Duration::from_secs(300)).await;
             StopReason::Sigterm
         };
 
-        run(config, stop).await.expect("run must exit cleanly");
-
-        let conn = rusqlite::Connection::open(&journal_path).unwrap();
-        let mut stmt = conn
-            .prepare(
-                "SELECT command FROM decisions \
-                 WHERE kind = 'decision' AND command IS NOT NULL",
-            )
-            .unwrap();
-        let commands: Vec<String> = stmt
-            .query_map([], |r| r.get(0))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
+        run(config, devices, stop)
+            .await
+            .expect("run must exit cleanly");
 
         assert!(
-            !commands.is_empty(),
-            "the objective must have recorded at least one real decision"
+            battery.flow().discharging() > Watts::ZERO,
+            "a constant importing load with no solar must leave the battery discharging"
         );
+
+        let soc_after = battery.reading().soc;
         assert!(
-            commands
-                .iter()
-                .all(|c| c.starts_with("set_discharge(") || c.starts_with("set_idle")),
-            "a constant importing load with no solar must never charge, got {commands:?}",
+            soc_after < soc_before,
+            "SOC must have moved downward over 300 simulated seconds of discharge: \
+             before={soc_before}%, after={soc_after}%",
         );
+    }
+
+    /// **The round trip step 8 was supposed to prove, but never against a real
+    /// loop.** `replay_tests.rs`'s own suite (`a_recording_replays_to_the_commands_it_recorded`
+    /// and friends) proves that a *canned* `fixtures::journey` vector, folded
+    /// once to build a journal and once through `replay::run`, reproduces its
+    /// own commands — which proves the fold is deterministic, but takes on
+    /// faith that a real `run()` loop populates the journal in a shape
+    /// `from_recording` can actually consume. Nothing before this test drove
+    /// that whole path — meter to channel to engine to journal to
+    /// `read_range` to `from_recording` to `replay::run` to `replay::verify`
+    /// — end to end.
+    ///
+    /// Unlike the wiring test above, this one's whole subject *is* the
+    /// journal, so it keeps a real one — and that rules out
+    /// `start_paused`. Demonstrated, not assumed: see the wiring test's own
+    /// doc comment for the reproduction showing that any outstanding
+    /// `spawn_blocking` task — which `Journal::open` always spawns once it
+    /// successfully opens a database — stalls a paused clock's auto-advance
+    /// forever, independent of the journal's own speed. So this test runs on
+    /// real time, same as `run` in production, and is legitimately as slow as
+    /// that implies. Kept short rather than `#[ignore]`d: two real seconds of
+    /// the 1 Hz synthetic meter is enough for a couple of recorded decisions,
+    /// short enough not to dominate the suite the way the old journal-reading
+    /// version of the wiring test did, and running by default is worth more
+    /// than the time it costs for a property this central.
+    #[tokio::test]
+    async fn a_run_against_the_simulator_replays_byte_identically() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = virtual_config(&dir, WattHours(1_000.0));
+        let journal_path = config.journal_path.clone();
+        let (devices, _battery) = virtual_devices(&config);
+
+        // A few real ticks of the 1s synthetic meter is enough for more than
+        // one recorded decision; this test is not about how much history
+        // replays, only that what was recorded replays identically.
+        let stop = async {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            StopReason::Sigterm
+        };
+        // From the epoch: this test only wants everything the session ever
+        // wrote, not a particular anchor, and `read_range` handles a `from`
+        // that opens before the first decision by falling back to the range's
+        // own start with a warning — which this test allows for below rather
+        // than asserting away.
+        let started_at = Timestamp::from_millis(0);
+
+        run(config, devices, stop)
+            .await
+            .expect("run must exit cleanly");
+
+        let recording = crate::journal::read::read_range(
+            &journal_path,
+            started_at,
+            Timestamp::from_millis(i64::MAX),
+        )
+        .expect("a run that recorded decisions must produce a readable range");
+        let (fixture, _warnings) = crate::replay::from_recording(recording)
+            .expect("a populated journal must yield a fixture");
+
+        let frames =
+            crate::replay::run(&fixture, &[]).expect("the fixture's own format must replay");
+        crate::replay::verify(&fixture, &frames)
+            .expect("replaying a real run's own journal must match what it recorded");
+
+        // Not trivially true: the run does command something, so `expected`
+        // is not a list of nothing-but-dashes that `verify` would agree with
+        // for free.
         assert!(
-            commands
+            fixture
+                .expected
                 .iter()
-                .any(|c| c.starts_with("set_discharge(") && c != "set_discharge(0W)"),
-            "at least one discharge decision must carry non-zero power, got {commands:?}",
+                .any(|line| !line.ends_with(crate::replay::NOTHING)),
+            "{:?}",
+            fixture.expected
         );
     }
 }

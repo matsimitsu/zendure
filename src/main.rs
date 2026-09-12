@@ -120,5 +120,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // stop fails at startup rather than on the first `systemctl stop`.
     let stop = run::shutdown_signal()?;
 
-    run::run(config, stop).await
+    // Built here, at the edge, and handed in — the same treatment `stop`
+    // already gets. `run::run` used to build this registry itself, which
+    // meant nothing outside that function could ever hold the device it
+    // just constructed; see `run::run`'s own doc comment for why that seam
+    // matters to a test.
+    let devices = registry::from_config(&config);
+
+    run::run(config, devices, stop).await
 }

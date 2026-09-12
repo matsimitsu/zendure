@@ -46,7 +46,13 @@ const FORMAT: u32 = 1;
 
 /// Rendered in place of a command list when a step produced none. A blank would
 /// be indistinguishable from a missing line in a diff.
-const NOTHING: &str = "—";
+///
+/// `pub(crate)` rather than private: `run.rs`'s round-trip test checks that a
+/// real run's `expected` list is not *entirely* this sentinel, which is the
+/// same anti-vacuity guard `replay_tests.rs` already applies to a canned
+/// fixture — reusing the constant keeps both checks tied to one literal
+/// instead of a second copy that could silently drift from `render`'s own.
+pub(crate) const NOTHING: &str = "—";
 
 /// A self-contained replay: everything needed, nothing that reaches outside.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
