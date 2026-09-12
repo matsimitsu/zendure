@@ -1747,7 +1747,7 @@ dependencies = [
 
 [[package]]
 name = "zendure"
-version = "0.2.24"
+version = "0.2.25"
 dependencies = [
  "chrono",
  "chrono-tz",
