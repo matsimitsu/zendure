@@ -27,14 +27,15 @@ use crate::allocate::Directive;
 use crate::announce::Announcer;
 use crate::clock::Clock;
 use crate::config::Config;
-use crate::device::{self, Applied, ControlPath, Outcome};
+use crate::device::{self, Applied, ControlPath};
 use crate::engine::Engine;
 use crate::event::Event;
 use crate::journal::Journal;
+use crate::models::ControlDecision;
 use crate::models::StorageMode;
 use crate::mqtt::{self, MqttEvent, MqttPublisher};
 use crate::publish::Publisher;
-use crate::units::{DeciKelvin, Soc, WattHours, Watts};
+use crate::units::{DeciKelvin, Soc, Timestamp, WattHours, Watts};
 use crate::world::{Measurement, World};
 use crate::zendure::ZendureClient;
 use crate::{battery, controller, models, rte};
@@ -84,30 +85,44 @@ pub fn shutdown_signal() -> Result<impl Future<Output = Stopped>, std::io::Error
     })
 }
 
-/// Actuate a step's directives and report the fleet's health once.
+/// Actuate a decision, record what happened, and report it once.
 ///
 /// Both arms of the loop — a decision and the failsafe idle — do exactly this,
-/// differing only in which path is actuating and what the two status strings
-/// are. Inlined twice it was the same twelve lines written out, and the third
-/// caller (step 9's charger) would have made it three; extracted, the ordering
-/// that matters is stated in one place.
+/// differing only in the `ControlPath`, which already carries everything they
+/// used to differ by: the log wording, both status strings, and the journal's
+/// `kind`. Written out twice it was the same twenty lines, and step 9's charger
+/// would have made it three.
 ///
-/// The outcomes come back rather than being journalled here, because that write
-/// has to happen *after* this returns, so the recorded outcome reflects whether
-/// the device write actually landed. The `ControlPath` carries everything the
-/// two arms used to differ by — the log wording, both status strings, and the
-/// journal's `kind`.
-async fn apply_and_publish(
+/// The ordering that matters is stated once, here. The journal write happens
+/// **after** `actuate`, so each recorded outcome reflects whether the write to
+/// that device actually landed — which is what you want when reconstructing an
+/// incident. An earlier version returned the outcomes and left the journalling
+/// to the caller, arguing that the write "has to happen after this returns";
+/// that confused "after `actuate`" with "after this function returns" and cost
+/// the extraction its last twenty lines.
+///
+/// `engine` is borrowed rather than its state passed in, because the state has
+/// to be read after actuation too.
+#[allow(clippy::too_many_arguments)]
+async fn apply_decision(
     client: &ZendureClient,
     publisher: &dyn Publisher,
+    journal: &Journal,
+    engine: &Engine,
     prefix: &str,
-    directives: &[Directive],
     path: ControlPath,
-) -> Vec<Outcome> {
+    at: Timestamp,
+    decision: &ControlDecision,
+    directives: &[Directive],
+) {
     // The whole list, not its first element: a step that means "stop one box,
     // start another" has to reach both devices.
     let outcomes = device::actuate(client, directives, path).await;
     let failed = outcomes.iter().any(|o| o.applied == Applied::Error);
+
+    // The engine's state goes in beside the decision so the row carries the
+    // inputs and the history it came from, not just its conclusion.
+    journal.decision(at, path, decision, &engine.state(), &outcomes);
 
     // Once after the loop rather than once per command. With one device that is
     // the same single publish as before; with two it stops the HA status
@@ -122,83 +137,123 @@ async fn apply_and_publish(
         mqtt::publish_status(publisher, prefix, status);
     }
 
-    outcomes
+    mqtt::publish_decision(publisher, prefix, decision);
+    // Published on both paths. The counts do not change on a failsafe idle, but
+    // a consumer that only sees them after an objective decision cannot tell a
+    // quiet hour from a stalled one.
+    mqtt::publish_cycle_counts(publisher, prefix, &engine.cycle_counts());
 }
 
-/// Everything the poll produces that the decision never reads.
+/// Everything a poll advances and publishes that no decision ever reads.
 ///
 /// Round-trip efficiency, pack temperatures, SOC and battery power are all
 /// derived from `ZendureReport` fields the objective does not consult, and they
 /// are published for graphing rather than fed to the engine. Seventy-odd lines
-/// of that sat inline in a `select!` branch, four levels of indentation deep,
-/// between parsing the response and folding it into the world — so the arm's one
-/// job was the hardest thing in it to see.
+/// of that once sat inline in a `select!` branch, four levels deep, between
+/// parsing the response and folding it into the world — so the arm's one job
+/// was the hardest thing in it to see.
 ///
-/// Takes `&mut` for the three pieces of state a poll advances: the rolling RTE
-/// window, the pack capacities and the device's own minimum SOC, each of which
-/// only ever changes here.
-#[allow(clippy::too_many_arguments)]
-async fn publish_poll_telemetry(
-    publisher: &dyn Publisher,
-    announcer: &Announcer,
-    prefix: &str,
-    report: &models::ZendureReport,
-    state: &battery::BatteryState,
-    rte_tracker: &mut rte::RteTracker,
-    pack_capacities: &mut Vec<WattHours>,
-    min_soc_percent: &mut Soc,
-) {
-    let charge = Watts::from_device(report.properties.output_pack_power.unwrap_or(0));
-    let discharge = Watts::from_device(report.properties.pack_input_power.unwrap_or(0));
-    rte_tracker.record(charge, discharge);
+/// A struct rather than three `&mut` out-parameters behind an
+/// `#[allow(clippy::too_many_arguments)]`. The three move together, only ever
+/// change here, and the lint was telling the truth. It also fixes a name that
+/// lied: `publish_poll_telemetry` did not only publish — the first thing it did
+/// was advance the rolling RTE window and rewrite the pack capacities and the
+/// device's own minimum SOC, which is not where a reader looks for them.
+struct PollTelemetry {
+    rte: rte::RteTracker,
+    /// Sticky: a report that carries no pack data leaves the last known set in
+    /// place rather than publishing a capacity of zero.
+    pack_capacities: Vec<WattHours>,
+    /// The device's own floor, which it reports in tenths of a percent.
+    min_soc: Soc,
+}
 
-    if report.pack_data.is_some() {
-        *pack_capacities = rte::pack_capacities(&report.pack_data);
+impl PollTelemetry {
+    fn new(state_path: std::path::PathBuf, pack_capacities: Vec<WattHours>, min_soc: Soc) -> Self {
+        PollTelemetry {
+            rte: rte::RteTracker::new(state_path),
+            pack_capacities,
+            min_soc,
+        }
     }
-    if let Some(ms) = report.properties.min_soc {
-        *min_soc_percent = Soc::from_tenths(ms);
+
+    fn pack_count(&self) -> usize {
+        self.pack_capacities.len()
     }
 
-    let total_capacity_kwh = pack_capacities.iter().copied().sum::<WattHours>().to_kwh();
-    let usable_kwh = rte_tracker.usable_kwh(state.soc, *min_soc_percent, pack_capacities);
-    mqtt::publish_rte(
-        publisher,
-        prefix,
-        rte_tracker.rte_percent(),
-        usable_kwh,
-        total_capacity_kwh,
-    );
+    /// Fold one poll in, then publish what it produced.
+    ///
+    /// Not `async`: every publish is a synchronous hand-off to the publisher's
+    /// queue, and `save` is a plain file write. It was `async` with no `.await`
+    /// in it for one commit, which is worse than useless — it puts a suspension
+    /// point in the reader's head that the code does not have.
+    fn record_and_publish(
+        &mut self,
+        publisher: &dyn Publisher,
+        announcer: &Announcer,
+        prefix: &str,
+        report: &models::ZendureReport,
+        state: &battery::BatteryState,
+    ) {
+        let charge = Watts::from_device(report.properties.output_pack_power.unwrap_or(0));
+        let discharge = Watts::from_device(report.properties.pack_input_power.unwrap_or(0));
+        self.rte.record(charge, discharge);
 
-    let pack_temps: Vec<mqtt::PackTemperature> = report
-        .pack_data
-        .as_ref()
-        .map(|packs| {
-            packs
-                .iter()
-                .enumerate()
-                .filter_map(|(index, p)| {
-                    p.max_temp.map(|t| mqtt::PackTemperature {
-                        index,
-                        temp: DeciKelvin(t),
+        if report.pack_data.is_some() {
+            self.pack_capacities = rte::pack_capacities(&report.pack_data);
+        }
+        if let Some(ms) = report.properties.min_soc {
+            self.min_soc = Soc::from_tenths(ms);
+        }
+
+        let total_capacity_kwh = self
+            .pack_capacities
+            .iter()
+            .copied()
+            .sum::<WattHours>()
+            .to_kwh();
+        let usable_kwh = self
+            .rte
+            .usable_kwh(state.soc, self.min_soc, &self.pack_capacities);
+        mqtt::publish_rte(
+            publisher,
+            prefix,
+            self.rte.rte_percent(),
+            usable_kwh,
+            total_capacity_kwh,
+        );
+
+        let pack_temps: Vec<mqtt::PackTemperature> = report
+            .pack_data
+            .as_ref()
+            .map(|packs| {
+                packs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, p)| {
+                        p.max_temp.map(|t| mqtt::PackTemperature {
+                            index,
+                            temp: DeciKelvin(t),
+                        })
                     })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    mqtt::publish_temperatures(
-        publisher,
-        announcer,
-        prefix,
-        report.properties.hyper_tmp.map(DeciKelvin),
-        &pack_temps,
-    );
+                    .collect()
+            })
+            .unwrap_or_default();
+        mqtt::publish_temperatures(
+            publisher,
+            announcer,
+            prefix,
+            report.properties.hyper_tmp.map(DeciKelvin),
+            &pack_temps,
+        );
 
-    mqtt::publish_soc_calibrating(publisher, prefix, state.soc_calibrating);
-    mqtt::publish_battery_soc(publisher, prefix, state.soc);
-    mqtt::publish_battery_power(publisher, prefix, charge, discharge);
+        mqtt::publish_soc_calibrating(publisher, prefix, state.soc_calibrating);
+        mqtt::publish_battery_soc(publisher, prefix, state.soc);
+        mqtt::publish_battery_power(publisher, prefix, charge, discharge);
 
-    // Persisted every poll, so the rolling 24h window survives a restart.
-    rte_tracker.save();
+        // Persisted every poll, so the rolling 24h window survives a restart.
+        self.rte.save();
+    }
 }
 
 /// Start the devices, the journal and the MQTT client, then fold events until
@@ -260,19 +315,22 @@ pub async fn run(
     let battery_state =
         battery::BatteryState::from_properties(&battery_report.properties, zendure_client.spec());
 
-    let mut pack_capacities = rte::pack_capacities(&initial_report.pack_data);
-    let mut min_soc_percent: Soc = initial_report
-        .properties
-        .min_soc
-        .map(Soc::from_tenths)
-        .unwrap_or(Soc::ZERO);
+    let mut telemetry = PollTelemetry::new(
+        config.rte_state_path.clone(),
+        rte::pack_capacities(&initial_report.pack_data),
+        initial_report
+            .properties
+            .min_soc
+            .map(Soc::from_tenths)
+            .unwrap_or(Soc::ZERO),
+    );
     tracing::info!(
         "Battery: SOC={}%, max_discharge={}W, max_charge={}W, current_power={}W, packs={}",
         battery_state.soc,
         battery_state.max_discharge_power,
         battery_state.max_charge_power,
         battery_state.current_power,
-        pack_capacities.len(),
+        telemetry.pack_count(),
     );
 
     // On by default: by the time you think to enable logging, the bug you
@@ -345,8 +403,6 @@ pub async fn run(
     };
     journal.event(&startup);
     engine.step(&startup);
-
-    let mut rte_tracker = rte::RteTracker::new(config.rte_state_path.clone());
 
     let poll_interval = config.zendure_poll_interval;
     let mut poll_timer = tokio::time::interval(poll_interval);
@@ -423,34 +479,18 @@ pub async fn run(
                                 );
                             }
 
-                            let outcomes = apply_and_publish(
+                            apply_decision(
                                 &zendure_client,
                                 &*publisher,
+                                &journal,
+                                &engine,
                                 &ha_prefix,
-                                &step.directives,
                                 ControlPath::Objective,
+                                clock.now,
+                                &decision,
+                                &step.directives,
                             )
                             .await;
-
-                            // Recorded after actuation, so each outcome reflects whether
-                            // the write to that device actually landed — which is what you
-                            // want when reconstructing an incident. The engine's state goes
-                            // in beside it so the row carries the inputs and the history the
-                            // decision came from, not just its conclusion.
-                            journal.decision(
-                                clock.now,
-                                ControlPath::Objective,
-                                &decision,
-                                &engine.state(),
-                                &outcomes,
-                            );
-
-                            mqtt::publish_decision(&*publisher, &ha_prefix, &decision);
-                            mqtt::publish_cycle_counts(
-                                &*publisher,
-                                &ha_prefix,
-                                &engine.cycle_counts(),
-                            );
                         }
                     }
                 }
@@ -473,24 +513,18 @@ pub async fn run(
                 if let Some(decision) = step.decision {
                     // Every battery stands down, and one unreachable box does
                     // not leave the others running through the outage.
-                    let outcomes = apply_and_publish(
+                    apply_decision(
                         &zendure_client,
                         &*publisher,
+                        &journal,
+                        &engine,
                         &ha_prefix,
-                        &step.directives,
                         ControlPath::Failsafe,
+                        clock.now,
+                        &decision,
+                        &step.directives,
                     )
                     .await;
-
-                    journal.decision(
-                        clock.now,
-                        ControlPath::Failsafe,
-                        &decision,
-                        &engine.state(),
-                        &outcomes,
-                    );
-
-                    mqtt::publish_decision(&*publisher, &ha_prefix, &decision);
                 }
             }
             _ = poll_timer.tick() => {
@@ -513,17 +547,13 @@ pub async fn run(
                             state.current_power,
                         );
 
-                        publish_poll_telemetry(
+                        telemetry.record_and_publish(
                             &*publisher,
                             &announcer,
                             &ha_prefix,
                             &report,
                             &state,
-                            &mut rte_tracker,
-                            &mut pack_capacities,
-                            &mut min_soc_percent,
-                        )
-                        .await;
+                        );
 
                         let event = Event::DeviceUpdate {
                             at: Clock::now(config.timezone),
