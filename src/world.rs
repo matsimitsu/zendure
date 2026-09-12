@@ -10,13 +10,6 @@
 //! measurements only, which is also why it is the thing step 7 records as
 //! `world_json`.
 
-// `MeterReading::total_only`, `DeviceId::as_str` and the per-phase field are
-// exercised by the test modules, by the journal's serializer, and by the
-// per-phase work this data is being captured for — not yet by the non-test
-// decision path. `units.rs` carries this attribute for the same reason. Every
-// item below has a named call site or a stated one; none is speculative API.
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -49,7 +42,10 @@ impl MeterReading {
     }
 
     /// A reading with no per-phase breakdown, for sources that report only a
-    /// net total and for fixtures that predate per-phase capture.
+    /// net total and for fixtures that predate per-phase capture. Only the test
+    /// modules call it today — the live adapters all report three phases — but
+    /// it is the constructor a total-only meter would arrive through.
+    #[allow(dead_code)]
     pub fn total_only(total: GridPower) -> Self {
         MeterReading {
             total,
@@ -84,6 +80,10 @@ impl DeviceId {
         DeviceId(id.into())
     }
 
+    /// The id as a plain string, for callers that need one without going
+    /// through `Display`. Exercised by the test modules; the decision path and
+    /// the journal both reach an id through `Display` or `Serialize` instead.
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &str {
         &self.0
     }

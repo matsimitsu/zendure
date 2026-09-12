@@ -2,7 +2,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::command::Command;
-use crate::device::AC2400_PLUS;
+use crate::device::{AC2400_PLUS, BatteryController};
 use crate::models::{StorageMode, ZendureReport, ZendureWriteRequest};
 
 #[allow(dead_code)]
@@ -157,5 +157,16 @@ impl ZendureClient {
         };
         self.http.post(&url).json(&body).send().await?;
         Ok(())
+    }
+}
+
+/// The adapter side of the capability trait: everything real is already in
+/// `apply_command`, which the poll loop and startup path still call directly.
+/// This is the seam `actuate` drives, so the control loop never names a vendor.
+impl BatteryController for ZendureClient {
+    type Error = reqwest::Error;
+
+    async fn apply(&self, command: &Command) -> Result<(), reqwest::Error> {
+        self.apply_command(command).await
     }
 }

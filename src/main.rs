@@ -1,3 +1,4 @@
+mod allocate;
 mod battery;
 mod clock;
 mod command;
@@ -210,29 +211,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
                     }
 
-                    let mut outcome = "no_command";
-                    let mut error = None;
-                    if let Some(command) = step.commands.first() {
-                        if let Err(e) = zendure_client.apply_command(command).await {
-                            tracing::error!("Failed to apply decision to battery: {e}");
-                            outcome = "error";
-                            error = Some(e.to_string());
-                            mqtt::publish_status(&publisher_client, &ha_prefix, "zendure_api_error").await;
-                        } else {
-                            outcome = "ok";
-                            mqtt::publish_status(&publisher_client, &ha_prefix, "operational").await;
-                        }
+                    // The whole list, not its first element: a step that means
+                    // "stop one box, start another" has to reach both devices.
+                    let outcomes = device::actuate(&zendure_client, &step.commands, "decision").await;
+                    let failed = outcomes.iter().any(|o| o.outcome == "error");
+
+                    // Once after the loop rather than once per command. With one
+                    // device that is the same single publish as before; with two
+                    // it stops the HA status flapping twice per decision. A
+                    // failure anywhere takes precedence: the fleet is degraded
+                    // even if some of it was commanded successfully.
+                    if !step.commands.is_empty() {
+                        let status = if failed { "zendure_api_error" } else { "operational" };
+                        mqtt::publish_status(&publisher_client, &ha_prefix, status).await;
                     }
 
-                    // Recorded after actuation, so `outcome` reflects whether the
-                    // write to the device actually landed — which is what you want
-                    // when reconstructing an incident.
+                    // Recorded after actuation, so each outcome reflects whether
+                    // the write to that device actually landed — which is what you
+                    // want when reconstructing an incident. The world goes in
+                    // beside it so the line carries the inputs, not just the
+                    // conclusion.
                     if let Some(log) = &raw_log {
                         log.value("decision", &serde_json::json!({
                             "decision": &decision,
-                            "command": step.commands.first().map(|c| c.to_string()),
-                            "outcome": outcome,
-                            "error": error,
+                            "world": engine.world(),
+                            "commands": outcomes,
                         }));
                     }
 
@@ -259,26 +262,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 if let Some(decision) = step.decision {
-                    let mut outcome = "no_command";
-                    let mut error = None;
-                    if let Some(command) = step.commands.first() {
-                        if let Err(e) = zendure_client.apply_command(command).await {
-                            tracing::error!("Failed to apply failsafe idle to battery: {e}");
-                            outcome = "error";
-                            error = Some(e.to_string());
-                            mqtt::publish_status(&publisher_client, &ha_prefix, "mqtt_timeout_api_error").await;
-                        } else {
-                            outcome = "ok";
-                            mqtt::publish_status(&publisher_client, &ha_prefix, "mqtt_timeout").await;
-                        }
+                    // Every battery stands down, and one unreachable box does
+                    // not leave the others running through the outage.
+                    let outcomes = device::actuate(&zendure_client, &step.commands, "failsafe idle").await;
+                    let failed = outcomes.iter().any(|o| o.outcome == "error");
+
+                    if !step.commands.is_empty() {
+                        let status = if failed { "mqtt_timeout_api_error" } else { "mqtt_timeout" };
+                        mqtt::publish_status(&publisher_client, &ha_prefix, status).await;
                     }
 
                     if let Some(log) = &raw_log {
                         log.value("failsafe", &serde_json::json!({
                             "decision": &decision,
-                            "command": step.commands.first().map(|c| c.to_string()),
-                            "outcome": outcome,
-                            "error": error,
+                            "world": engine.world(),
+                            "commands": outcomes,
                         }));
                     }
 

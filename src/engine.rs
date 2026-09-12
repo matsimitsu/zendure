@@ -1,8 +1,8 @@
 use std::time::Duration;
 
+use crate::allocate::{Directive, allocate};
 use crate::battery::BatteryState;
 use crate::clock::Clock;
-use crate::command::Command;
 use crate::controller::Controller;
 use crate::event::Event;
 use crate::models::{ControlDecision, ControlMode, CycleCounts};
@@ -20,14 +20,15 @@ pub struct Engine {
     mqtt_timeout: Duration,
 }
 
-/// What `Engine::step` wants done for one event: the command(s) to actuate
-/// (zero or one — never more than one decision per step), the decision to
-/// publish if the controller made one, and a status transition to publish if
-/// the event itself caused one. Actuating a command and observing whether it
-/// succeeded stays outside the engine — that's I/O, done by the caller.
+/// What `Engine::step` wants done for one event: the directives to actuate
+/// (at most one decision per step, allocated across however many devices the
+/// world holds), the decision to publish if the controller made one, and a
+/// status transition to publish if the event itself caused one. Actuating a
+/// directive and observing whether it succeeded stays outside the engine —
+/// that's I/O, done by the caller.
 #[derive(Debug, Default)]
 pub struct Step {
-    pub commands: Vec<Command>,
+    pub commands: Vec<Directive>,
     pub decision: Option<ControlDecision>,
     pub status: Option<&'static str>,
 }
@@ -49,10 +50,9 @@ impl Engine {
         self.world.battery()
     }
 
-    /// The whole projection, for the caller that wants to record it. Step 7
-    /// writes this alongside each decision as `world_json`; nothing reads it
-    /// yet, which is the only reason for the attribute.
-    #[allow(dead_code)]
+    /// The whole projection, for the caller that wants to record it: the raw
+    /// log writes it alongside every decision, so a journal line carries the
+    /// inputs the decision was made from and not just its conclusion.
     pub fn world(&self) -> &World {
         &self.world
     }
@@ -87,7 +87,14 @@ impl Engine {
         self.world.observe_meter(grid, solar);
 
         let decision = self.controller.decide_world(&self.world, at);
-        let commands = decision.iter().map(Command::from).collect();
+        // Allocated here rather than by the caller: how many devices a decision
+        // touches is the world's business, and `main.rs` actuating whatever
+        // list it is handed is what keeps the dropped-command bug from coming
+        // back.
+        let commands = decision
+            .as_ref()
+            .map(|d| allocate(d, &self.world))
+            .unwrap_or_default();
 
         Step {
             commands,
@@ -119,10 +126,14 @@ impl Engine {
             ),
             grid_power: GridPower::ZERO,
         };
-        let command = Command::from(&decision);
+        // Through `allocate` like any other decision, so the failsafe idles
+        // *every* battery. A hand-built `vec![command]` here would stand one
+        // box down and leave the others running during the exact outage the
+        // failsafe exists for.
+        let commands = allocate(&decision, &self.world);
 
         Step {
-            commands: vec![command],
+            commands,
             decision: Some(decision),
             status: first_tick.then_some("mqtt_timeout"),
         }
@@ -132,6 +143,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::Command;
     use crate::units::{BatteryPower, GridPower, PowerCap, Soc, SolarPower, Timestamp};
     use crate::world::{DeviceId, Measurement};
     use chrono::Weekday;
@@ -167,6 +179,15 @@ mod tests {
         world
     }
 
+    /// The one-battery world's idle directive — what every assertion below
+    /// used to spell as a bare `Command::SetIdle`.
+    fn idle_for(id: &str) -> Directive {
+        Directive::Battery {
+            device: DeviceId::new(id),
+            command: Command::SetIdle,
+        }
+    }
+
     fn meter(total: f64) -> MeterReading {
         MeterReading::total_only(GridPower(total))
     }
@@ -184,9 +205,32 @@ mod tests {
         let mut engine = engine();
         let step = engine.step(&Event::MqttTimeout { at: clock() });
 
-        assert_eq!(step.commands, vec![Command::SetIdle]);
+        assert_eq!(step.commands, vec![idle_for(BATTERY_ID)]);
         assert_eq!(step.decision.unwrap().mode, ControlMode::Idle);
         assert_eq!(step.status, Some("mqtt_timeout"));
+    }
+
+    /// The failsafe is a property of the outage, not of one box: every battery
+    /// in the world is stood down, not just whichever one happens to sort
+    /// first. This is the case the old `commands.first()` actuation could not
+    /// have served even if the engine had produced it.
+    #[test]
+    fn mqtt_timeout_idles_every_battery() {
+        let mut world = World::new();
+        world.observe_device(DeviceId::new("battery-a"), Measurement::Battery(battery()));
+        world.observe_device(DeviceId::new("battery-b"), Measurement::Battery(battery()));
+        let mut engine = Engine::new(
+            Controller::test_default(NOW_MS, DAY),
+            world,
+            Duration::from_secs(120),
+        );
+
+        let step = engine.step(&Event::MqttTimeout { at: clock() });
+
+        assert_eq!(
+            step.commands,
+            vec![idle_for("battery-a"), idle_for("battery-b")],
+        );
     }
 
     #[test]
@@ -197,7 +241,7 @@ mod tests {
 
         // The command keeps being issued: the engine never learns whether the
         // first write landed, so a failed one must not disable the failsafe.
-        assert_eq!(step.commands, vec![Command::SetIdle]);
+        assert_eq!(step.commands, vec![idle_for(BATTERY_ID)]);
         assert_eq!(step.decision.unwrap().mode, ControlMode::Idle);
         // ...but the transition is reported only once per outage.
         assert_eq!(step.status, None);
@@ -208,7 +252,7 @@ mod tests {
         let mut engine = engine();
         for _ in 0..5 {
             let step = engine.step(&Event::MqttTimeout { at: clock() });
-            assert_eq!(step.commands, vec![Command::SetIdle]);
+            assert_eq!(step.commands, vec![idle_for(BATTERY_ID)]);
         }
     }
 
