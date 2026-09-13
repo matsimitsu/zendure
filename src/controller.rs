@@ -10,6 +10,9 @@ use crate::models::{ControlDecision, ControlMode, CycleCounts};
 use crate::units::{Elapsed, GridPower, PowerMargin, Setpoint, Soc, SolarPower, Timestamp};
 use crate::world::World;
 
+/// Fraction of the target commanded on the first decision after a mode change.
+/// Easing into a new direction rather than stepping straight to full power is a
+/// battery-safety measure, and the convention most BMS implementations follow.
 const RAMP_FACTOR: f64 = 0.75;
 
 /// Mutable history, split from the config fields (which live in the journal's
