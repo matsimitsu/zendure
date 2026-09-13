@@ -1,0 +1,105 @@
+.battery-panel {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+
+  &--empty {
+    align-items: center;
+    justify-content: center;
+    min-height: 160px;
+  }
+
+  &__head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+  }
+
+  &__identity {
+    display: flex;
+    gap: var(--space-3);
+    align-items: center;
+  }
+
+  &__icon {
+    width: 40px;
+    height: 40px;
+    border-radius: var(--radius-lg);
+    background: var(--color-accent-bg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-accent-text);
+    font-size: 24px;
+  }
+
+  &__label {
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    font-weight: var(--weight-medium);
+  }
+
+  &__soc {
+    font-family: var(--font-mono);
+    font-size: var(--text-2xl);
+    font-weight: var(--weight-semibold);
+    color: var(--color-text-primary);
+  }
+
+  &__badge {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    font-weight: var(--weight-semibold);
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius-md);
+    display: inline-block;
+    white-space: nowrap;
+
+    &--charge {
+      background: var(--color-accent-bg);
+      color: var(--color-accent-text);
+    }
+
+    &--discharge {
+      background: var(--color-negative-bg);
+      color: var(--color-negative-text);
+    }
+
+    &--idle {
+      background: var(--color-idle-bg);
+      color: var(--color-idle-text);
+    }
+  }
+
+  &__bar {
+    height: var(--space-2);
+    border-radius: var(--radius-sm);
+    background: var(--color-border-soft);
+    overflow: hidden;
+  }
+
+  &__bar-fill {
+    height: 100%;
+    background: var(--color-accent);
+    border-radius: var(--radius-sm);
+    transition: width 0.3s ease-out;
+  }
+
+  &__stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: var(--space-4);
+  }
+
+  &__empty-message {
+    font-size: var(--text-base);
+    color: var(--color-text-muted);
+    text-align: center;
+  }
+}

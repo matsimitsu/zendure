@@ -270,6 +270,12 @@ impl SolarPower {
         SolarPower::new(-phase.get())
     }
 
+    /// Production as whole [`Watts`], rounded — a reading to display, not a
+    /// setpoint to command.
+    pub fn into_watts(self) -> Watts {
+        Watts(self.0.round() as i32)
+    }
+
     pub fn get(self) -> f64 {
         self.0
     }

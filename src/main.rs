@@ -25,6 +25,7 @@ mod simulation;
 mod source;
 mod sync;
 mod units;
+mod web;
 mod world;
 mod zendure;
 

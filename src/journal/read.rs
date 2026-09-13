@@ -22,6 +22,7 @@ use super::SCHEMA_VERSION;
 use crate::config::SessionConfig;
 use crate::engine::EngineState;
 use crate::event::Event;
+use crate::models::ControlDecision;
 use crate::units::Timestamp;
 use crate::world::DeviceId;
 
@@ -136,25 +137,15 @@ fn decode<T: serde::de::DeserializeOwned>(what: &'static str, json: &str) -> Res
     serde_json::from_str(json).map_err(|source| ReadError::Decode { what, source })
 }
 
-/// Read everything needed to replay the run between two instants.
+/// Opens `path` read-only and refuses a journal this build cannot read.
 ///
-/// The range is anchored to a *decision*, not to `from`: a replay has to resume
-/// from a recorded snapshot, and the only snapshots are on decision rows. So the
-/// slice starts at the last decision at or before `from` and runs to `to`, which
-/// means it can begin earlier than asked. That is the honest boundary — starting
-/// at `from` with the state from some other moment would replay plausible
-/// nonsense.
-pub fn read_range(path: &Path, from: Timestamp, to: Timestamp) -> Result<Recording> {
-    // Read-only, and never creating. A reader that opens read-write would take
-    // a lock on the file the daemon is writing, and `Connection::open` creates
-    // a database if the path is absent — so a typo in `--db` used to leave a
-    // 0-byte file behind and then fail with `no such table: decisions` rather
-    // than saying the journal was not there.
+/// Never creating: `Connection::open` would make an empty database out of a
+/// mistyped path and then fail with `no such table` instead of `no such file`.
+fn open_for_reading(path: &Path) -> Result<Connection> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    // The writer sets this on its own connection for a documented reason; a
-    // reader running against the live journal needs it for the same one. WAL
-    // keeps readers off the writer's back, but a checkpoint or an operator's
-    // `VACUUM` takes an exclusive lock, and the default timeout is zero.
+    // WAL keeps readers off the writer's back, but a checkpoint or an
+    // operator's `VACUUM` takes an exclusive lock and the default timeout is
+    // zero.
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
     let stamped: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -164,6 +155,19 @@ pub fn read_range(path: &Path, from: Timestamp, to: Timestamp) -> Result<Recordi
             path.display()
         )));
     }
+    Ok(conn)
+}
+
+/// Read everything needed to replay the run between two instants.
+///
+/// The range is anchored to a *decision*, not to `from`: a replay has to resume
+/// from a recorded snapshot, and the only snapshots are on decision rows. So the
+/// slice starts at the last decision at or before `from` and runs to `to`, which
+/// means it can begin earlier than asked. That is the honest boundary — starting
+/// at `from` with the state from some other moment would replay plausible
+/// nonsense.
+pub fn read_range(path: &Path, from: Timestamp, to: Timestamp) -> Result<Recording> {
+    let conn = open_for_reading(path)?;
 
     // One transaction across all three reads. They were three independent
     // snapshots of a database the daemon appends to a few times a second, so
@@ -399,6 +403,57 @@ fn session_row(
     )
     .optional()?
     .ok_or_else(|| ReadError::Schema("this journal has no sessions recorded".to_string()))
+}
+
+/// One decision row, for the dashboard's decision log — not a replay fixture,
+/// so it carries none of `read_range`'s snapshot/pairing apparatus.
+#[derive(Debug)]
+pub struct DecisionRow {
+    pub at: Timestamp,
+    pub decision: ControlDecision,
+}
+
+/// The last `limit` decisions, oldest first — what the dashboard's decision
+/// log renders on page load. Unlike [`read_range`], this does not anchor to a
+/// snapshot or pair events with decisions.
+///
+/// [`Journal::decision`](super::Journal::decision) writes one row per
+/// commanded device, so one decision is several rows sharing a `ts_ms` and a
+/// `payload_json`; the `GROUP BY` collapses them to the one entry the
+/// dashboard's live path appends.
+pub fn read_recent_decisions(path: &Path, limit: usize) -> Result<Vec<DecisionRow>> {
+    let conn = open_for_reading(path)?;
+
+    let mut stmt = conn.prepare(
+        "SELECT ts_ms, payload_json FROM decisions
+         GROUP BY ts_ms, payload_json
+         ORDER BY MAX(seq) DESC LIMIT ?1",
+    )?;
+    let rows: Vec<(i64, String)> = stmt
+        .query_map([limit as i64], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut skipped = 0usize;
+    let mut decisions: Vec<DecisionRow> = rows
+        .into_iter()
+        // The decision log is a logging concern; one row the current build
+        // cannot decode must not cost the dashboard the other nineteen.
+        .filter_map(|(ts_ms, payload)| match decode("a decision", &payload) {
+            Ok(decision) => Some(DecisionRow {
+                at: Timestamp::from_millis(ts_ms),
+                decision,
+            }),
+            Err(_) => {
+                skipped += 1;
+                None
+            }
+        })
+        .collect();
+    if skipped > 0 {
+        tracing::warn!(skipped, path = %path.display(), "skipped undecodable decision rows");
+    }
+    decisions.reverse();
+    Ok(decisions)
 }
 
 #[cfg(test)]

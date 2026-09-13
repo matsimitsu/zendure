@@ -1,0 +1,68 @@
+// Design tokens for the dashboard: every raw color/type/spacing value lives
+// here, once. Component stylesheets only ever consume var(--token-name) —
+// never a literal, per the design handoff's architecture rules.
+:root {
+  // Color
+  --color-bg-canvas: oklch(0.16 0.015 250);
+  --color-bg-header: oklch(0.13 0.015 250);
+  --color-surface: oklch(0.23 0.015 250);
+  --color-border: oklch(1 0 0 / 0.08);
+  --color-border-soft: oklch(1 0 0 / 0.07);
+
+  --color-text-primary: oklch(0.96 0.01 250);
+  --color-text-secondary: oklch(0.9 0.01 250);
+  --color-text-muted: oklch(0.65 0.02 250);
+  --color-text-faint: oklch(0.55 0.02 250);
+
+  --color-accent: oklch(0.75 0.15 75); // amber — solar, charging, primary
+  --color-accent-bg: oklch(0.3 0.06 75);
+  --color-accent-text: oklch(0.9 0.1 75);
+
+  --color-negative: oklch(0.7 0.16 25); // red — discharge
+  --color-negative-bg: oklch(0.3 0.07 25);
+  --color-negative-text: oklch(0.85 0.1 25);
+
+  --color-info: oklch(0.72 0.12 200); // teal-blue — grid
+  --color-info-bg: oklch(0.3 0.06 200);
+  --color-home: oklch(0.7 0.13 250); // blue — home usage
+  --color-home-bg: oklch(0.3 0.06 250);
+  --color-ev: oklch(0.72 0.13 300); // purple — EV
+  --color-ev-bg: oklch(0.3 0.06 300);
+
+  --color-idle: oklch(0.35 0.01 250);
+  --color-idle-bg: oklch(1 0 0 / 0.08);
+  --color-idle-text: oklch(0.75 0.01 250);
+
+  --color-operational: oklch(0.7 0.15 150);
+
+  // Typography
+  --font-ui: "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+
+  --text-xs: 11px;
+  --text-sm: 12.5px;
+  --text-base: 13.5px;
+  --text-md: 14.5px;
+  --text-lg: 22px;
+  --text-2xl: 28px;
+  --text-3xl: 30px;
+
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  // Spacing / radius (4px base grid)
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 28px;
+  --space-8: 32px;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 10px;
+}

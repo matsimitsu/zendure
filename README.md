@@ -78,6 +78,12 @@ solar_phase = "A"           # A, B or C — which phase the solar inverter feeds
 [homeassistant]
 publish_prefix = "zendure"
 
+# Presence, not a flag, turns the live dashboard on — absent runs no HTTP
+# listener at all. See "Dashboard" below.
+# [web]
+# bind_address = "127.0.0.1"   # default
+# port = 8080                  # default
+
 [clock]
 timezone = "Europe/Amsterdam"   # IANA name
 
@@ -110,8 +116,11 @@ mqtt_timeout_secs = 60
 
 **`mqtt.*`, `[[device]]` and `shelly.topic` are fatal if missing or the wrong
 type** — getting one of those wrong means the controller talks to the wrong
-thing or cannot talk at all. **Everything in `[tuning]`, plus the journal,
-rte and logging settings, warns and falls back to its default** — getting one
+thing or cannot talk at all. **`web.bind_address` and `web.port` are fatal only
+when present and the wrong type**; it is the `[web]` table's presence that
+decides whether the dashboard runs at all, and either key may be left out to
+take its default. **Everything in `[tuning]`, plus the journal, rte and logging
+settings, warns and falls back to its default** — getting one
 of those wrong means the controller decides slightly differently, and a typo
 there must never be the reason systemd restart-loops a controller that is
 holding a battery command. `RUST_LOG`, when set and non-empty, overrides
@@ -352,6 +361,31 @@ The controller publishes MQTT discovery config automatically. These sensors appe
 
 **Binary sensors:**
 - `Zendure Controller Battery SOC Calibrating` — ON when SOC calibration is in progress
+
+## Dashboard
+
+Add `[web]` to run a live browser dashboard (`src/web/`) — solar/home/grid
+stat cards, the battery panel (SOC, mode, RTE, usable energy, capacity), and
+a decision log, all real data, updating roughly once a second over
+server-sent events. Two routes: `GET /` (the full page) and `GET /events`
+(the SSE stream fragments it swaps in via htmx). No `[web]` table means no
+HTTP listener at all — the same brokerless-by-default rule `[mqtt]` follows —
+and a bind failure warns and runs without the dashboard rather than failing
+startup.
+
+Every section of the page is live, including the status badge — it reads
+`Meter offline` once the MQTT timeout has fired and the controller has stood
+the battery down, so a frozen page cannot keep claiming `Operational`.
+
+The decision log is seeded from the journal at startup, so it survives a
+restart. Rows from an earlier day are dated; the battery's mode badge is not
+seeded and reads `Awaiting decision` until this process makes its first
+decision, since a journalled row describes what the battery *was* doing, not
+what it is doing now.
+
+The EV card and the 24-hour forecast panel are static placeholders: neither
+has a real data source in this controller yet, and they render fixed sample
+content rather than pretending to be live.
 
 ## Releasing
 

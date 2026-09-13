@@ -4,6 +4,7 @@ use crate::config::SessionConfig;
 use crate::device::{Applied, ControlPath, Outcome};
 use crate::engine::Engine;
 use crate::fixtures::journey;
+use crate::journal::Journal;
 use crate::journal::backdate;
 use crate::journal::testing;
 use crate::journal::testing::{record, record_with};
@@ -448,4 +449,150 @@ async fn a_decision_carries_its_events_timestamp() {
         )
         .unwrap();
     assert_eq!(e, d);
+}
+
+// --- `read_recent_decisions` (the dashboard's seeded log) ---------------------
+
+/// One `Journal::decision` call against `devices`, at `at_ms`, reasoned so the
+/// assertions below can tell the rows apart.
+fn log_decision(j: &Journal, at_ms: i64, reason: &str, devices: &[&str]) {
+    let outcomes: Vec<Outcome> = devices
+        .iter()
+        .map(|d| Outcome {
+            device: DeviceId::new(*d),
+            command: "set_output_limit".to_string(),
+            applied: Applied::Ok,
+            error: None,
+        })
+        .collect();
+
+    j.decision(
+        Timestamp::from_millis(at_ms),
+        ControlPath::Objective,
+        &ControlDecision {
+            reason: reason.to_string(),
+            ..ControlDecision::test_sample()
+        },
+        &engine().state(),
+        &outcomes,
+    );
+}
+
+fn reasons(rows: &[DecisionRow]) -> Vec<String> {
+    rows.iter().map(|r| r.decision.reason.clone()).collect()
+}
+
+/// `Journal::decision` writes one row per commanded device, so a two-battery
+/// site records two rows for one decision. The dashboard's live path appends
+/// one entry per decision, and the seeded log has to agree with it.
+#[tokio::test]
+async fn recent_decisions_reads_one_row_per_decision_not_per_device() {
+    let dir = tempfile::tempdir().unwrap();
+    let (j, writer, path) = testing::open(&dir, &config());
+
+    log_decision(&j, 1_000, "first", &["SN1", "SN2", "SN3"]);
+    log_decision(&j, 2_000, "second", &["SN1", "SN2", "SN3"]);
+    testing::close(j, writer).await;
+
+    let rows = read_recent_decisions(&path, 20).unwrap();
+    assert_eq!(reasons(&rows), vec!["first", "second"]);
+}
+
+/// Oldest first, which is the order the dashboard's `VecDeque` is built in —
+/// the query walks `seq` backwards and the reader reverses it.
+#[tokio::test]
+async fn recent_decisions_come_back_oldest_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let (j, writer, path) = testing::open(&dir, &config());
+
+    for n in 1..=4 {
+        log_decision(&j, n * 1_000, &format!("d{n}"), &["SN1"]);
+    }
+    testing::close(j, writer).await;
+
+    let rows = read_recent_decisions(&path, 20).unwrap();
+    assert_eq!(reasons(&rows), vec!["d1", "d2", "d3", "d4"]);
+    assert_eq!(rows[0].at, Timestamp::from_millis(1_000));
+}
+
+/// The limit counts decisions, not rows, and keeps the newest ones.
+#[tokio::test]
+async fn recent_decisions_limit_keeps_the_newest_decisions() {
+    let dir = tempfile::tempdir().unwrap();
+    let (j, writer, path) = testing::open(&dir, &config());
+
+    for n in 1..=5 {
+        log_decision(&j, n * 1_000, &format!("d{n}"), &["SN1", "SN2"]);
+    }
+    testing::close(j, writer).await;
+
+    let rows = read_recent_decisions(&path, 2).unwrap();
+    assert_eq!(reasons(&rows), vec!["d4", "d5"]);
+}
+
+/// A decision that commanded nothing writes a single row with a NULL `device`
+/// and still belongs in the log.
+#[tokio::test]
+async fn recent_decisions_include_one_that_commanded_no_device() {
+    let dir = tempfile::tempdir().unwrap();
+    let (j, writer, path) = testing::open(&dir, &config());
+
+    log_decision(&j, 1_000, "commanded nothing", &[]);
+    testing::close(j, writer).await;
+
+    let rows = read_recent_decisions(&path, 20).unwrap();
+    assert_eq!(reasons(&rows), vec!["commanded nothing"]);
+}
+
+/// A row this build cannot decode costs the dashboard that one entry, not the
+/// whole log.
+#[tokio::test]
+async fn recent_decisions_skips_an_undecodable_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let (j, writer, path) = testing::open(&dir, &config());
+
+    for n in 1..=3 {
+        log_decision(&j, n * 1_000, &format!("d{n}"), &["SN1"]);
+    }
+    testing::close(j, writer).await;
+
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE decisions SET payload_json = '{\"from\":\"the future\"}' WHERE ts_ms = 2000",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let rows = read_recent_decisions(&path, 20).unwrap();
+    assert_eq!(reasons(&rows), vec!["d1", "d3"]);
+}
+
+/// The dashboard's reader refuses a journal from another schema version for the
+/// same reason `read_range` does.
+#[tokio::test]
+async fn recent_decisions_of_another_schema_version_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (j, writer, path) = testing::open(&dir, &config());
+    log_decision(&j, 1_000, "first", &["SN1"]);
+    testing::close(j, writer).await;
+
+    let conn = Connection::open(&path).unwrap();
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+        .unwrap();
+    drop(conn);
+
+    let err = read_recent_decisions(&path, 20).unwrap_err();
+    assert!(matches!(err, ReadError::Schema(_)), "{err}");
+}
+
+/// An empty journal is a valid journal — the dashboard renders an empty log,
+/// not an error.
+#[tokio::test]
+async fn recent_decisions_of_a_journal_with_none_is_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let (j, writer, path) = testing::open(&dir, &config());
+    testing::close(j, writer).await;
+
+    assert!(read_recent_decisions(&path, 20).unwrap().is_empty());
 }

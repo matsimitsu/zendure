@@ -29,6 +29,7 @@ fn config() -> Config {
             solar_phase: SolarPhase::A,
         }),
         meter: MeterConfig::Shelly,
+        web: None,
         ha_publish_prefix: "SECRET-PREFIX".to_string(),
         charge_margin: PowerMargin::new(50),
         discharge_margin: PowerMargin::new(5),
@@ -478,6 +479,7 @@ fn the_example_config_is_what_production_runs() {
             solar_phase: SolarPhase::A,
         }),
         meter: MeterConfig::Shelly,
+        web: None,
         ha_publish_prefix: "zendure".to_string(),
         charge_margin: PowerMargin::new(50),
         discharge_margin: PowerMargin::new(5),
@@ -629,4 +631,68 @@ fn mqtt_alongside_a_synthetic_meter_is_allowed() {
     let (config, warnings) = Config::from_toml_str(&toml).unwrap();
     assert_eq!(warnings, Vec::<String>::new(), "{warnings:?}");
     assert!(config.mqtt.is_some());
+}
+
+// --- `[web]` -----------------------------------------------------------------
+
+#[test]
+fn no_web_table_means_no_dashboard_server() {
+    let (config, warnings) = Config::from_toml_str(&minimal_toml()).unwrap();
+    assert_eq!(warnings, Vec::<String>::new(), "{warnings:?}");
+    assert!(config.web.is_none());
+}
+
+#[test]
+fn a_web_table_with_defaults_binds_localhost_8080() {
+    let toml = format!("{}\n[web]\n", minimal_toml());
+    let (config, warnings) = Config::from_toml_str(&toml).unwrap();
+    assert_eq!(warnings, Vec::<String>::new(), "{warnings:?}");
+    assert_eq!(
+        config.web,
+        Some(WebConfig {
+            bind_address: std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            port: 8080,
+        })
+    );
+}
+
+#[test]
+fn a_web_table_overrides_bind_address_and_port() {
+    let toml = format!(
+        "{}\n[web]\nbind_address = \"0.0.0.0\"\nport = 9000\n",
+        minimal_toml()
+    );
+    let (config, warnings) = Config::from_toml_str(&toml).unwrap();
+    assert_eq!(warnings, Vec::<String>::new(), "{warnings:?}");
+    assert_eq!(
+        config.web,
+        Some(WebConfig {
+            bind_address: std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)),
+            port: 9000,
+        })
+    );
+}
+
+#[test]
+fn an_unparseable_web_bind_address_is_fatal() {
+    let toml = format!("{}\n[web]\nbind_address = \"not-an-ip\"\n", minimal_toml());
+    let err = Config::from_toml_str(&toml).unwrap_err();
+    assert!(err.contains("web.bind_address"), "{err}");
+}
+
+#[test]
+fn a_wrong_typed_web_port_is_fatal() {
+    let toml = format!("{}\n[web]\nport = \"9000\"\n", minimal_toml());
+    let err = Config::from_toml_str(&toml).unwrap_err();
+    assert!(err.contains("web.port"), "{err}");
+}
+
+/// `[web]` is a connection setting, like `[mqtt]`/`[shelly]` — not a decision
+/// input, so it must never reach a replay fixture.
+#[test]
+fn web_never_leaks_into_session_config() {
+    let toml = format!("{}\n[web]\nport = 9999\n", minimal_toml());
+    let (config, _) = Config::from_toml_str(&toml).unwrap();
+    let json = serde_json::to_string(&config.session()).unwrap();
+    assert!(!json.contains("9999"), "{json}");
 }

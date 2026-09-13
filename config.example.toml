@@ -54,6 +54,12 @@ solar_phase = "A"
 [homeassistant]
 publish_prefix = "zendure"
 
+# Presence, not a flag, turns the live dashboard on — absent (as here) runs no
+# HTTP listener at all.
+# [web]
+# bind_address = "127.0.0.1"   # default
+# port = 8080                  # default
+
 [clock]
 # IANA name. Cycle counting and the balance weekday are reckoned in it.
 timezone = "Europe/Amsterdam"
