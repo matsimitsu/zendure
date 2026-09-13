@@ -39,11 +39,10 @@ pub type PublisherTask = tokio::task::JoinHandle<()>;
 /// never fills, `dropped` never moves, and a silent total failure would look
 /// exactly like a quiet night.
 ///
-/// Known asymmetry, stated rather than hidden: `try_send` drops the **newest**
-/// message, and these are latest-value topics, so a sustained stall keeps stale
-/// values and discards fresh ones. Coalescing per topic in the task is the
-/// principled fix; it is not here because drops should be rare and FIFO is the
-/// idiom already in the tree.
+/// `try_send` drops the **newest** message, and these are latest-value topics,
+/// so a sustained stall keeps stale values and discards fresh ones. Coalescing
+/// per topic in the task is the principled fix; it is not here because drops
+/// should be rare and FIFO is the idiom already in the tree.
 pub struct MqttPublisher {
     /// `Option` so `close` can drop the last sender, which is what ends the
     /// task's `recv` loop and lets a bounded drain finish.

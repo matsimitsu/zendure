@@ -135,9 +135,9 @@ async fn a_fixture_round_trips_through_json() {
     assert_eq!(back, fixture);
 }
 
-/// **The property step 8 exists for.** Record a run, export it, replay it, and
-/// the commands must be the ones the daemon actually issued — compared against
-/// the recorded rows, not against a second replay.
+/// Record a run, export it, replay it, and the commands must be the ones the
+/// daemon actually issued — compared against the recorded rows, not against a
+/// second replay.
 #[tokio::test]
 async fn a_recording_replays_to_the_commands_it_recorded() {
     let dir = tempfile::tempdir().unwrap();
@@ -277,11 +277,9 @@ fn an_override_of_the_wrong_type_is_refused() {
 /// A value the knob's type *can* hold but its domain cannot is clamped by the
 /// constructor, not waved through.
 ///
-/// This is the case the old test's name claimed and did not cover: `1000` is a
-/// perfectly good `u32`, and `Soc`'s derived `Deserialize` used to write it
-/// straight into the field. `min_soc = Soc(1000)` makes `soc > min_soc` false
-/// forever, so a replay answering "why did it never discharge?" answered about
-/// a controller that cannot exist.
+/// `min_soc = Soc(1000)` makes `soc > min_soc` false forever, so a replay
+/// answering "why did it never discharge?" would answer about a controller that
+/// cannot exist — the constructor clamps out-of-range values instead.
 #[test]
 fn an_override_outside_a_knobs_domain_is_clamped_by_its_constructor() {
     let clamped = apply_overrides(&config(), &[("min_soc".into(), "1000".into())]).unwrap();
@@ -364,9 +362,8 @@ async fn regenerate_the_checked_in_fixture() {
     .unwrap();
 }
 
-/// A fixture written by an earlier build still parses into today's types. The
-/// format assertion is part of it: without it, bumping `FORMAT` and
-/// regenerating would keep this green while every fixture in the wild broke.
+/// The format number must be checked: bumping `FORMAT` and regenerating without
+/// verifying that old fixtures still parse silently breaks fixtures in the wild.
 #[test]
 fn the_checked_in_fixture_still_parses() {
     let fixture: Fixture = serde_json::from_str(CHECKED_IN).expect("fixture format changed");

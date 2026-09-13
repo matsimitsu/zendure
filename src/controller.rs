@@ -214,10 +214,8 @@ impl Controller {
             };
         }
 
-        // 1. What mode should we be in?
         let mode = self.target_mode(world, battery, clock);
 
-        // 2. At what power level?
         let power = self.target_power(mode, grid_power, battery);
 
         // 3. Apply guards (cooldown, ramp, standby timeout)
@@ -509,20 +507,6 @@ mod tests {
     }
 
     /// `state` and `restore` have to be exact inverses, field for field.
-    ///
-    /// Nearly tautological now, and deliberately kept. The controller holds its
-    /// history as one `ControllerState`, so `state` is a clone and `restore` an
-    /// assignment, and there is no longer a field list to drift — which is the
-    /// point: this test used to be the only thing standing between four
-    /// hand-written transcriptions of those eight names, and the copies were
-    /// deleted rather than the detector kept. What it guards now is a regression
-    /// to field-by-field copying.
-    ///
-    /// Still stated here rather than left to the behavioural test in
-    /// `engine.rs`, because behaviour cannot reach all of it: no single event
-    /// sequence moves every field away from its default at once — a midnight
-    /// reset zeroes the daily counters, and `last_idle_start` is only set while
-    /// `last_mode` is `Idle`, which is the default.
     #[test]
     fn state_and_restore_are_exact_inverses() {
         let mut controller = Controller::test_default(NOW_MS, DAY);
@@ -1891,9 +1875,6 @@ mod tests {
     }
 
     // --- Midnight rollover ---
-    //
-    // Untestable before the clock was injected: the reset read `Utc::now()`
-    // directly, so no test could cross a day boundary.
 
     #[test]
     fn midnight_resets_daily_counters() {
@@ -2004,9 +1985,6 @@ mod tests {
     }
 
     // --- Exact timing boundaries ---
-    //
-    // Also new: with real elapsed time these could only be approximated, so the
-    // off-by-one side of each guard went unchecked.
 
     #[test]
     fn cooldown_boundary_is_exclusive() {

@@ -1,33 +1,19 @@
 //! A synthetic house meter, so a brokerless run exercises the controller
 //! instead of proving nothing.
 //!
-//! With no MQTT broker there is no Shelly, so nothing ever produces a
-//! [`MeterObservation`] and the engine only ever sees `MqttTimeout`. A
-//! controller that only ever fires its failsafe has not been tested — it has
-//! just been left alone. This module makes a fake house: a load, a solar
-//! curve, and a battery whose flow feeds back into what the "meter" reports,
-//! and pushes readings onto the exact same [`MqttEvent`] channel the real
-//! Shelly subscriber uses. The coordinator loop cannot tell the two apart,
-//! which is the whole point of [`super`]'s missing `trait Source` — this is
-//! the second producer that module's doc comment says would still cost
-//! several files to add for real, and here it costs none, because it never
-//! goes near `mqtt.rs`, `run_subscriber` or `Config` at all. It is a second
-//! *feeder* of the same channel, not a second implementation behind a trait.
+//! With no MQTT broker there is no Shelly, so nothing produces a
+//! [`MeterObservation`] and the engine only ever sees `MqttTimeout` — a
+//! controller that only fires its failsafe has not been tested. This module
+//! makes a fake house (a load, a solar curve, a battery) and pushes readings
+//! onto the same [`MqttEvent`] channel the real subscriber uses, so the
+//! coordinator loop cannot tell the two apart.
 //!
-//! **The feedback term is the entire point of this file.** A naive version
-//! would compute `grid = load - solar` once per tick and never look at the
-//! battery again. That version runs, and it lies: the meter reports a fixed
-//! surplus forever, the controller charges harder in response, the meter
-//! keeps reporting the same surplus because charging was never subtracted
-//! from it, and the controller ramps straight to its cap and pins there. It
-//! looks alive — numbers are moving, MQTT events are flowing — and it
-//! demonstrates nothing, because the one thing a real meter would do (show
-//! the battery's own draw) never happens. Subtracting `battery.flow()` from
-//! the grid total closes that loop: a charging battery (negative flow) makes
-//! the subtraction *add* to the grid figure, pushing it toward import, and
-//! the controller sees that and backs off. A discharging battery pushes the
-//! other way. That closed loop, not the bell curve or the phase split, is
-//! what makes a run against this file worth anything.
+//! **The feedback term is the entire point of this file.** Computing
+//! `grid = load - solar` once per tick and never looking at the battery again
+//! runs, and lies: the meter reports a fixed surplus forever, the controller
+//! charges harder, and it pins at its cap while looking alive. Subtracting
+//! `battery.flow()` closes the loop — a charging battery pushes the grid
+//! figure toward import, and the controller backs off.
 //!
 //! `run.rs` spawns [`run_synthetic_meter`] instead of the real
 //! `mqtt::run_subscriber` when `[meter] kind = "synthetic"` is configured —

@@ -76,28 +76,19 @@ pub fn replay_fixture(
 /// `zendure --check` — parse a config file the way the daemon would, but
 /// strictly.
 ///
-/// The daemon itself is lenient: a wrong-typed tuning knob or an unknown key
-/// warns and falls back to a default rather than exiting, because `Config` is
-/// read at process startup and systemd restarts a failed unit — so a typo
-/// there would restart-loop a controller that is holding a battery command
-/// steady. Loud and running beats silent and stopped.
+/// The daemon is lenient: a wrong-typed tuning knob warns and falls back,
+/// because systemd restarts a failed unit and a typo would restart-loop a
+/// controller that is holding a battery command steady.
 ///
-/// `--check` inverts that on purpose: it runs at *deploy* time, not runtime,
-/// so there is no battery command it could strand by refusing to proceed.
-/// Ansible runs this as a `validate:` hook before a rendered config is moved
-/// into place, and the whole point is that a typo fails the play and never
-/// reaches production, rather than reaching it as a silent warning in a log
-/// nobody is watching yet. So a parse error is fatal here exactly as it would
-/// be for the daemon, but *any* warning is promoted to a failure too — that
-/// asymmetry (lenient at runtime, strict at deploy time) is the keystone the
-/// rest of the config design leans on; without it, the daemon's leniency
-/// would just be a way for a typo to reach production quietly instead of not
-/// reaching it at all.
+/// `--check` inverts that deliberately. It runs at deploy time, where there is
+/// no battery command to strand, and Ansible uses it as a `validate:` hook — so
+/// a parse error is fatal and *any* warning is promoted to a failure too.
+/// Without that asymmetry the daemon's leniency would just be a way for a typo
+/// to reach production quietly.
 ///
-/// The effective config is printed to stdout via `Config`'s hand-written
-/// `Debug` — which redacts `mqtt_password` — regardless of outcome, so a
-/// warning that fails the check still shows what value was actually chosen
-/// instead of just naming the problem.
+/// The effective config prints to stdout via `Config`'s hand-written `Debug`
+/// (which redacts `mqtt_password`) whatever the outcome, so a failing check
+/// still shows the value that was chosen.
 pub fn check_config(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let (config, warnings) = Config::from_toml(path)?;
 

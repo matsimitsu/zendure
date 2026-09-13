@@ -363,11 +363,6 @@ fn reading_from_report(
 }
 
 /// Map a Zendure `pack_type` to its nominal capacity in Wh.
-///
-/// Moved from `rte.rs`: this is a vendor encoding, not a round-trip-efficiency
-/// concern, and belongs with the adapter that reads it — `rte.rs`'s tracker
-/// only ever wanted the resulting `WattHours`, never the `pack_type` that
-/// produced them.
 fn pack_type_capacity_wh(pack_type: u32) -> WattHours {
     match pack_type {
         // AB1000 / AB1000S
@@ -382,8 +377,7 @@ fn pack_type_capacity_wh(pack_type: u32) -> WattHours {
     }
 }
 
-/// Extract per-pack capacities from a report's `pack_data`. Moved from
-/// `rte.rs` alongside `pack_type_capacity_wh`, for the same reason.
+/// Extract per-pack capacities from a report's `pack_data`.
 fn pack_capacities(pack_data: &Option<Vec<PackData>>) -> Vec<WattHours> {
     match pack_data {
         Some(packs) => packs

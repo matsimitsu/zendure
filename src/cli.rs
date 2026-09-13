@@ -6,16 +6,11 @@
 //! be exactly right is that **no arguments still starts the daemon**,
 //! unchanged, since that is how systemd invokes it.
 //!
-//! The offline subcommands are parsed *before* any configuration is read, which
-//! is what lets `export` and `replay` run on a laptop with no `MQTT_HOST`,
-//! no `ZENDURE_IP` and no broker. A fixture is hermetic; so is the tool that
-//! makes one. That is also why [`Invocation::Export`] and
-//! [`Invocation::Replay`] carry no config field: `commands::export` and
-//! `commands::replay_fixture` take exactly the arguments those variants hold,
-//! so there is no field to read one from even by accident. `--config` is
-//! therefore rejected on both, structurally rather than by a check someone
-//! has to remember to keep — see `parse_export`/`parse_replay`, which already
-//! reject any flag they do not name.
+//! The offline subcommands are parsed *before* any configuration is read, so
+//! `export` and `replay` run on a laptop with no broker. That is also why
+//! [`Invocation::Export`] and [`Invocation::Replay`] carry no config field —
+//! there is none to read even by accident, so `--config` is rejected on both
+//! structurally rather than by a check someone has to remember.
 
 use std::path::PathBuf;
 

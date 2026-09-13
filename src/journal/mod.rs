@@ -34,13 +34,11 @@ const SCHEMA_VERSION: i64 = 2;
 
 /// Append-only record of everything entering and leaving the controller.
 ///
-/// Supersedes the NDJSON raw capture. Same contract, different storage: the
-/// reason for the change is that reconstructing an incident means asking
-/// questions across time ("every decision in the ten minutes before the mode
-/// started flapping"), and that is a query, not a grep.
+/// Storage is SQLite because reconstructing an incident means asking questions
+/// across time ("every decision in the ten minutes before the mode started
+/// flapping"), which is a query, not a grep.
 ///
-/// Two things are deliberately preserved from the NDJSON version, because they
-/// are what made it useful:
+/// Two properties are load-bearing:
 ///
 /// - **Pre-parse payloads are stored as received.** A meter reading or device
 ///   response we failed to decode is precisely the one worth having, and our own
@@ -430,7 +428,6 @@ fn prepare(conn: &Connection, version: &str, config_json: &str) -> rusqlite::Res
     })
 }
 
-/// What a freshly opened database hands the writer.
 struct Prepared {
     session_id: i64,
     next_seq: i64,
@@ -459,27 +456,17 @@ fn writer(
     let mut failed: u64 = 0;
 
     while let Some(record) = rx.blocking_recv() {
-        // Assigned here, by the one thread that writes, in the order the
-        // records left the channel. That is what makes `seq` an ordering across
-        // both tables: a decision's rows are handed numbers strictly after the
-        // event that produced them, even though the two live in separate tables
-        // with independent row ids. Consumed whether or not the insert lands, so
-        // a failed write leaves a gap rather than a repeated number.
+        // Assigned by the one writing thread, in channel order, so `seq`
+        // orders both tables against each other. Consumed whether or not the
+        // insert lands: a failed write leaves a gap, never a repeated number.
         let seq = next_seq;
         next_seq += 1;
 
         if let Err(e) = write(&conn, session_id, seq, &record) {
             failed += 1;
-            // First one always, then powers of two. A full disk or a read-only
-            // SD card fails every insert, so a line per record would flood; a
-            // line per record *silently dropped* was the alternative, and that
-            // is how journalling stopped for the life of a process with logs
-            // identical to a healthy run.
-            //
-            // Not `backpressure::tally`, which the other three counters share:
-            // this one is a plain local on the single writer thread, and making
-            // it atomic purely to reuse four lines would be paying for
-            // synchronisation nothing needs.
+            // First one always, then powers of two: a full disk fails every
+            // insert, so a line per record floods — and silence would make
+            // journalling stop with logs identical to a healthy run.
             if failed.is_power_of_two() {
                 tracing::warn!("Journal: write failed ({failed} so far): {e}");
             }
@@ -542,9 +529,9 @@ fn prune(conn: &Connection, retention: RetentionDays, keep_session: i64) {
     // only thing bounding this file, and it was not: one row per restart
     // accumulated forever. Its time column is named differently, hence the pair.
     //
-    // `continue`, not `return`: failing on the first table used to skip
-    // `decisions` — the larger one, the one retention exists to bound — and the
-    // vacuum with it, until the next midnight.
+    // `continue`, not `return`: a failure on the first table must not skip
+    // `decisions` — the larger one, the one retention exists to bound — nor the
+    // vacuum after it.
     // The running session is exempt from its own prune. A session row is dated
     // at *process start* while its events and decisions are dated individually,
     // so a daemon whose uptime exceeds the retention window — months, for an
@@ -584,13 +571,8 @@ fn prune(conn: &Connection, retention: RetentionDays, keep_session: i64) {
     }
 }
 
-/// Helpers every test that writes a journal needs.
-///
-/// At module scope and `pub(crate)`, not inside this file's own `mod tests`,
-/// because the reader's tests and the replay tests write journals too and were
-/// otherwise reduced to re-inlining `Journal::open` plus the drop-and-await
-/// dance — down to the same `expect("writer panicked")` string on both sides.
-/// `backdate` below already set the precedent.
+/// Helpers every test that writes a journal needs. At module scope because the
+/// reader's tests and the replay tests write journals too.
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
@@ -777,7 +759,6 @@ mod tests {
         testing::open(dir, &serde_json::json!({"k": 1}))
     }
 
-    /// Every row in the file, both tables, in `seq` order.
     fn seq_order(conn: &Connection) -> Vec<(i64, String)> {
         let mut stmt = conn
             .prepare(
@@ -793,11 +774,10 @@ mod tests {
             .collect()
     }
 
-    /// The property step 8's export depends on: a decision is ordered strictly
-    /// after the event that produced it, across two tables whose row ids run
-    /// independently. Without this, "replay everything after this snapshot" can
-    /// only be asked in milliseconds, and two records sharing one millisecond
-    /// make the boundary ambiguous.
+    /// A decision is ordered strictly after the event that produced it, across
+    /// two tables whose row ids run independently. Without it, "everything after
+    /// this snapshot" can only be asked in milliseconds, and two records sharing
+    /// one millisecond make the boundary ambiguous.
     #[tokio::test]
     async fn seq_orders_events_and_decisions_against_each_other() {
         let dir = tempfile::tempdir().unwrap();
@@ -986,8 +966,7 @@ mod tests {
     }
 
     /// Events are journaled under the same kind the enum reports, and the
-    /// payload reads back as the event that produced it — which is what step 8
-    /// replays from.
+    /// payload reads back as the event that produced it.
     #[tokio::test]
     async fn events_round_trip_through_the_database() {
         let dir = tempfile::tempdir().unwrap();
@@ -1088,8 +1067,7 @@ mod tests {
         assert_eq!(device, None);
     }
 
-    /// **A decision row can seed a replay.** The claim three doc comments made
-    /// while the code did not implement it.
+    /// **A decision row can seed a replay.**
     ///
     /// Goes all the way round rather than checking columns: write a row, read
     /// `state_json` back out of SQLite, and `restore` a real `Engine` from it.
@@ -1103,7 +1081,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (journal, writer, path) = open(&dir);
 
-        // Latched, so the field that used to be dropped is not its default.
+        // Latched, so the field is not its default.
         let state = EngineState {
             mqtt_timed_out: true,
             ..engine_state()

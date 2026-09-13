@@ -69,10 +69,6 @@ pub async fn run_subscriber(
                         Ok(obs) => {
                             // Logged here rather than in the coordinator loop,
                             // because this is where the reading now exists.
-                            // The line is unchanged, but it is emitted from the
-                            // subscriber task, so it can interleave with the
-                            // `Decision:` line a few microseconds differently
-                            // than it used to.
                             tracing::info!(
                                 "Shelly: total={:.0}W (A={:.0} B={:.0} C={:.0}), solar={:.0}W",
                                 obs.grid.total,

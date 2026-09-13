@@ -177,10 +177,9 @@ impl Publisher for RecordingPublisher {
 mod tests {
     use super::*;
 
-    /// The mapping the ten publish helpers used to spell out positionally at
-    /// every call site. Pinned because it is a wire-format contract with Home
-    /// Assistant: a discovery document that stops being retained disappears
-    /// from HA on the next broker restart.
+    /// Pinned because it is a wire-format contract with Home Assistant: a
+    /// discovery document that stops being retained disappears from HA on the
+    /// next broker restart.
     #[test]
     fn delivery_maps_to_the_qos_and_retain_it_always_had() {
         assert_eq!(Delivery::Telemetry.qos(), QoS::AtMostOnce);

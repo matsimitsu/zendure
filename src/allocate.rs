@@ -8,9 +8,8 @@
 //! it does not interpret.
 //!
 //! Today the list is always one element long, because exactly one device is
-//! registered. It is still a list, and still built by walking the world,
-//! because the bug this module replaces was exactly a caller deciding on its
-//! own that one element was all there could be.
+//! registered. It is still a list, and still built by walking the world, so no
+//! caller decides on its own that one element is all there can be.
 
 use crate::command::Command;
 use crate::models::ControlDecision;
@@ -23,8 +22,7 @@ use crate::world::{DeviceId, World};
 /// a charger takes a current plus an enable that is emphatically not
 /// "set current to zero". A single flat command type would either grow charger
 /// variants that `ZendureClient` has to match and reject, or force a lossy
-/// common denominator. One variant today; step 9 adds a `Charger` variant and
-/// one arm in `actuate`.
+/// common denominator.
 ///
 /// The id rides on the variant rather than inside `Command`: `Command`'s
 /// `Display` is the wire format the journal quotes and `command_tests.rs`
@@ -41,7 +39,7 @@ impl Directive {
         }
     }
 
-    /// How this reads in the journal and in step 8's replay render. `Command`'s
+    /// How this reads in the journal and in the replay render. `Command`'s
     /// `Display` already produces `set_discharge(145W)`; each class renders its
     /// own.
     pub fn describe(&self) -> String {
@@ -70,22 +68,15 @@ impl Directive {
 /// - `SetIdle`/`SetStandby` carry none. "Stand down" means the same thing to
 ///   every box, and the MQTT failsafe is only a failsafe if it reaches all of
 ///   them.
-/// - `SetCharge`/`SetDischarge` carry a whole-house figure. `target_power`
-///   sized it from one battery's headroom against the house's grid balance;
-///   handing the same number to a second box asks the house for a multiple of
-///   it. Dividing it is a *policy* — proportional to each device's headroom?
-///   fill-first? highest SoC discharges first? — and the wrong policy silently
-///   mis-commands hardware, so it is deferred to step 9 rather than guessed at
-///   here. The data that policy needs is already in reach: `world.batteries()`
-///   yields each device's own `max_charge_power` and `current_power`, and its
-///   `BatterySpec` comes from the adapter that owns it.
+/// - `SetCharge`/`SetDischarge` carry a whole-house figure sized against one
+///   battery's headroom, so handing it to a second box asks the house for a
+///   multiple of it. Splitting it is a policy — by headroom, fill-first,
+///   highest-SoC-first — and the wrong one silently mis-commands hardware.
 ///
-/// Until that rule exists a setpoint goes to the primary battery only — the
-/// same `batteries().next()` the objective sized it against, so the
-/// single-device configuration this runs on is unchanged — and the rest are
-/// left loudly uncommanded rather than quietly over-commanded. No panic and no
-/// `debug_assert`: this is the decision path of an unattended controller, where
-/// a degraded fleet and an error in the log beat a dead process.
+/// Until that rule exists a setpoint goes to the primary battery only, and the
+/// rest are left loudly uncommanded rather than quietly over-commanded. No
+/// panic and no `debug_assert`: on the decision path of an unattended
+/// controller, a degraded fleet and an error line beat a dead process.
 pub fn allocate(decision: &ControlDecision, world: &World) -> Vec<Directive> {
     let command = Command::from(decision);
 
@@ -225,7 +216,7 @@ mod tests {
     }
 
     /// The fence. 1200 W is a figure for the house, so two batteries must not
-    /// each be told 1200 W. Until step 9 has a split rule exactly one directive
+    /// each be told 1200 W. Until there is a split rule exactly one directive
     /// is emitted — the primary the objective sized the figure against — and
     /// the operator gets an error line naming the devices left out.
     #[test]

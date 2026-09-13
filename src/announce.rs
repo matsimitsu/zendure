@@ -5,16 +5,9 @@
 //! "announce until it sticks, once per connection" — and that is a fact about
 //! Home Assistant, not about MQTT.
 //!
-//! It lived inside the publisher first, which was wrong in three visible ways:
-//! a sink documented as taking messages silently discarded some of them; the
-//! subscriber had to name the concrete publisher type just to reach the reset;
-//! and the test double, having no such behaviour, stopped resembling the thing
-//! it doubled. Keeping it here leaves the publisher a queue and two counters.
-//!
 //! Tracking *ids* rather than payloads is what makes the retry cheap: the
 //! caller hands over a closure, so a document that is already announced is
-//! never built. Announcing by payload meant `publish_temperatures` serialising
-//! a document per pack per poll for the sink to throw away.
+//! never built.
 
 use std::collections::HashSet;
 
@@ -109,10 +102,6 @@ mod tests {
     }
 
     /// The document is not built unless it is going to be sent.
-    ///
-    /// Announcing by payload instead of by id meant `publish_temperatures`
-    /// serialising a JSON document per pack on every poll purely so the sink
-    /// could compare it and throw it away.
     #[test]
     fn an_already_announced_id_does_not_build_its_document() {
         let p = RecordingPublisher::new();

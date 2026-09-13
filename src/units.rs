@@ -15,9 +15,9 @@
 //! statement.
 //!
 //! `Amps` / `MilliAmps` are deliberately absent. They belong to the charger
-//! (step 9), where Peblar's milliamp setpoint and Vestel's whole-amp setpoint
-//! are 1000x apart and must be distinct types. Adding them now would mean dead
-//! code carrying an `#[allow]` until that adapter exists.
+//! (where Peblar's milliamp setpoint and Vestel's whole-amp setpoint are 1000x
+//! apart and must be distinct types). Adding them now would mean dead code
+//! carrying an `#[allow]` until that adapter exists.
 
 // Several accessors here are exercised only by the test modules and the
 // wire-format guards, which the non-test build doesn't compile — the same
@@ -47,11 +47,10 @@ macro_rules! forward_display {
     };
 }
 
-// `macro_rules!` is scoped to the rest of *this* file unless it is re-exported,
-// which is why `DeviceId`'s `Display` in `world.rs` was hand-written as a
-// character-for-character copy of what this expands to. Exported crate-locally
-// so the next newtype outside this module gets the precision-forwarding
-// behaviour by naming it rather than by remembering to reproduce it.
+// `macro_rules!` is scoped to the rest of *this* file unless it is re-exported.
+// Exported crate-locally so the next newtype outside this module gets the
+// precision-forwarding behaviour by naming it rather than by remembering to
+// reproduce it.
 pub(crate) use forward_display;
 
 /// `Deserialize` for a newtype whose constructor enforces an invariant, routing
@@ -60,13 +59,9 @@ pub(crate) use forward_display;
 ///
 /// `#[serde(transparent)]` derives *both* halves, and the derived `Deserialize`
 /// builds the struct field-by-field — so every clamp in this module was
-/// bypassed by anything that read a value back. That did not matter while the
-/// only reader was the journal reading its own writes, because everything
-/// written had already been through a constructor. It started mattering the
-/// moment a person could hand us a number: `replay --set min_soc=1000` produced
-/// `Soc(1000)`, and a hand-edited fixture could put any SOC in the world.
-/// CLAUDE.md's rule is that validation lives in the constructor and no call
-/// site re-checks; a derived `Deserialize` is a call site that skips it.
+/// bypassed by anything that read a value back. CLAUDE.md's rule is that
+/// validation lives in the constructor and no call site re-checks; a derived
+/// `Deserialize` is a call site that skips it.
 ///
 /// Serialization stays `transparent`, so the wire format — MQTT, HA discovery,
 /// the journal, a fixture — is unchanged in both directions for any value that
@@ -105,10 +100,8 @@ pub(crate) use validating_deserialize_result;
 
 /// Tenths of a Kelvin, which is how the Zendure reports every temperature.
 ///
-/// A vendor encoding rather than a unit anyone thinks in, and it existed only
-/// as a bare `u32` travelling next to a `f64` Celsius with a cast between them
-/// — the one place in the crate where CLAUDE.md's rule was not applied. Naming
-/// it puts the conversion in one function and makes the pair unmixable.
+/// A vendor encoding rather than a unit anyone thinks in. Naming it puts the
+/// conversion in one function and makes the pair unmixable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct DeciKelvin(pub u32);
@@ -132,11 +125,8 @@ forward_display!(Celsius, f64);
 /// which said neither what the index was counting nor what unit the number
 /// was in.
 ///
-/// A device reading, not a wire-format concern — it used to live in
-/// `mqtt/discovery.rs`, which meant a `device.rs` adapter producing one would
-/// have had to depend on `mqtt` to name its own return type. It belongs here,
-/// beside the `DeciKelvin` it wraps: the adapter constructs it, and
-/// `discovery.rs` only ever borrows what it's handed to publish.
+/// It belongs here beside the `DeciKelvin` it wraps: the adapter constructs it,
+/// and `discovery.rs` only ever borrows what it's handed to publish.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PackTemperature {
     pub index: usize,
@@ -395,7 +385,7 @@ impl Setpoint {
     }
 
     /// Scale by the ramp factor applied on the first decision after a mode
-    /// change. Truncates toward zero, as the original `as i32` did.
+    /// change. Truncates toward zero.
     pub fn ramped(self, factor: f64) -> Self {
         Setpoint((f64::from(self.0) * factor) as i32)
     }
@@ -651,11 +641,8 @@ impl Timestamp {
 
 /// The one place a `chrono` instant becomes ours.
 ///
-/// It was open-coded as `Timestamp::from_millis(dt.timestamp_millis())` at four
-/// sites — the clock, the journal's raw capture, retention's cutoff, and the
-/// CLI's argument parser. CLAUDE.md's rule is that a quantity crossing a
-/// boundary is one named call, not a conversion spelled out wherever it is
-/// needed.
+/// CLAUDE.md's rule is that a quantity crossing a boundary is one named call,
+/// not a conversion spelled out wherever it is needed.
 impl<Tz: chrono::TimeZone> From<chrono::DateTime<Tz>> for Timestamp {
     fn from(dt: chrono::DateTime<Tz>) -> Self {
         Timestamp(dt.timestamp_millis())
@@ -708,8 +695,7 @@ impl Add<Elapsed> for Timestamp {
 }
 
 /// Compare a span directly against a configured window, keeping the signed
-/// semantics: `Elapsed(-5) < Duration::ZERO` is true, as the bare `i64`
-/// comparison it replaces was.
+/// semantics: `Elapsed(-5) < Duration::ZERO` is true.
 impl PartialEq<Duration> for Elapsed {
     fn eq(&self, other: &Duration) -> bool {
         self.0 == Elapsed::of(*other).0

@@ -1,17 +1,4 @@
 //! Test scenarios shared across modules.
-//!
-//! Distinct from the `test_*` constructors that live next to their types —
-//! `Clock::test_at`, `BatteryState::test_sample`, `Controller::test_default`,
-//! `SessionConfig::test_default`. Each of those is *a canonical sample of type
-//! T, on type T*, and belongs beside T.
-//!
-//! What lives here is the other thing: a scenario, about how the controller
-//! behaves over time, that happens to be expressed as a list of [`Event`]s.
-//! `journey` is not a sample `Event` — it is eight readings tuned to cross both
-//! start thresholds with a timeout and a resume in the middle — so putting it
-//! next to the definition of `Event` would have made `event.rs` a quarter test
-//! scenario for two other modules, and would have claimed a precedent the
-//! `test_*` convention does not set.
 
 use crate::battery::BatteryState;
 use crate::clock::Clock;

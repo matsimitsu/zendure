@@ -71,10 +71,7 @@ pub struct RecordedFrame {
 /// Where a slice of the journal starts.
 ///
 /// Two modes, named rather than encoded as sentinel values in a pair of
-/// integers. The first shape of this passed `(seed_seq, lower_ts)` where `0`
-/// meant "no anchor" — true only because `seq` starts at 1 — and `i64::MIN`
-/// meant "no lower bound", with each of the two queries carrying a clause that
-/// was dead in one of the modes.
+/// integers.
 enum Anchor {
     /// Resume from a recorded snapshot: everything written after it.
     After(i64),
@@ -323,10 +320,9 @@ pub fn read_range(path: &Path, from: Timestamp, to: Timestamp) -> Result<Recordi
 /// between it and the next event.
 ///
 /// Linear, because both arrive in `seq` order and a decision's rows always sit
-/// between its event and the following one. The first shape of this filtered
-/// the whole decision list per event, which is quadratic: measured at 3.6
-/// seconds for one day of events and hours for the retention window, on a tool
-/// whose obvious first use is "export the last month".
+/// between its event and the following one. Filtering the whole decision list
+/// per event instead is quadratic — 3.6 seconds for one day of events, hours
+/// for the retention window.
 fn pair(
     events: Vec<(i64, Event)>,
     decisions: &[(i64, Option<String>, Option<String>)],

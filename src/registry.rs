@@ -1,58 +1,14 @@
 //! Every battery this process drives, and the loop that reaches the right one.
 //!
-//! `main.rs` used to own exactly one `ZendureClient` and hand it straight to
-//! `device::actuate`. That was fine while there was one box, but it put a
-//! ceiling on the whole crate: a second battery had nowhere to live. This
-//! module is that ceiling lifted — a registry keyed by [`DeviceId`] and the
-//! `actuate` loop rewritten to route through it instead of assuming its one
-//! argument is the only adapter that exists.
-//!
-//! ## Why an enum, not `dyn BatteryController`
-//!
-//! The obvious shape for "a collection of things that implement a trait" is
-//! `Vec<Box<dyn Trait>>`. It does not typecheck here, and would not even if it
-//! did.
-//!
-//! It does not typecheck because [`BatteryController`] is not object-safe.
-//! `apply` returns `impl Future<..> + Send` rather than a named type — RPITIT,
-//! which cannot appear in a vtable — and `Error` is an associated type with no
-//! `dyn`-compatible way to name it across implementors. Both are load-bearing,
-//! not incidental: the RPITIT is what lets `ZendureClient::apply` keep an
-//! unboxed, statically-known `Send` future (see `device.rs`'s own doc comment
-//! on the trait), and the associated `Error` is what lets `ZendureClient` keep
-//! `reqwest::Error` and a test double keep `String` instead of every adapter
-//! converting into one shared error enum nobody matches on. Reshaping the
-//! trait to erase both just to get a `dyn` would undo the reasoning that put
-//! them there in the first place.
-//!
-//! It would not help even reshaped, because a boxed bridge trait — the usual
-//! workaround, wrapping each adapter behind a second, object-safe trait that
-//! boxes its future — puts a heap allocation on the decision path for every
-//! single command. That is exactly the cost `device.rs` argues against.
-//!
-//! Generics do not solve it either: `actuate<B: BatteryController>` is generic
-//! over *one* concrete type per call, so a `Vec` of it can hold many
-//! `ZendureClient`s but never a `ZendureClient` and something else at once —
-//! and holding more than one *kind* of adapter at a time is the entire
-//! requirement a second battery (or, later, another vendor) creates.
-//!
-//! An enum is left, and it is also the repo's existing answer to "a small,
-//! closed set of shapes with different data": `Measurement`, `Directive`,
-//! `Command`, `Applied` and `ControlPath` are all enums for the same reason.
-//! `Battery` costs one match arm per variant and, unlike a `dyn`, keeps every
-//! adapter's future unboxed and known at compile time.
-//!
-//! ## What `actuate` was doing before this
-//!
-//! Before this module existed, `actuate` took `&B: BatteryController` — one
-//! adapter — and matched a directive's address against `battery.id()`. That
-//! "no adapter for that device" arm was not a real routing failure: it was
-//! comparing the directive's address against *the only adapter the function
-//! had*, so it could only ever prove "this directive is not for the one
-//! device we have," never "we do not drive this device." With a real map, the
-//! `None` branch below is what that comment always wanted to be — a genuine
-//! lookup that can fail for two devices as easily as for one, but for one
-//! device fails in exactly the same case it did before.
+//! A `Vec<Box<dyn BatteryController>>` does not compile — the trait is not
+//! object-safe: `apply` returns `impl Future + Send` (RPITIT, which cannot
+//! appear in a vtable) and `Error` is an associated type with no
+//! `dyn`-compatible spelling. Both are load-bearing — the RPITIT keeps
+//! `ZendureClient::apply`'s future unboxed, and the associated `Error` lets
+//! each adapter keep its own error type — so reshaping the trait to get a
+//! `dyn` would trade them for a heap allocation per command. Generics do not
+//! help either: one concrete type per call cannot hold two kinds of adapter at
+//! once, which is the whole requirement. Hence an enum.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -292,21 +248,16 @@ impl Devices {
 
 /// Apply every directive, in order, reporting each.
 ///
-/// A failure does not stop the rest: with two devices, one unreachable box
-/// must not leave the other uncommanded. That is the whole reason taking only
-/// the first command was a bug and not a style point.
+/// A failure does not stop the rest: one unreachable box must not leave the
+/// others uncommanded.
 ///
-/// Sequential rather than concurrent on purpose. The commands in one step can
-/// depend on each other's order — "stop the car charger, then start charging
-/// the battery" must not overlap on a supply that cannot carry both — and the
-/// journal's list is worth reading as a sequence.
+/// Sequential rather than concurrent, because commands in one step can depend
+/// on each other's order — "stop the car charger, then start charging the
+/// battery" must not overlap on a supply that cannot carry both.
 ///
-/// The directive's address picks the adapter through `Devices::battery`, a
-/// real map lookup rather than a comparison against the one adapter a caller
-/// happened to be holding. `Outcome.device` is journalled, and a line reading
-/// `{"device":"battery-b","outcome":"ok"}` has to mean that box was written
-/// to — handing `battery-b`'s setpoint to `battery-a`'s adapter and recording
-/// it as b's success is the failure mode this exists to make impossible.
+/// The directive's address picks the adapter through `Devices::battery`.
+/// `Outcome.device` is journalled, so a line reading
+/// `{"device":"battery-b","outcome":"ok"}` has to mean that box was written to.
 pub async fn actuate(
     devices: &Devices,
     directives: &[Directive],

@@ -643,7 +643,7 @@ pub struct Config {
 }
 
 /// Hand-written rather than derived: a derived `Debug` would print
-/// `mqtt_password` as `Some("hunter2")`, and `--check` (step 9) exists
+/// `mqtt_password` as `Some("hunter2")`, and `--check` exists
 /// precisely to print a `Config` on the terminal. A broker credential has no
 /// business being one log line away from a support paste.
 impl std::fmt::Debug for Config {
@@ -819,15 +819,12 @@ impl Config {
     /// its default.
     ///
     /// Returns the warnings rather than logging them: this runs before the
-    /// tracing subscriber exists (`main` needs `Config.log_filter` to build
-    /// it), and a test asserting on the exact wording would otherwise need
-    /// one. `replay.rs`'s `from_recording` returns its warnings the same way,
-    /// for the same reason.
+    /// tracing subscriber exists, since `main` needs `Config.log_filter` to
+    /// build it.
     ///
     /// Builds `Config` from an exhaustive struct literal — no
-    /// `..Default::default()` — so a field added to `Config` without a
-    /// matching line here is a compile error, the same guarantee
-    /// `Config::session()` gives the other direction.
+    /// `..Default::default()` — so a field added without a matching line here
+    /// is a compile error.
     pub fn from_toml_str(text: &str) -> Result<(Config, Vec<String>), String> {
         let mut root = text.parse::<toml::Table>().map_err(|e| e.to_string())?;
 

@@ -2,8 +2,7 @@
 //!
 //! The bulk of these pin *wire formats*, not arithmetic: `mqtt.rs`,
 //! `zendure.rs`, `command.rs` and `models.rs` have no tests of their own, so
-//! the bytes that must not move are otherwise unguarded — and step 7's journal
-//! is built on them.
+//! the bytes that must not move are otherwise unguarded.
 
 use std::time::Duration;
 
@@ -110,14 +109,14 @@ fn timestamp_arithmetic_round_trips() {
     assert_eq!(back + Elapsed::of(Duration::from_secs(60)), now);
 }
 
-// --- Roles: the conversions that used to be casts -------------------------
+// --- Roles: the conversions -----------------------------------------------
 
 #[test]
 fn grid_power_splits_into_import_and_export() {
     assert_eq!(GridPower(500.0).importing(), Watts(500));
     assert_eq!(GridPower(500.0).exporting(), Watts(-500));
     assert_eq!(GridPower(-500.0).exporting(), Watts(500));
-    // Truncates toward zero, as `(-grid_power) as i32` did.
+    // Truncates toward zero.
     assert_eq!(GridPower(-500.9).exporting(), Watts(500));
     assert_eq!(GridPower(500.9).importing(), Watts(500));
 }
@@ -162,8 +161,8 @@ fn setpoint_is_never_negative_and_respects_the_cap() {
 
 #[test]
 fn a_huge_device_cap_cannot_make_clamping_panic() {
-    // battery.rs used to do `u32 as i32`, which wraps negative above i32::MAX
-    // and then reaches clamp(0, negative) — a panic in the decision path.
+    // Above i32::MAX a `u32 as i32` cast wraps negative and reaches clamp(0, negative)
+    // — a panic in the decision path.
     let absurd = PowerCap::new(u32::MAX);
     assert!(absurd.watts().get() > 0);
     assert_eq!(Setpoint::clamped(Watts(1000), absurd), Setpoint::new(1000));
@@ -180,7 +179,6 @@ fn a_zeroed_cap_stops_everything() {
 
 #[test]
 fn ramp_truncates_toward_zero() {
-    // Was `(power as f64 * RAMP_FACTOR) as i32`.
     assert_eq!(Setpoint::new(1000).ramped(0.75), Setpoint::new(750));
     assert_eq!(Setpoint::new(145).ramped(0.75), Setpoint::new(108)); // 108.75
     assert_eq!(Setpoint::ZERO.ramped(0.75), Setpoint::ZERO);
@@ -221,8 +219,6 @@ fn soc_from_tenths_names_the_10x_conversion() {
 #[test]
 fn fraction_above_saturates_below_the_floor() {
     assert_eq!(Soc::new(80).fraction_above(Soc::new(10)), 0.70);
-    // rte.rs's `(soc - min_soc) as f64` was an unchecked u32 subtraction, safe
-    // only because of an early return that a future edit could drop.
     assert_eq!(Soc::new(5).fraction_above(Soc::new(10)), 0.0);
 }
 
@@ -323,7 +319,7 @@ fn efficiency_converts_to_a_fraction() {
 fn watts_arithmetic_saturates_at_the_extremes() {
     assert_eq!(Watts(i32::MAX) + Watts(1), Watts(i32::MAX));
     assert_eq!(Watts(i32::MIN) - Watts(1), Watts(i32::MIN));
-    // `-battery.current_power` on i32::MIN used to overflow-panic in debug.
+    // Negating i32::MIN saturates to i32::MAX rather than panicking.
     assert_eq!(-Watts(i32::MIN), Watts(i32::MAX));
     assert_eq!(BatteryPower(i32::MIN).charging(), Watts(i32::MAX));
 }
@@ -376,8 +372,7 @@ fn battery_power_sums_over_a_fleet() {
 ///
 /// This is the bug the type exists for. `prune` deletes rows older than
 /// `now - days`; with a negative count that cutoff is in the *future*, so the
-/// "prune" deletes the entire journal and logs it as a success. Observed before
-/// the fix: a second start with `-5` reported `pruned 13 rows beyond -5 days`.
+/// "prune" deletes the entire journal and logs it as a success.
 #[test]
 fn retention_rejects_windows_that_would_delete_the_present() {
     for bad in [0, -1, -5, i64::MIN] {
@@ -392,8 +387,7 @@ fn retention_rejects_windows_that_would_delete_the_present() {
 
 /// An absurd value is clamped rather than rejected — the intent is
 /// unambiguous — and clamping is what keeps `cutoff` away from the range where
-/// `chrono::Duration::days` panics. That panic happened on the writer thread,
-/// whose `JoinHandle` was dropped, so it was swallowed entirely.
+/// `chrono::Duration::days` panics.
 #[test]
 fn retention_clamps_absurd_windows_instead_of_panicking() {
     assert_eq!(
@@ -419,11 +413,10 @@ fn retention_cutoff_is_the_window_behind_now() {
 /// Reading a value back has to enforce the same invariant constructing it does.
 ///
 /// `#[serde(transparent)]` derives both halves and the derived `Deserialize`
-/// writes the field directly, so every clamp here was bypassed on the way in.
-/// Harmless while the journal only ever read its own writes; not harmless once
-/// `replay --set` and hand-edited fixtures exist, where the number comes from a
-/// person. `min_soc=1000` — the shape the device reports SOC setpoints in —
-/// used to yield `Soc(1000)`, against which `soc > min_soc` is never true.
+/// writes the field directly, so every clamp is bypassed when deserialized from
+/// external sources like `replay --set` and hand-edited fixtures. With
+/// `min_soc=1000` (the device's format) as example, it becomes `Soc(1000)`,
+/// against which `soc > min_soc` is never true.
 #[test]
 fn clamping_newtypes_clamp_on_the_way_in_too() {
     assert_eq!(serde_json::from_str::<Soc>("1000").unwrap(), Soc::new(1000));
@@ -457,12 +450,10 @@ fn validating_deserialize_leaves_the_wire_format_alone() {
     assert_eq!(serde_json::to_string(&setpoint).unwrap(), "145");
 }
 
-/// The hole a configuration file would have fallen into.
+/// Validation on deserialization prevents invalid retention values.
 ///
-/// `RetentionDays` derived `Deserialize` transparently, which builds the field
-/// directly and skips `new` — so a `0` read off a wire produced the value whose
-/// own doc comment says it is impossible to express, and `prune` would have
-/// deleted the whole journal at every startup and every midnight.
+/// `RetentionDays` routes `Deserialize` through `new` instead of deriving it,
+/// so a `0` read off a wire is rejected rather than bypassing validation.
 #[test]
 fn retention_days_refuses_through_serde_what_its_constructor_refuses() {
     for bad in ["0", "-5"] {
@@ -499,17 +490,15 @@ fn retention_days_still_serializes_as_a_bare_number() {
 }
 
 /// The vendor encoding every Zendure temperature arrives in, and the unit
-/// anyone actually reads. These were a bare `u32` and a bare `f64` with a cast
-/// between them — the one place CLAUDE.md's rule was not applied.
+/// anyone actually reads.
 #[test]
 fn deci_kelvin_converts_to_celsius_at_one_decimal() {
     // The values the wire format is pinned on.
     assert_eq!(format!("{:.1}", DeciKelvin(3001).to_celsius()), "27.0");
     assert_eq!(format!("{:.1}", DeciKelvin(2981).to_celsius()), "25.0");
     assert_eq!(format!("{:.1}", DeciKelvin(2995).to_celsius()), "26.4");
-    // Just below freezing. Renders as "-0.0", which is what the f64 rounds to
-    // and what the old bare-`f64` code published — pinned so a future switch to
-    // a decimal type is a visible change rather than a silent one.
+    // Just below freezing. Renders as "-0.0" due to f64 rounding — pinned to
+    // detect a future switch to a decimal type.
     assert_eq!(format!("{:.1}", DeciKelvin(2731).to_celsius()), "-0.0");
 }
 

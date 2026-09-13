@@ -105,9 +105,8 @@ async fn a_range_is_anchored_to_the_last_decision_at_or_before_it() {
 
 /// A restart between the seed and the events is the *likeliest* straddle, not
 /// an edge case: the daemon's last act before stopping is a decision, so the
-/// seed is always the pre-restart session. Feeding the session set from event
-/// rows alone missed exactly this, and the fixture then carried the wrong
-/// tuning with nothing said.
+/// seed is always the pre-restart session. A session set fed from event rows
+/// alone misses this, and the fixture then carries the wrong tuning silently.
 #[tokio::test]
 async fn a_restart_between_the_seed_and_the_events_is_reported() {
     let dir = tempfile::tempdir().unwrap();
@@ -149,9 +148,9 @@ async fn one_session_is_not_reported_as_a_restart() {
 
 /// `prune` deletes `sessions WHERE started_ms < cutoff`, and a session row is
 /// dated at process start while its rows are dated individually — so a daemon
-/// outliving the retention window used to delete the row describing itself.
-/// The writer now exempts its own session; a reader meeting an already-orphaned
-/// row must still produce a fixture rather than failing outright.
+/// outliving the retention window would delete the row describing itself. The
+/// writer exempts its own session; a reader meeting an already-orphaned row
+/// must still produce a fixture rather than failing outright.
 #[tokio::test]
 async fn a_pruned_session_degrades_instead_of_failing() {
     let dir = tempfile::tempdir().unwrap();

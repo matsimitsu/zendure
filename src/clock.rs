@@ -18,7 +18,7 @@ pub struct Clock {
     /// Wall-clock instant.
     pub now: Timestamp,
     /// Hour of day (0–23) in the configured timezone. Reported in decision
-    /// reasons; no longer used to gate any behavior.
+    /// reasons.
     pub hour: u32,
     /// Day of year (1–366) in the configured timezone. Only ever compared for
     /// change, to reset the daily counters at midnight.

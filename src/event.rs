@@ -7,7 +7,7 @@ use crate::world::{DeviceId, Measurement, MeterReading};
 /// Everything the engine can react to, each stamped with the `Clock` in
 /// effect when it was observed. Carrying the full clock (not just Gleam's
 /// hour+day) is what keeps weekday-dependent behavior replayable once these
-/// are journaled (step 7).
+/// are journaled.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {

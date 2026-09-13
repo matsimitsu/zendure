@@ -4,8 +4,7 @@
 //! process: the first into the NDJSON journal's `command` field, the second
 //! into the journal's `decision` field and, stringified, onto MQTT. Neither had
 //! a test before the newtype migration, which made them exactly the bytes most
-//! likely to move without anyone noticing. Step 7's structured journal is built
-//! on both, so they are worth pinning permanently.
+//! likely to move without anyone noticing, so they are worth pinning permanently.
 
 use super::*;
 use crate::units::GridPower;

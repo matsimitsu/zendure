@@ -339,9 +339,7 @@ mod tests {
 
     // --- what goes on the wire ------------------------------------------
     //
-    // `mqtt.rs` had no tests at all before the publisher trait, because every
-    // helper needed a live `AsyncClient` to say anything about. These pin the
-    // bytes Home Assistant reads.
+    // These pin the bytes Home Assistant reads.
 
     #[test]
     fn a_decision_publishes_four_values() {

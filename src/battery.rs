@@ -7,12 +7,11 @@ use crate::units::{BatteryPower, PowerCap, Soc, Watts};
 /// Current battery state, used by the controller to make decisions.
 ///
 /// `Serialize`/`Deserialize` because this is a `Measurement` in the `World`,
-/// and the world is what step 7 records per decision; `PartialEq` so two
+/// and the world is journalled per decision; `PartialEq` so two
 /// recorded worlds can be compared. Every field is already a `#[serde(transparent)]`
 /// newtype or a `bool`, so the JSON is the bare numbers and flags.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BatteryState {
-    /// State of charge, 0–100%.
     pub soc: Soc,
     /// Maximum discharge/inverter output power.
     pub max_discharge_power: PowerCap,
@@ -20,7 +19,6 @@ pub struct BatteryState {
     pub max_charge_power: PowerCap,
     /// Current battery output power. Positive = discharging, negative = charging.
     pub current_power: BatteryPower,
-    /// True when the battery is recalibrating its SOC reading.
     pub soc_calibrating: bool,
     /// True when the battery reports it has reached its SOC limit and refuses charging.
     pub soc_limit_reached: bool,
@@ -70,12 +68,8 @@ impl BatteryState {
                 .inverse_max_power
                 .map(PowerCap::new)
                 .unwrap_or(spec.max_discharge_power),
-            // Input *is* clamped to the rating. That clamp used to live in
-            // `controller.rs` as `MAX_CHARGE_POWER.min(battery.max_charge_power)`,
-            // which meant the objective had to know the hardware's ceiling in
-            // order to read a reported number safely. It is device knowledge,
-            // so it belongs here at the device boundary; the objective now just
-            // reads a capability number and trusts it.
+            // Input *is* clamped to the rating. It belongs here at the
+            // device boundary, not pushed up to callers.
             max_charge_power: spec.max_charge_power.min(
                 props
                     .charge_max_limit

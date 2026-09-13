@@ -7,8 +7,7 @@
 //!
 //! Nothing here is a setting and nothing here is a timer — a threshold belongs
 //! to `Controller`, a cooldown belongs to whoever counts it down. This file is
-//! measurements only, which is also why it is the thing step 7 records as
-//! `world_json`.
+//! measurements only, which is what is journalled as `world_json`.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -70,7 +69,7 @@ impl Default for MeterReading {
 /// later. `String` rather than `&'static str` because it comes from
 /// `ZENDURE_SN` at runtime; not an enum because that would make the device set
 /// a compile-time constant, which is exactly what "a second battery is config
-/// plus a device entry" has to avoid. It is also a journal key — step 7's
+/// plus a device entry" has to avoid. It is also a journal key — the
 /// `decisions.device` column — so it must be human-readable and stable across
 /// restarts.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -90,7 +89,7 @@ forward_display!(DeviceId, str);
 /// common with a battery's, and a flat struct of `Option`s would let the
 /// objective ask a battery whether a car is plugged in.
 ///
-/// Internally tagged so a new class is additive on the wire and step 7's
+/// Internally tagged so a new class is additive on the wire and
 /// `world_json` stays readable: `{"class":"battery","soc":50,...}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "class", rename_all = "snake_case")]
@@ -100,8 +99,8 @@ pub enum Measurement {
 
 /// A projection of the event log: what the controller knows right now.
 /// Measurements only — every knob lives on `Controller`, every timer with its
-/// owner. That scope is what makes replay sound, and it is why this is the
-/// thing step 7 records as `world_json`.
+/// owner. That scope is what makes replay sound, and what is journalled as
+/// `world_json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct World {
     pub grid: MeterReading,
@@ -117,7 +116,7 @@ pub struct World {
     /// `BTreeMap` rather than `Vec` because `Event::DeviceUpdate` addresses a
     /// device by id, so the fold is one `insert` with no scan and no duplicate
     /// entry to reconcile — and because sorted, stable key order is what makes
-    /// two recorded worlds diffable in step 7.
+    /// two recorded worlds diffable.
     devices: BTreeMap<DeviceId, Measurement>,
 }
 
@@ -236,10 +235,9 @@ mod tests {
     /// starts failing — a diff here means the format actually moved, which is
     /// exactly what this test exists to catch.
     ///
-    /// This one carried a "superseded in step 7" note and is **not**
-    /// superseded: `a_restored_engine_resumes_the_fold_exactly` proves a
-    /// `World` survives a round trip, which says nothing about what the bytes
-    /// look like. The journal is append-only, so the shape is a compatibility
+    /// `a_restored_engine_resumes_the_fold_exactly` proves a `World` survives a
+    /// round trip, which says nothing about what the bytes look like. The
+    /// journal is append-only, so the shape is a compatibility
     /// contract with rows already written, and round-trip equality would hold
     /// just as well after a rename that orphaned every one of them. Its
     /// companion round-trip test genuinely was superseded, and is gone.

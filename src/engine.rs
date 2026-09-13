@@ -12,9 +12,8 @@ use crate::units::{GridPower, Setpoint, SolarPower};
 use crate::world::{MeterReading, World};
 
 /// The event-driven fold at the heart of the controller. Owns exactly the
-/// state that used to live as locals in `main.rs`'s coordinator loop: the
-/// latest view of the world, and whether we're currently standing down on an
-/// MQTT timeout.
+/// state the controller needs: the latest view of the world, and whether
+/// we're currently standing down on an MQTT timeout.
 pub struct Engine {
     controller: Controller,
     world: World,
@@ -41,7 +40,7 @@ pub struct Step {
 /// These are the three pieces that make `step` a fold rather than a function —
 /// feed the same event to two engines holding the same `EngineState` and they
 /// produce the same `Step`. That is the property the journal exists to preserve
-/// across a process restart, and the shape step 8's fixture `seed` is built from.
+/// across a process restart.
 ///
 /// `mqtt_timed_out` looks like an implementation detail and is not: it decides
 /// whether a timeout tick reports a status transition and whether a resuming
@@ -207,8 +206,7 @@ mod tests {
         world
     }
 
-    /// The one-battery world's idle directive — what every assertion below
-    /// used to spell as a bare `Command::SetIdle`.
+    /// The one-battery world's idle directive.
     fn idle_for(id: &str) -> Directive {
         Directive::Battery {
             device: DeviceId::new(id),
@@ -326,30 +324,18 @@ mod tests {
         assert_eq!(step.status, None);
     }
 
-    /// Two `Engine`s built identically and fed the same event sequence, one
-    /// run to completion before the other starts, must produce identical
-    /// steps at every position. `step` takes `&mut self` and a borrowed event
-    /// and nothing else — no `Clock::now` call, no `static mut`, no
-    /// thread-local — so the only thing that can vary between the runs is state
-    /// the engine is carrying that it should not be.
+    /// Two `Engine`s fed the same event sequence, one run to completion before
+    /// the other starts, must produce identical steps at every position. `step`
+    /// takes `&mut self` and a borrowed event and nothing else, so the only
+    /// thing that can vary is state the engine should not be carrying.
     ///
-    /// It does **not** catch an engine that secretly reads ambient time, and an
-    /// earlier version of this comment claimed it did. The two runs are five
-    /// `step` calls apart — microseconds — while `Clock` has millisecond
-    /// resolution, so a hidden `Utc::now()` would very likely read the same
-    /// value twice and pass. Making that true would need a deliberate sleep,
-    /// which is not worth a second of test time; what rules it out is that
-    /// `step`'s signature gives it nothing to read.
+    /// It does **not** catch an engine reading ambient time: the two runs are
+    /// microseconds apart against a millisecond clock, so a hidden `Utc::now()`
+    /// would read the same value twice. What rules that out is that `step`'s
+    /// signature gives it nothing to read.
     ///
-    /// Comparing whole `Step`s (via `Step`'s and `ControlDecision`'s derived
-    /// `PartialEq`) rather than picking out individual fields means a field
-    /// `ControlDecision` gains later is covered here automatically, with no
-    /// need to remember to add it to this test.
-    ///
-    /// The sequence exercises several branches on purpose: a meter reading
-    /// that may decide, a device update that never does, a timeout that
-    /// forces idle and reports it, a repeat timeout that forces idle again
-    /// but stays quiet, and a resuming meter reading that reports again.
+    /// Whole `Step`s are compared rather than individual fields, so a field
+    /// `ControlDecision` gains later is covered automatically.
     #[test]
     fn the_fold_is_deterministic() {
         fn events() -> [Event; 5] {

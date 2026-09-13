@@ -1,20 +1,17 @@
 //! Re-running a recorded event stream through the decision engine, offline.
 //!
-//! This is **decision diff**, and it is the only replay mode that exists here.
-//! Feed the engine the events it was fed, from the state it was in, and compare
-//! the commands that come out against the ones the daemon actually issued. It
-//! answers exactly one question — *did this change alter behaviour?* — which is
-//! the question every refactor in this codebase has raised.
+//! This is **decision diff**, and the only replay mode here: feed the engine
+//! the events it was fed, from the state it was in, and compare the commands
+//! against the ones the daemon issued. It answers one question — *did this
+//! change alter behaviour?*
 //!
-//! It is **not** forward simulation, and the difference is not a matter of
-//! degree. A recorded meter reading was caused in part by the old controller's
-//! own output: the grid figure includes the battery flow the controller
-//! commanded a second earlier. Replaying a *different* controller against those
-//! readings asks what it would have done in a world that its own actions would
-//! have changed, and the answer is fiction. Simulating forward needs a battery
-//! model and the old controller de-convolved back out of the recording —
-//! `pre_battery_net_w` is stored from day one so that stays possible, but
-//! nothing here does it, and the two modes must never be conflated.
+//! It is **not** forward simulation. A recorded meter reading was caused in
+//! part by the old controller's own output, so replaying a *different*
+//! controller against those readings asks what it would have done in a world
+//! its own actions would have changed, and the answer is fiction. Simulating
+//! forward needs a battery model and the old controller de-convolved back out;
+//! `pre_battery_net_w` is stored so that stays possible, but nothing here does
+//! it, and the two modes must never be conflated.
 //!
 //! A fixture is therefore hermetic by construction: it carries the tuning
 //! (`SessionConfig`, the decision knobs and nothing that says how to reach a
@@ -81,7 +78,7 @@ pub struct SessionMeta {
 
 /// The fold's state before the first event. `EngineState` whole, rather than
 /// its three fields spelled out: that is the shape the journal stores in one
-/// column, and splitting it is how `mqtt_timed_out` got lost once already.
+/// column, so it avoids field-level mismatches.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Seed {
     pub at: Timestamp,

@@ -1,19 +1,6 @@
 //! What a device *is*, and how a command reaches one.
 //!
-//! Two halves that belong together. The rated limits used to live as consts in
-//! `models.rs` next to the wire types, which put a fact about the hardware in
-//! the same file as the JSON it happens to be written with. They belong here:
-//! one place to name a model, so a second one (a different Zendure, or another
-//! vendor entirely) is a new `BatterySpec` rather than another pair of consts
-//! to keep in sync.
-//!
-//! The other half is the capability trait a device adapter implements.
-//! `main.rs` used to reach straight for `ZendureClient` and apply
-//! `commands.first()`, silently dropping the rest — harmless with one device,
-//! wrong the moment a step means "stop charging the car, start charging the
-//! battery". The loop that drives every adapter from a list, `actuate`, lives
-//! in [`crate::registry`] alongside the map it dispatches through — this
-//! module only names the capability, not how many boxes implement it.
+//! Rated limits and the capability traits a device adapter implements.
 
 use std::future::Future;
 
@@ -52,7 +39,7 @@ pub const AC2400_PLUS: BatterySpec = BatterySpec {
 /// `-> impl Future` rather than `async fn` so the `Send` bound is written out.
 /// A bare `async fn` in a trait leaves the future's auto-traits unspecified for
 /// generic callers, which would bite the first time actuation moves onto a
-/// spawned task — which step 7's "never block the control loop" requires.
+/// spawned task, which "never block the control loop" requires.
 ///
 /// `Error` is an associated type bounded only by `Display`, so an adapter
 /// keeps its own error (`reqwest::Error` here) and `actuate` stringifies it at
@@ -73,13 +60,8 @@ pub trait BatteryController {
 
 /// Bytes exactly as they arrived, before anything parsed them.
 ///
-/// Carried *out* of the adapter rather than journalled from inside it. An
-/// adapter that wrote to the journal itself would have to know the journal
-/// exists — a dependency this module has never had — and the caller already
-/// owns the rule that matters: capture before parse, so a payload that fails
-/// to decode is still on record. `run.rs` had that ordering right where the
-/// HTTP call was; handing the bytes back preserves it rather than making
-/// `zendure.rs` re-derive it.
+/// Carried *out* of the adapter rather than journalled from inside it.
+/// Capture before parse, so a payload that fails to decode is still on record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawCapture {
     pub kind: &'static str,
@@ -129,31 +111,18 @@ pub struct PollError {
 
 /// Reading a battery's state.
 ///
-/// A separate trait from [`BatteryController`], not a second method bolted
-/// onto it, because the two call sites want different things from an
-/// adapter. `registry::actuate` drives every device through `apply` alone —
-/// a directive never asks a battery what it is doing before telling it what
-/// to do next — so a trait with only `apply` is all `actuate` and its tests
-/// need. And [`RecordingBattery`], the write-only double `actuate`'s tests
-/// share, would otherwise have had to invent a `prepare` and a `poll` it
-/// never calls, just to keep satisfying one merged trait — turning a double
-/// built to answer "did the command land" into one that also has to fake
-/// being readable. Two traits mean each call site implements only the one it
-/// uses.
+/// A separate trait from [`BatteryController`] because the call sites differ:
+/// `registry::actuate` drives devices through `apply` alone, so its write-only
+/// test double would otherwise have to fake being readable.
 ///
-/// Same shape as `BatteryController`'s, for the reasons argued there: `&self`,
-/// since `ZendureClient` keeps its mutable state behind a `Mutex` so the poll
-/// loop can hold it immutably inside `tokio::select!`; `-> impl Future<..> +
-/// Send` rather than `async fn`, so a generic caller sees the future's
-/// `Send`-ness spelled out instead of inferred, which matters the moment
-/// polling moves onto a spawned task the way actuation already anticipates.
+/// Same shape as `BatteryController`'s: `&self`, since `ZendureClient` keeps
+/// its mutable state behind a `Mutex` so the poll loop can hold it immutably
+/// inside `tokio::select!`; and `-> impl Future + Send` rather than `async fn`,
+/// so a generic caller sees the future's `Send`-ness spelled out rather than
+/// inferred, which matters once polling moves onto a spawned task.
 ///
-/// No associated `Error` type, unlike `BatteryController`: every adapter
-/// reports a failure as [`PollError`], not its own error type, because the
-/// raw bytes a failure carries are exactly what the caller journals — an
-/// adapter-specific error type would have to be unwrapped back into that
-/// shape at the boundary anyway, so there is nothing an associated type would
-/// buy here that `BatteryController::Error` buys for `apply`.
+/// No associated `Error` type: every adapter reports failure as [`PollError`],
+/// because the raw bytes a failure carries are what the caller journals.
 pub trait BatteryMonitor {
     /// Which device this adapter reads from. Mirrors
     /// [`BatteryController::id`] — the same identity answers for both halves
@@ -193,9 +162,7 @@ pub trait BatteryMonitor {
 /// reported `operational` straight through an outage. The variants are the only
 /// two values that exist, and the compiler checks the comparison.
 ///
-/// `snake_case` so it serializes as the `"ok"` / `"error"` the journal already
-/// carries — step 7's `decisions.outcome` column and the README example read
-/// the same bytes as before.
+/// `snake_case` so it serializes as the `"ok"` / `"error"` the journal carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Applied {
@@ -224,11 +191,7 @@ impl Applied {
 /// failsafe standing everything down.
 ///
 /// One type for four values that have to move together — how the actuation is
-/// logged, the two MQTT status strings, and the journal's `kind` column. They
-/// used to be an `Actuation` and a separate `DecisionKind` passed fourteen
-/// lines apart in the same branch, plus two bare string literals at the call
-/// site, with nothing checking they agreed. The charger this anticipates adds one
-/// variant here instead of four coordinated edits.
+/// logged, the two MQTT status strings, and the journal's `kind` column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlPath {
     Objective,

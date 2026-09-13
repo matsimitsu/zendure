@@ -3,9 +3,7 @@
 //! Three jobs that share a transport and little else, so they are three files.
 //! [`publisher`] is the queue and the task that drains it; [`discovery`] is the
 //! Home Assistant wire format; [`subscriber`] owns the eventloop, the
-//! subscription and the meter feed. They were one module of a thousand lines,
-//! which is how the wire format came to share a file with the backpressure
-//! policy of a `select!` arm.
+//! subscription and the meter feed.
 
 pub mod discovery;
 pub mod publisher;

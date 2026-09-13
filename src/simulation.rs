@@ -1,15 +1,11 @@
 //! A simulated battery with a real integrating energy model, so the
 //! controller can eventually run against no hardware at all.
 //!
-//! This is not a stub that echoes back whatever it was told to do — a
-//! controller exercised against one would "work" no matter how wrong its
-//! decisions were, because the fake would agree with anything. `VirtualBattery`
-//! instead keeps its own store of energy in [`crate::units::WattHours`] and
-//! integrates real power over real time into it, the same way `rte.rs` does
-//! for the actual device. A setpoint that would overcharge the pack really
-//! does hit a ceiling here; a battery that is empty really does stop being
-//! able to discharge. That is what makes it useful for testing the objective
-//! rather than just the plumbing around it.
+//! Not a stub that echoes back what it was told: a controller exercised
+//! against one of those would "work" no matter how wrong its decisions were.
+//! `VirtualBattery` keeps its own store of [`crate::units::WattHours`] and
+//! integrates real power over real time, so a setpoint that would overcharge
+//! the pack hits a ceiling and an empty battery really does stop discharging.
 //!
 //! `registry::from_config` is what selects it: a `[[device]] kind = "virtual"`
 //! entry builds one of these instead of a `ZendureClient`, and from that point
