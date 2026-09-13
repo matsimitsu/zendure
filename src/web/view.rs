@@ -3,9 +3,9 @@
 //! strings, never a `Watts` or a `Soc`.
 
 use crate::models::ControlMode;
-use crate::units::{KiloWattHours, Percent, Timestamp};
+use crate::units::{KiloWattHours, Percent, Timestamp, Watts};
 
-use super::state::{DashboardState, Sparkline};
+use super::state::{DashboardState, Plottable, Sparkline};
 
 pub struct StatCardView {
     /// BEM modifier selecting the semantic color: "solar" | "home" | "grid" | "ev".
@@ -59,17 +59,30 @@ pub struct DashboardView {
     pub decision_log: Vec<DecisionLogRowView>,
 }
 
-fn format_watts_signed(watts: f64) -> String {
-    format!(
-        "{}{}",
-        if watts < 0.0 { "-" } else { "" },
-        thousands(watts.abs().round() as i64)
-    )
+/// How a formatted watt figure wears its sign.
+#[derive(Clone, Copy)]
+enum SignStyle {
+    /// `-1,234` when negative, `1,234` otherwise.
+    Negative,
+    /// `-1,234` or `+1,234`, so a flow always reads as a direction.
+    Explicit,
+    /// `1,234` either way, for a quantity whose direction is stated elsewhere.
+    Magnitude,
 }
 
-/// Whole-number thousands grouping — `std::fmt` has none built in, and this
-/// crate's low-dependency style prefers ten lines here over a new crate.
-fn thousands(n: i64) -> String {
+fn format_watts(watts: Watts, style: SignStyle) -> String {
+    let negative = watts.get() < 0;
+    let sign = match style {
+        SignStyle::Negative if negative => "-",
+        SignStyle::Explicit if negative => "-",
+        SignStyle::Explicit => "+",
+        _ => "",
+    };
+    format!("{sign}{}", thousands(watts.get().unsigned_abs().into()))
+}
+
+/// Whole-number thousands grouping, which `std::fmt` has none of built in.
+fn thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, ch) in digits.chars().enumerate() {
@@ -81,15 +94,15 @@ fn thousands(n: i64) -> String {
     out
 }
 
-fn sparkline_path(spark: &Sparkline) -> String {
-    let samples = spark.samples();
-    if samples.is_empty() {
+fn sparkline_path<T: Plottable>(spark: &Sparkline<T>) -> String {
+    if spark.is_empty() {
         return String::new();
     }
-    if samples.len() == 1 {
+    if spark.len() == 1 {
         return "M0.0,14.0 L96.0,14.0".to_string();
     }
 
+    let samples: Vec<f64> = spark.values().collect();
     let max = samples.iter().cloned().fold(f64::MIN, f64::max);
     let min = samples.iter().cloned().fold(f64::MAX, f64::min);
     let range = if (max - min).abs() < f64::EPSILON {
@@ -113,20 +126,39 @@ fn sparkline_path(spark: &Sparkline) -> String {
         .join(" ")
 }
 
-fn badge_variant(mode: ControlMode) -> &'static str {
-    match mode {
-        ControlMode::Charge => "charge",
-        ControlMode::Discharge => "discharge",
-        ControlMode::Idle | ControlMode::Standby => "idle",
+struct ModeBadge {
+    /// BEM modifier: "charge" | "discharge" | "idle".
+    variant: &'static str,
+    /// The decision log's label.
+    log_label: &'static str,
+    /// The battery panel's label.
+    panel_label: &'static str,
+}
+
+fn badge(mode: ControlMode) -> ModeBadge {
+    let (variant, log_label, panel_label) = match mode {
+        ControlMode::Charge => ("charge", "CHARGE", "Charging"),
+        ControlMode::Discharge => ("discharge", "DISCHARGE", "Discharging"),
+        ControlMode::Idle => ("idle", "IDLE", "Idle"),
+        ControlMode::Standby => ("idle", "STANDBY", "Standby"),
+    };
+    ModeBadge {
+        variant,
+        log_label,
+        panel_label,
     }
 }
 
-fn mode_label(mode: ControlMode) -> &'static str {
+/// The battery panel's badge as `(label, variant)`. "Idle" would assert one of
+/// the three states this badge exists to distinguish, so no decision yet has to
+/// render as its own thing.
+fn panel_badge(mode: Option<ControlMode>) -> (&'static str, &'static str) {
     match mode {
-        ControlMode::Charge => "CHARGE",
-        ControlMode::Discharge => "DISCHARGE",
-        ControlMode::Idle => "IDLE",
-        ControlMode::Standby => "STANDBY",
+        None => ("Awaiting decision", "idle"),
+        Some(mode) => {
+            let badge = badge(mode);
+            (badge.panel_label, badge.variant)
+        }
     }
 }
 
@@ -145,20 +177,20 @@ pub fn ev_stat_card_placeholder() -> StatCardView {
     }
 }
 
-fn stat_card(
+fn stat_card<T: Plottable>(
     variant: &'static str,
     glyph: &'static str,
     label: &'static str,
-    value: f64,
+    value: Watts,
     unit: &'static str,
     detail: String,
-    spark: &Sparkline,
+    spark: &Sparkline<T>,
 ) -> StatCardView {
     StatCardView {
         variant,
         glyph,
         label,
-        value: format_watts_signed(value),
+        value: format_watts(value, SignStyle::Negative),
         unit,
         detail,
         sparkline_path: sparkline_path(spark),
@@ -185,6 +217,25 @@ fn format_time(at: Timestamp, timezone: chrono_tz::Tz) -> String {
         .unwrap_or_else(|| "--:--".to_string())
 }
 
+/// A decision log row's timestamp, dated once it is no longer today's. The
+/// log is seeded from a journal bounded by neither session nor age, so a row
+/// can be days old.
+fn format_log_time(at: Timestamp, now: Timestamp, timezone: chrono_tz::Tz) -> String {
+    use chrono::TimeZone;
+    let (Some(at), Some(now)) = (
+        timezone.timestamp_millis_opt(at.as_millis()).single(),
+        timezone.timestamp_millis_opt(now.as_millis()).single(),
+    ) else {
+        return "--:--".to_string();
+    };
+
+    if at.date_naive() == now.date_naive() {
+        at.format("%H:%M").to_string()
+    } else {
+        at.format("%-d %b %H:%M").to_string()
+    }
+}
+
 /// Everything the full page and every SSE fragment render from.
 pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> DashboardView {
     let world = &state.engine.world;
@@ -193,7 +244,7 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
         "solar",
         "☀",
         "Solar production",
-        world.solar.get(),
+        world.solar.into_watts(),
         "W",
         "Live solar production".to_string(),
         &state.sparklines.solar,
@@ -202,18 +253,19 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
         "home",
         "⌂",
         "Home usage",
-        world.home_usage().as_f64(),
+        world.home_usage(),
         "W",
         "Live home usage".to_string(),
         &state.sparklines.home_usage,
     );
+    let importing = world.grid.total.importing();
     let grid = stat_card(
         "grid",
         "⇄",
         "Grid",
-        world.grid.total.get(),
+        importing,
         "W",
-        if world.grid.total.get() < 0.0 {
+        if importing < Watts::ZERO {
             "Exporting to grid".to_string()
         } else {
             "Importing from grid".to_string()
@@ -222,30 +274,17 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
     );
 
     let battery = world.battery().map(|battery| {
-        let mode = state
-            .last_decision
-            .as_ref()
-            .map(|d| d.mode)
-            .unwrap_or(ControlMode::Idle);
+        let (mode_label, badge_variant) = panel_badge(state.last_decision.as_ref().map(|d| d.mode));
         BatteryPanelView {
             soc_percent: battery.soc.get(),
-            mode_label: match mode {
-                ControlMode::Charge => "Charging",
-                ControlMode::Discharge => "Discharging",
-                ControlMode::Idle => "Idle",
-                ControlMode::Standby => "Standby",
-            },
-            badge_variant: badge_variant(mode),
+            mode_label,
+            badge_variant,
             rate: MiniStatView {
                 label: "Rate",
-                value: {
-                    let watts = battery.current_power.into_watts().get();
-                    format!(
-                        "{}{} W",
-                        if watts >= 0 { "+" } else { "-" },
-                        thousands(i64::from(watts.abs()))
-                    )
-                },
+                value: format!(
+                    "{} W",
+                    format_watts(battery.current_power.into_watts(), SignStyle::Explicit)
+                ),
             },
             usable_energy: MiniStatView {
                 label: "Usable energy",
@@ -266,12 +305,18 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
         .recent_decisions
         .iter()
         .rev()
-        .map(|(at, decision)| DecisionLogRowView {
-            time: format_time(*at, timezone),
-            mode_label: mode_label(decision.mode),
-            badge_variant: badge_variant(decision.mode),
-            reason: decision.reason.clone(),
-            power: format!("{} W", thousands(decision.power_watts.get() as i64)),
+        .map(|(at, decision)| {
+            let badge = badge(decision.mode);
+            DecisionLogRowView {
+                time: format_log_time(*at, state.as_of, timezone),
+                mode_label: badge.log_label,
+                badge_variant: badge.variant,
+                reason: decision.reason.clone(),
+                power: format!(
+                    "{} W",
+                    format_watts(Watts(decision.power_watts.get()), SignStyle::Magnitude)
+                ),
+            }
         })
         .collect();
 
@@ -290,3 +335,7 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
         decision_log,
     }
 }
+
+#[cfg(test)]
+#[path = "view_tests.rs"]
+mod tests;

@@ -7,10 +7,8 @@ use axum::routing::get;
 use chrono_tz::Tz;
 use rust_embed::Embed;
 
-use crate::journal::read::read_recent_decisions;
-
 use super::sse::fragment_stream;
-use super::state::{DECISION_LOG_CAPACITY, DashboardStateReceiver};
+use super::state::DashboardStateReceiver;
 use super::templates::layout;
 use super::view::dashboard_view;
 
@@ -56,21 +54,5 @@ async fn asset(Path(path): Path<String>) -> Response {
                 .into_response()
         }
         None => (StatusCode::NOT_FOUND, "not found").into_response(),
-    }
-}
-
-/// Seed a fresh channel value's decision log from the journal — called once,
-/// at startup, from `run()`. Read failures degrade to an empty log rather
-/// than failing startup, the same "a logging concern must never become a
-/// control failure" rule the journal itself follows.
-pub fn seed_decision_log(
-    journal_path: &std::path::Path,
-) -> Vec<(crate::units::Timestamp, crate::models::ControlDecision)> {
-    match read_recent_decisions(journal_path, DECISION_LOG_CAPACITY) {
-        Ok(rows) => rows.into_iter().map(|row| (row.at, row.decision)).collect(),
-        Err(e) => {
-            tracing::warn!("Dashboard: cannot seed decision log from journal: {e}");
-            Vec::new()
-        }
     }
 }

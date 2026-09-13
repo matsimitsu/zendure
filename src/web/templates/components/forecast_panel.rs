@@ -1,8 +1,7 @@
 use maud::{Markup, html};
 
-/// Static placeholder: no real forecasting component exists yet. Deliberately
-/// zero-argument so it cannot accidentally be wired to real data later without
-/// someone noticing the signature has to change.
+/// Static placeholder: no forecasting component exists yet, so the panel
+/// labels itself as sample data on the page.
 pub fn render() -> Markup {
     const HOUR_LABELS: [&str; 24] = [
         "00", "", "", "03", "", "", "06", "", "", "09", "", "", "12", "", "", "15", "", "", "18",
@@ -49,8 +48,9 @@ pub fn render() -> Markup {
     html! {
         div class="forecast-panel" {
             div class="forecast-panel__header" {
-                h2 class="forecast-panel__title" { "24-hour forecast" }
+                h2 class="forecast-panel__title" { "24-hour forecast (sample data)" }
                 p class="forecast-panel__subtitle" { "Predicted solar yield and planned charge schedule" }
+                p class="forecast-panel__notice" { "No forecasting exists yet — the curve and the schedule below are fixed illustrations, not predictions." }
             }
 
             div class="forecast-panel__chart-label" { "Predicted solar (kW)" }

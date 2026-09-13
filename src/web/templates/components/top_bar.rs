@@ -3,10 +3,12 @@ use maud::{Markup, html};
 use crate::web::view::TopBarView;
 
 pub fn render(view: &TopBarView) -> Markup {
+    // `operational` is `!mqtt_timed_out`: the meter feed, not this page's own
+    // connection, which is what a bare "Offline" would read as here.
     let (status_text, status_modifier) = if view.operational {
         ("Operational", "operational")
     } else {
-        ("Offline", "offline")
+        ("Meter offline", "offline")
     };
 
     html! {

@@ -1,6 +1,10 @@
 //! The `/events` stream: one named fragment per section of the dashboard
 //! that can independently change, re-rendered through the same component
 //! functions the full page uses.
+//!
+//! Every section rendering from [`DashboardState`](super::state::DashboardState)
+//! must appear in [`FRAGMENTS`]. One left off still recomputes each tick and
+//! then renders the value it had at page load, with nothing failing.
 
 use std::convert::Infallible;
 
@@ -9,9 +13,26 @@ use chrono_tz::Tz;
 use futures_util::{Stream, StreamExt};
 use tokio_stream::wrappers::WatchStream;
 
+use maud::Markup;
+
 use super::state::DashboardStateReceiver;
 use super::templates::layout;
-use super::view::dashboard_view;
+use super::view::{DashboardView, dashboard_view};
+
+/// One live section of the page: the `sse-swap` name its wrapper carries, and
+/// the renderer that produces that wrapper's contents.
+pub(super) type Fragment = (&'static str, fn(&DashboardView) -> Markup);
+
+/// Every live section of the page: `layout::page` wraps each name in the
+/// `div` carrying it, and [`fragment_stream`] emits an event per entry.
+/// `page_is_live_everywhere_it_claims_to_be` checks the two agree.
+pub(super) const FRAGMENTS: [Fragment; 5] = [
+    ("top-bar", layout::top_bar_inner),
+    ("page-header", layout::page_header_inner),
+    ("stat-cards", layout::stat_cards_inner),
+    ("battery-panel", layout::battery_panel_inner),
+    ("decision-log", layout::decision_log_inner),
+];
 
 /// `WatchStream` yields the current value immediately on subscribe, then one
 /// item per subsequent change — several updates landing between polls
@@ -23,17 +44,14 @@ pub fn fragment_stream(
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     WatchStream::new(rx).flat_map(move |state| {
         let view = dashboard_view(&state, timezone);
-        let events = vec![
-            Event::default()
-                .event("stat-cards")
-                .data(layout::stat_cards_inner(&view).into_string()),
-            Event::default()
-                .event("battery-panel")
-                .data(layout::battery_panel_inner(&view).into_string()),
-            Event::default()
-                .event("decision-log")
-                .data(layout::decision_log_inner(&view).into_string()),
-        ];
+        let events: Vec<Event> = FRAGMENTS
+            .iter()
+            .map(|(name, render)| {
+                Event::default()
+                    .event(*name)
+                    .data(render(&view).into_string())
+            })
+            .collect();
         tokio_stream::iter(events.into_iter().map(Ok))
     })
 }

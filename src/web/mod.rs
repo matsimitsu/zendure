@@ -9,6 +9,5 @@ mod state;
 mod templates;
 mod view;
 
-pub use routes::seed_decision_log;
 pub use server::spawn;
-pub use state::{DashboardState, DashboardStateSender};
+pub use state::{DashboardState, DashboardStateSender, DashboardTelemetry, seed_decision_log};

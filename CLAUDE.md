@@ -1,5 +1,12 @@
 # Zendure Controller
 
+## Engineering principles
+
+See [`PRINCIPLES.md`](PRINCIPLES.md) for principles distilled from past incidents
+and reviews (e.g. `RUST-1`: comments explain WHY, not WHAT; `RUST-2`: physical
+quantities get newtypes). Cite the principle ID in commits and PRs when fixing a
+regression.
+
 ## Before committing
 
 Run these checks and fix any issues before creating a commit:
@@ -55,6 +62,28 @@ crossed a boundary without anyone saying what the conversion meant.
 - `src/rte.rs` — Round-trip efficiency tracking
 - `src/web/` — Live dashboard: Axum routes, SSE fan-out, live-state cell, Maud view-models
 - `assets/scss/` — Dashboard component stylesheets (Grass), compiled by `build.rs` and served via `rust-embed`
+
+## Dashboard styling
+
+1. **One Maud component = one CSS file.** Each component gets its own `.rs`
+   (a Maud template function) and a co-located `.scss` of the same name,
+   compiled with Grass and served via `rust-embed`. Class names follow **BEM**
+   (`block__element--modifier`).
+2. **Tokens live in one place.** All raw values (color, type scale, spacing,
+   radius) are declared once, as CSS custom properties, in `tokens.scss`.
+   Component stylesheets only ever consume `var(--token-name)` — never a
+   literal color, px value, or a new custom property of their own.
+3. **No layout literals in components.** A component's stylesheet must not
+   hardcode `width`, `height`, `padding` or similar box dimensions; those come
+   from tokens or from the parent.
+4. **Parents own spacing between components.** A component never sets its own
+   external `margin`. Layout containers space children with `gap`, so
+   components stay drop-in and reorderable. A component may space *its own*
+   children the same way.
+
+Every section of the page that renders live state must appear in `web::sse`'s
+`FRAGMENTS` table, which is what `page_is_live_everywhere_it_claims_to_be`
+checks the page markup against.
 
 ## Documentation
 

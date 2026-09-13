@@ -181,12 +181,14 @@ impl World {
         self.grid.total + self.battery_flow()
     }
 
-    /// What the house itself is drawing: solar production plus grid import
-    /// minus whatever the battery is contributing. For the dashboard's "Home
-    /// usage" stat card, not a decision input.
+    /// What the house itself is drawing. Not a decision input.
+    ///
+    /// The meter nets both solar and the battery out of its total
+    /// (`grid.total = load - solar - battery_flow`), so the load is both of
+    /// them added back; [`underlying_grid`](Self::underlying_grid) is already
+    /// the battery half.
     pub fn home_usage(&self) -> Watts {
-        let underlying = self.grid.total.get() + self.solar.get();
-        Watts(underlying.round() as i32) - self.battery_flow().into_watts()
+        self.underlying_grid().importing() + self.solar.into_watts()
     }
 }
 
@@ -333,10 +335,10 @@ mod tests {
         assert_eq!(world.underlying_grid(), GridPower(1050.0));
     }
 
-    /// 1000 W import + 200 W solar - 300 W discharging = 900 W actually drawn
-    /// by the house.
+    /// 1000 W still imported + 200 W of solar + 300 W out of the pack = a
+    /// house drawing 1500 W.
     #[test]
-    fn home_usage_is_grid_plus_solar_minus_battery_flow() {
+    fn home_usage_adds_solar_and_battery_flow_back_onto_the_meter() {
         let mut world = World::new();
         world.observe_meter(
             MeterReading::total_only(GridPower(1000.0)),
@@ -346,7 +348,81 @@ mod tests {
             DeviceId::new("SN1"),
             Measurement::Battery(battery_with_power(BatteryPower(300))),
         );
-        assert_eq!(world.home_usage(), Watts(900));
+        assert_eq!(world.home_usage(), Watts(1500));
+    }
+
+    /// The pack is covering the whole house, so the meter reads zero and every
+    /// watt drawn comes from the battery — the case a flipped sign turns
+    /// negative.
+    #[test]
+    fn home_usage_is_positive_when_the_battery_covers_the_whole_house() {
+        let mut world = World::new();
+        world.observe_meter(MeterReading::total_only(GridPower::ZERO), SolarPower::ZERO);
+        world.observe_device(
+            DeviceId::new("SN1"),
+            Measurement::Battery(battery_with_power(BatteryPower(800))),
+        );
+        assert_eq!(world.home_usage(), Watts(800));
+    }
+
+    /// Charging is demand like any other: 1500 W imported with 1000 W of it
+    /// going into the pack leaves 500 W for the house.
+    #[test]
+    fn home_usage_excludes_what_the_battery_is_charging() {
+        let mut world = World::new();
+        world.observe_meter(
+            MeterReading::total_only(GridPower(1500.0)),
+            SolarPower::ZERO,
+        );
+        world.observe_device(
+            DeviceId::new("SN1"),
+            Measurement::Battery(battery_with_power(BatteryPower(-1000))),
+        );
+        assert_eq!(world.home_usage(), Watts(500));
+    }
+
+    /// Exporting: 2000 W of solar, 1200 W pushed to the grid, battery idle —
+    /// the house is drawing the 800 W difference.
+    #[test]
+    fn home_usage_while_exporting_is_solar_minus_the_export() {
+        let mut world = World::new();
+        world.observe_meter(
+            MeterReading::total_only(GridPower(-1200.0)),
+            SolarPower::new(2000.0),
+        );
+        world.observe_device(
+            DeviceId::new("SN1"),
+            Measurement::Battery(battery_with_power(BatteryPower::ZERO)),
+        );
+        assert_eq!(world.home_usage(), Watts(800));
+    }
+
+    /// The round trip against `source::synthetic`'s model
+    /// (`grid.total = load - solar - battery_flow`): whatever load goes in
+    /// comes back out, for every combination of sign.
+    #[test]
+    fn home_usage_inverts_the_meter_model_for_every_sign() {
+        for load in [0, 400, 3000] {
+            for solar in [0.0, 250.0, 4000.0] {
+                for flow in [-2400, 0, 1800] {
+                    let total = f64::from(load) - solar - f64::from(flow);
+                    let mut world = World::new();
+                    world.observe_meter(
+                        MeterReading::total_only(GridPower(total)),
+                        SolarPower::new(solar),
+                    );
+                    world.observe_device(
+                        DeviceId::new("SN1"),
+                        Measurement::Battery(battery_with_power(BatteryPower(flow))),
+                    );
+                    assert_eq!(
+                        world.home_usage(),
+                        Watts(load),
+                        "load={load} solar={solar} flow={flow}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

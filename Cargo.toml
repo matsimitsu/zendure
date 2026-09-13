@@ -22,7 +22,7 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 # `Value::type_str` rather than rendering it. Pure Rust with no build script, so
 # it adds nothing the static musl cross-build can trip over.
 toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 maud = { version = "0.27", features = ["axum"] }
 rust-embed = { version = "8", features = ["interpolate-folder-path"] }
 tokio-stream = { version = "0.1.19", features = ["sync"] }

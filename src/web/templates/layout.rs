@@ -27,13 +27,17 @@ pub fn page(view: &DashboardView) -> Markup {
                 link rel="preconnect" href="https://fonts.googleapis.com";
                 link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet";
                 link rel="stylesheet" href="/assets/dashboard.css";
-                script src="https://cdnjs.cloudflare.com/ajax/libs/htmx/2.0.4/htmx.min.js" {}
-                script src="https://cdn.jsdelivr.net/npm/htmx-ext-sse@2.2.4/sse.js" {}
+                script src="/assets/htmx.min.js" {}
+                script src="/assets/sse.js" {}
             }
             body hx-ext="sse" sse-connect="/events" {
-                (top_bar::render(&view.top_bar))
+                div id="top-bar" sse-swap="top-bar" {
+                    (top_bar_inner(view))
+                }
                 div class="page" {
-                    (page_header::render(&view.page_header))
+                    div id="page-header" sse-swap="page-header" {
+                        (page_header_inner(view))
+                    }
                     div id="stat-cards" class="stat-row" sse-swap="stat-cards" {
                         (stat_cards_inner(view))
                     }
@@ -49,6 +53,18 @@ pub fn page(view: &DashboardView) -> Markup {
             }
         }
     }
+}
+
+/// The status badge's contents — the page's only claim about whether the
+/// controller is still hearing from the meter, so it has to be swappable.
+pub fn top_bar_inner(view: &DashboardView) -> Markup {
+    top_bar::render(&view.top_bar)
+}
+
+/// The page header's contents. "As of 09:14" states the stream's freshness,
+/// so a frozen one reads as a working dashboard with nothing to report.
+pub fn page_header_inner(view: &DashboardView) -> Markup {
+    page_header::render(&view.page_header)
 }
 
 /// The stat card row's contents — what the `stat-cards` SSE event's payload

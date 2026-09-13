@@ -29,7 +29,10 @@ pub async fn spawn(
         }
     };
 
-    tracing::info!("Web interface listening on: {addr}");
+    // The bound address, not the requested one: `port = 0` asks the OS to
+    // pick, and this line is the only place the answer surfaces.
+    let bound = listener.local_addr().unwrap_or(addr);
+    tracing::info!("Web interface listening on: {bound}");
     let app = routes::router(AppState {
         dashboard,
         timezone,

@@ -921,14 +921,10 @@ impl Config {
         // `bind_address`/`port` are connection settings, read via `optional`:
         // present-and-wrong-type is fatal, absent takes the default.
         let web = if taker.has_table("web")? {
-            let bind_address = match taker.optional::<String>("web.bind_address")? {
-                Some(s) => s
-                    .parse::<std::net::IpAddr>()
-                    .map_err(|e| format!("web.bind_address: {e}"))?,
-                None => std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
-            };
             Some(WebConfig {
-                bind_address,
+                bind_address: taker
+                    .optional::<std::net::IpAddr>("web.bind_address")?
+                    .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))),
                 port: taker.optional::<u16>("web.port")?.unwrap_or(8080),
             })
         } else {
