@@ -30,26 +30,18 @@ pub enum Event {
 }
 
 impl Event {
-    /// Every string `kind` can return.
-    ///
-    /// The journal's `events` table also holds rows that are *not* `Event`s —
-    /// the pre-parse `shelly` and `zendure_poll` captures — so a reader
-    /// rebuilding the fold has to select on kind, and needs this list. Keeping
-    /// it here rather than in the reader is what lets a test pin it against the
-    /// enum: a variant added to `Event` without an entry here would otherwise be
-    /// journalled, be replayable, and be silently dropped from every fixture —
-    /// and because `expected` is derived from the events that survive the
-    /// filter, `--verify` would keep passing on a replay missing its inputs.
+    /// Every string `kind` can return. The journal's `events` table also holds
+    /// non-`Event` rows (raw `shelly`/`zendure_poll` captures), so a reader
+    /// selects on this list to rebuild the fold. A variant missing here is
+    /// journalled, replayable, and silently dropped from every fixture — and since
+    /// `expected` derives from what survives the filter, `--verify` would keep passing
+    /// on a replay missing its inputs.
     pub const KINDS: [&'static str; 3] = ["meter", "device_update", "mqtt_timeout"];
 
-    /// The whole clock the event was captured with — hour, weekday and day
-    /// ordinal as well as the instant.
-    ///
-    /// Every variant carries one, because the controller's time-dependent
-    /// branches read all four and none of them may be re-derived at replay
-    /// time. A replay that has to build a starting controller state from
-    /// scratch takes its day ordinal from here, which is the only place in a
-    /// fixture that knows one.
+    /// The whole clock the event was captured with — hour, weekday, day
+    /// ordinal and instant. Every variant carries one because the
+    /// controller's time-dependent branches read all four and none may be re-derived at
+    /// replay time; a replay building a starting state takes its day ordinal from here.
     pub fn clock(&self) -> &Clock {
         match self {
             Event::Meter { at, .. } => at,
@@ -150,12 +142,10 @@ mod tests {
         assert_eq!(Event::MqttTimeout { at: clock() }.kind(), "mqtt_timeout");
     }
 
-    /// `KINDS` is what a journal reader selects on to separate foldable events
-    /// from the raw pre-parse captures sharing the table. A variant missing
-    /// from it is dropped from every fixture silently — and silently is the
-    /// operative word, since `expected` is derived from whatever survives the
-    /// filter, so `--verify` would keep passing against a replay missing its
-    /// inputs. Both directions: nothing absent, nothing stale.
+    /// `KINDS` separates foldable events from raw pre-parse captures sharing
+    /// the journal table. A variant missing from it is silently dropped from every
+    /// fixture, and since `expected` derives from what survives the filter, `--verify`
+    /// would keep passing against a replay missing its inputs.
     #[test]
     fn kinds_lists_every_variant_and_nothing_else() {
         let produced: Vec<&str> = every_variant().iter().map(|e| e.kind()).collect();

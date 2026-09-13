@@ -244,18 +244,10 @@ pub struct ControlDecision {
 }
 
 impl ControlDecision {
-    /// A decision with plausible values, for tests that need one but are not
-    /// about its contents.
-    ///
-    /// Shared rather than restated per module, the way `BatteryState::test_sample`
-    /// and `Controller::test_default` already are — three test modules were
-    /// writing the same four fields, and it was the one decision-path type
-    /// without such a constructor. Override what a test is actually about:
-    /// `ControlDecision { mode, ..ControlDecision::test_sample() }`.
-    ///
-    /// `grid_power` is deliberately fractional: the meter reports fractions and
-    /// the wire format rounds to whole watts, so a whole number here would let
-    /// a formatting regression through.
+    /// A decision with plausible values, for tests that aren't about its
+    /// contents. Override what's relevant: `ControlDecision { mode,
+    /// ..ControlDecision::test_sample() }`. `grid_power` is deliberately
+    /// fractional — a whole number would let a rounding regression through unnoticed.
     #[cfg(test)]
     pub(crate) fn test_sample() -> Self {
         ControlDecision {

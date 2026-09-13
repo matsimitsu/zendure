@@ -1,18 +1,12 @@
 //! Reading a recorded run back out, for replay.
 //!
-//! Separate from the writer because they are separate jobs that happen to share
-//! a schema: one is on the control path and may never block it, the other is an
-//! offline tool that may take its time. The column names are the only thing
-//! they have in common, and this module is a sibling so that stays a short
-//! reach rather than a public API.
+//! Separate from the writer, which is on the control path and may never block,
+//! while this is an offline tool that may take its time; they share only the
+//! column names, reached as a sibling module rather than a public API.
 //!
-//! **`seq` does not leave this module.** The whole reason it exists is to
-//! answer "which decision belongs to which event", and answering that here — in
-//! one linear pass, by the code that also knows how `seq` is assigned — means
-//! the caller receives events already paired with what they commanded and never
-//! has to learn the ordering rules. Handing `seq` outward and aligning at the
-//! far end was the first shape of this, and it leaked three types across the
-//! boundary to do a join the query layer should have done.
+//! `seq` does not leave this module: it answers "which decision belongs to
+//! which event" here, in one linear pass by the code that assigns it, so callers
+//! receive events already paired with their commands.
 
 use std::path::Path;
 
@@ -57,11 +51,9 @@ pub struct Seed {
     pub state: EngineState,
 }
 
-/// One recorded event and the commands it produced.
-///
-/// `outcome` is deliberately absent: it records whether an HTTP write landed,
-/// and a replay performs no writes. Comparing it would mean comparing a replay
-/// against something it structurally cannot produce.
+/// One recorded event and the commands it produced. `outcome` is deliberately
+/// absent: it records whether an HTTP write landed, which a replay — performing
+/// no writes — structurally cannot produce.
 #[derive(Debug)]
 pub struct RecordedFrame {
     pub event: Event,
@@ -90,15 +82,10 @@ impl Anchor {
     }
 }
 
-/// What can go wrong reading a journal.
-///
-/// Its own type because `read_range` does three things — SQL, JSON decoding,
-/// and a schema-shape check — and only one of them is SQLite's. The first shape
-/// of this returned `rusqlite::Result` and smuggled the other two out inside
-/// `rusqlite::Error::InvalidParameterName`, whose documented meaning is "you
-/// bound a parameter by a name the statement does not have". Anyone matching on
-/// that variant got nonsense, and the message a user saw was wrapped in a
-/// variant name that had nothing to do with their problem.
+/// What can go wrong reading a journal. Its own type because `read_range` does
+/// three things — SQL, JSON decoding, a schema-shape check — and only one is
+/// SQLite's; smuggling the other two out through `rusqlite::Error` variants
+/// gave callers and users error messages that named the wrong problem.
 #[derive(Debug)]
 pub enum ReadError {
     Sql(rusqlite::Error),
@@ -155,24 +142,19 @@ fn open_for_reading(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Read everything needed to replay the run between two instants.
-///
-/// The range is anchored to a *decision*, not to `from`: a replay has to resume
-/// from a recorded snapshot, and the only snapshots are on decision rows. So the
-/// slice starts at the last decision at or before `from` and runs to `to`, which
-/// means it can begin earlier than asked. That is the honest boundary — starting
-/// at `from` with the state from some other moment would replay plausible
-/// nonsense.
+/// Reads everything needed to replay the run between two instants. The range
+/// is anchored to the last *decision* at or before `from`, not to `from`
+/// itself, since only decision rows carry a snapshot to resume from — so it
+/// can start earlier than asked rather than replay from a state that wasn't recorded
+/// there.
 pub fn read_range(path: &Path, from: Timestamp, to: Timestamp) -> Result<Recording> {
     let conn = open_for_reading(path)?;
 
-    // One transaction across all three reads. They were three independent
-    // snapshots of a database the daemon appends to a few times a second, so
-    // exporting with `--to` near now — the whole point of the tool — could read
-    // events, then read decisions belonging to an event it had not read, and
-    // attribute them to the last frame. That produced fixtures asserting two
-    // commands on one step, which a single-battery replay can never emit, and
-    // `--verify` then reported a divergence that never happened.
+    // One transaction across all three reads: as independent snapshots against a
+    // database the daemon appends to a few times a second, exporting with `--to`
+    // near now could read events, then decisions belonging to an event not yet
+    // read, and attribute them to the last frame — a divergence `--verify` would
+    // wrongly report.
     let tx = conn.unchecked_transaction()?;
 
     let mut warnings = Vec::new();
@@ -276,12 +258,10 @@ pub fn read_range(path: &Path, from: Timestamp, to: Timestamp) -> Result<Recordi
         None => sessions.iter().next().copied(),
     };
 
-    // The seed's own session counts. Feeding this set from the event rows alone
-    // missed the likeliest straddle of all: a range whose seed is the last
-    // decision before a restart and whose events are all after it. That is what
-    // every range covering a restart looks like, since the daemon's last act
-    // before stopping is a decision — and it reported no warning while carrying
-    // the pre-restart tuning.
+    // The seed's own session counts: feeding this set from event rows alone missed
+    // the likeliest straddle — a seed that is the last decision before a restart
+    // with all events after it, which is what every restart-spanning range looks
+    // like, since the daemon's last act before stopping is a decision.
     if let Some(id) = session_id {
         sessions.insert(id);
     }
@@ -316,13 +296,10 @@ pub fn read_range(path: &Path, from: Timestamp, to: Timestamp) -> Result<Recordi
     })
 }
 
-/// Walk both lists once, pairing each event with the decision rows written
-/// between it and the next event.
-///
-/// Linear, because both arrive in `seq` order and a decision's rows always sit
-/// between its event and the following one. Filtering the whole decision list
-/// per event instead is quadratic — 3.6 seconds for one day of events, hours
-/// for the retention window.
+/// Walks both lists once, pairing each event with the decision rows written
+/// between it and the next event. Linear, since both arrive in `seq` order;
+/// filtering the whole decision list per event instead is quadratic — 3.6
+/// seconds for one day of events, hours for the retention window.
 fn pair(
     events: Vec<(i64, Event)>,
     decisions: &[(i64, Option<String>, Option<String>)],
@@ -357,14 +334,10 @@ fn pair(
 }
 
 /// The session row governing the fixture, degrading rather than failing.
-///
-/// `prune` deletes `sessions WHERE started_ms < cutoff`, and a session row is
-/// dated at *process start* while its events and decisions are dated
-/// individually — so a daemon whose uptime exceeds the retention window deletes
-/// its own session row and goes on writing rows that point at it. Erroring here
-/// meant every export of a long-running process failed outright with
-/// `QueryReturnedNoRows`. The tuning is worth reporting as missing; it is not
-/// worth refusing to produce a fixture over.
+/// `prune` deletes `sessions WHERE started_ms < cutoff` while a session row
+/// dates at process start and its events/decisions date individually, so a
+/// long-uptime daemon deletes its own session row and keeps writing rows that point at
+/// it.
 fn session_row(
     conn: &Connection,
     session_id: Option<i64>,
@@ -409,14 +382,11 @@ pub struct DecisionRow {
     pub decision: ControlDecision,
 }
 
-/// The last `limit` decisions, oldest first — what the dashboard's decision
-/// log renders on page load. Unlike [`read_range`], this does not anchor to a
-/// snapshot or pair events with decisions.
-///
-/// [`Journal::decision`](super::Journal::decision) writes one row per
-/// commanded device, so one decision is several rows sharing a `ts_ms` and a
-/// `payload_json`; the `GROUP BY` collapses them to the one entry the
-/// dashboard's live path appends.
+/// The last `limit` decisions, oldest first, for the dashboard's decision log.
+/// Unlike [`read_range`], this does not anchor to a snapshot or pair events
+/// with decisions. [`Journal::decision`](super::Journal::decision) writes one
+/// row per commanded device sharing a `ts_ms` and `payload_json`; `GROUP BY` collapses
+/// them to one entry.
 pub fn read_recent_decisions(path: &Path, limit: usize) -> Result<Vec<DecisionRow>> {
     let conn = open_for_reading(path)?;
 

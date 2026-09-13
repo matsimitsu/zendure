@@ -16,49 +16,27 @@ use crate::units::{RetentionDays, Timestamp};
 
 pub mod read;
 
-/// How many records may be in flight before the control loop starts dropping
-/// them. At roughly one meter reading a second plus a poll and a decision, this
-/// is minutes of backlog — if it ever fills, the writer is not slow, it is
-/// stuck, and waiting for it would be worse than losing the record.
+/// Backlog before the control loop starts dropping records — minutes at
+/// roughly one meter reading a second. A full queue means the writer is stuck,
+/// not slow, and waiting for it would be worse than losing the record.
 const QUEUE_DEPTH: usize = 1024;
 
-/// Bumped whenever the table shapes change, and *checked* on open: a database
-/// stamped with anything else is refused rather than inserted against, because
-/// `CREATE TABLE IF NOT EXISTS` accepts a file whose columns predate the build
-/// and then fails every insert instead.
-///
-/// Version 2 added `seq`. Nothing migrates between versions — there is no
-/// deployed v1 database to migrate, and inventing a migration path for a file
-/// that only ever existed on a development machine would be pure ceremony.
+/// Bumped when table shapes change and checked on open: `CREATE TABLE IF NOT
+/// EXISTS` would otherwise accept a file with stale columns and fail every
+/// insert. Nothing migrates between versions.
 const SCHEMA_VERSION: i64 = 2;
 
-/// Append-only record of everything entering and leaving the controller.
-///
-/// Storage is SQLite because reconstructing an incident means asking questions
-/// across time ("every decision in the ten minutes before the mode started
-/// flapping"), which is a query, not a grep.
-///
-/// Two properties are load-bearing:
-///
-/// - **Pre-parse payloads are stored as received.** A meter reading or device
-///   response we failed to decode is precisely the one worth having, and our own
-///   types would discard exactly the undocumented fields that explain it.
-/// - **Every failure degrades to "stop journalling", never to "stop
-///   controlling".** An unusable database disables the journal and the
-///   controller starts normally.
-///
-/// The control loop never touches SQLite. It hands a record to a bounded
-/// channel and returns; a writer thread owns the connection. `rusqlite`'s
-/// `Connection` is `!Sync`, so single ownership is not a style choice — and the
-/// writes are blocking I/O with no business on a runtime worker. If the channel
-/// is full the record is dropped and counted, because the decision path waiting
-/// on a logger is the one failure mode this design exists to rule out.
+/// Append-only, queryable record of everything entering and leaving the controller.
+/// Payloads
+/// are stored pre-parse, since our own types would drop the fields a decode failure
+/// needs.
+/// Every failure degrades to "stop journalling", never "stop controlling": the control
+/// loop
+/// only sends to a bounded channel, and the (`!Sync`, blocking) connection lives on a
+/// writer thread.
 pub struct Journal {
-    /// `None` when the journal is disabled — an unusable path, a database that
-    /// would not open. Kept *inside* the type rather than handing callers an
-    /// `Option<Journal>`: every method here is `&self`, infallible and already
-    /// swallows its own errors, so "there is no journal" is this module's
-    /// business and not a conditional at seven call sites.
+    /// `None` when disabled (unusable path, database wouldn't open); kept
+    /// inside the type so callers never branch on "no journal" themselves.
     tx: Option<mpsc::Sender<Record>>,
     dropped: Arc<AtomicU64>,
 }
@@ -85,11 +63,10 @@ struct DecisionRow {
     kind: &'static str,
     device: Option<String>,
     payload_json: String,
-    /// The whole `EngineState`, not its parts. Splitting it into `world_json`
-    /// and `ctrl_state_json` silently dropped `mqtt_timed_out`, which decides
-    /// whether a resuming meter reading announces `"operational"` — so a row
-    /// taken mid-outage replayed *almost* right. One column cannot lose a field
-    /// the struct later gains.
+    /// The whole `EngineState` in one column: splitting it into `world_json` and
+    /// `ctrl_state_json` silently dropped `mqtt_timed_out` (which gates whether a
+    /// resuming meter reading announces `"operational"`), so a row taken
+    /// mid-outage replayed *almost* right.
     state_json: String,
     command: Option<String>,
     outcome: Option<String>,
@@ -98,18 +75,10 @@ struct DecisionRow {
 }
 
 impl Journal {
-    /// Open the journal and start its writer.
-    ///
-    /// Always returns a usable `Journal`. If the database cannot be opened or
-    /// prepared it warns and returns a disabled one, so the caller carries on
-    /// without a journal rather than failing to start — and without having to
-    /// know which it got. The `Writer` is `None` in that case, since there is
-    /// nothing to drain.
-    ///
-    /// `session_config` is the decision-relevant configuration, recorded once so
-    /// a replay knows what tuning produced these rows. It is not the whole
-    /// `Config`: connection settings are not decision inputs and do not belong
-    /// in a fixture.
+    /// Opens the journal and starts its writer. Always returns a usable `Journal`:
+    /// a database that cannot be opened warns and yields a disabled one, with
+    /// `Writer` as `None`. `session_config` is the decision-relevant config,
+    /// recorded once so a replay knows what tuning produced these rows.
     pub fn open<T: Serialize>(
         path: &Path,
         retention: RetentionDays,
@@ -200,28 +169,21 @@ impl Journal {
             },
         };
         self.send(Record::Event {
-            // The wall clock, not an event's own: these are captured upstream
-            // of the engine, before anything has parsed them, so there is no
-            // `Clock` attached yet. `events.ts_ms` therefore mixes observed time
-            // (engine events) with write time (`shelly`, `zendure_poll`); they
-            // differ by the few milliseconds between receiving a payload and
-            // folding it in. `seq` is the strict order if you need one, and it
-            // spans both tables where `events.id` only orders this one.
+            // The wall clock: captured upstream of the engine, before parsing, so
+            // there is no `Clock` yet. `events.ts_ms` therefore mixes observed time
+            // with write time by a few milliseconds; `seq` spans both tables and
+            // is the strict order, where `events.id` only orders this one.
             at: Utc::now().into(),
             kind,
             payload_json,
         });
     }
 
-    /// Record a decision and what it actually did. Called *after* actuation, so
-    /// each outcome reflects whether that device's write landed.
-    ///
-    /// One row per commanded device, which repeats the decision across a
-    /// multi-device fleet — deliberate, because the point of a table over a log
-    /// is `WHERE device = ?`, and there is one battery today. A decision that
-    /// commanded nothing still gets a row, with no device: that is reachable
-    /// (an empty world makes the failsafe emit no directives) and is exactly
-    /// the case you would go looking for.
+    /// Records a decision and what it actually did. Called *after* actuation, so
+    /// each outcome reflects whether that device's write landed. One row per
+    /// commanded device (a table, not a log, for `WHERE device = ?`); a decision
+    /// commanding nothing — reachable via the failsafe on an empty world — still gets a
+    /// row with no device.
     pub fn decision(
         &self,
         at: Timestamp,
@@ -236,12 +198,10 @@ impl Journal {
             return;
         };
 
-        // The grid figure with the battery's own flow removed — what the house
-        // would have been drawing without it. Derivable from `state_json`, kept
-        // as a column because every question about whether a decision was right
-        // starts by asking for it. Non-finite becomes NULL deliberately: SQLite
-        // stores a bound NaN as NULL regardless, which under `NOT NULL` failed
-        // the whole insert and took the decision with it.
+        // What the house would have drawn without the battery; kept as its own
+        // column since every question about a decision's correctness starts here.
+        // Non-finite becomes NULL deliberately: SQLite stores a bound NaN as NULL
+        // regardless, which under `NOT NULL` failed the whole insert.
         let pre_battery_net_w = Some(state.world.underlying_grid().get()).filter(|w| w.is_finite());
 
         let row = |device, command, outcome, error| {
@@ -286,12 +246,10 @@ impl Journal {
     }
 }
 
-/// Serialize one value for a column, naming it if that fails.
-///
-/// `warn!`, not `debug!`: serializing our own types is a programming error that
-/// either never happens or happens every time, so it cannot flood the log the
-/// way a recurring write failure could — and a permanently unserializable
-/// journal going quiet is the outcome this whole module exists to avoid.
+/// Serialize one value for a column, naming it if that fails. `warn!`, not
+/// `debug!`: serializing our own types is a programming error that either never
+/// happens or happens every time, so it can't flood the log the way a recurring
+/// write failure could.
 fn json<T: Serialize>(what: &str, value: &T) -> Option<String> {
     match serde_json::to_string(value) {
         Ok(json) => Some(json),
@@ -302,14 +260,10 @@ fn json<T: Serialize>(what: &str, value: &T) -> Option<String> {
     }
 }
 
-/// Open a database, check it is one we can write, and start a session in it.
-///
+/// Opens a database, checks it is one we can write, and starts a session in it.
 /// Returns the session id stamped onto every row, and the next `seq` to hand
-/// out.
-///
-/// `auto_vacuum` has to be set before the first table exists, so a database
-/// created by an older build keeps its old setting. Harmless: without it the
-/// file holds its high-water mark instead of shrinking after a prune.
+/// out. `auto_vacuum` must be set before the first table exists; a database
+/// from an older build simply keeps its old setting.
 fn prepare(conn: &Connection, version: &str, config_json: &str) -> rusqlite::Result<Prepared> {
     // First, before anything writes a page: `auto_vacuum` can only be set while
     // the database is still empty, and switching to WAL is itself a write. Set
@@ -326,12 +280,10 @@ fn prepare(conn: &Connection, version: &str, config_json: &str) -> rusqlite::Res
     // timeout is zero.
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
-    // Before creating anything: a file stamped with a different schema has
-    // columns this build does not know about, or lacks ones it writes. Left
-    // alone, `CREATE TABLE IF NOT EXISTS` would accept it silently and every
-    // insert would then fail against the missing column — which degrades to a
-    // warning per power of two and a journal that records nothing. Refusing
-    // here disables the journal once, with the reason.
+    // Before creating anything: a file stamped with a different schema has columns
+    // this build does not know about, or lacks ones it writes. `CREATE TABLE IF NOT
+    // EXISTS` would otherwise accept it silently and every insert then fail against
+    // the missing column; refusing here disables the journal once, with the reason.
     let stamped: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if stamped != 0 && stamped != SCHEMA_VERSION {
         return Err(rusqlite::Error::SqliteFailure(
@@ -373,18 +325,10 @@ fn prepare(conn: &Connection, version: &str, config_json: &str) -> rusqlite::Res
          );
          CREATE INDEX IF NOT EXISTS events_ts        ON events (ts_ms);
          CREATE INDEX IF NOT EXISTS events_kind      ON events (kind);
-         -- UNIQUE, because `seq` is an ordering and a duplicate silently
-         -- destroys it. One writer per process cannot collide with itself, but
-         -- two processes opening the same journal seed their counters from the
-         -- same `max(seq)` and hand out the same numbers — a misconfiguration
-         -- rather than a supported mode. This turns most of that into failed
-         -- inserts, which degrade journalling and never control.
-         --
-         -- Partial, and deliberately so: the two indexes are per-table, so one
-         -- process's event and another's decision can still share a number.
-         -- Closing that needs a sequence table both writers take a row lock on,
-         -- which is a transaction per record on the control path's behalf —
-         -- far too much for a case systemd cannot produce.
+         -- UNIQUE, because a duplicate `seq` silently destroys the ordering: two
+         -- processes opening the same journal would seed from the same `max(seq)` and
+         -- hand out the same numbers, turning that misconfiguration into failed inserts.
+         -- Per-table only, so an event and another process's decision can still share a number.
          CREATE UNIQUE INDEX IF NOT EXISTS events_seq       ON events (seq);
          CREATE INDEX IF NOT EXISTS decisions_ts     ON decisions (ts_ms);
          CREATE INDEX IF NOT EXISTS decisions_device ON decisions (device);
@@ -406,11 +350,10 @@ fn prepare(conn: &Connection, version: &str, config_json: &str) -> rusqlite::Res
     )?;
     let session_id = conn.last_insert_rowid();
 
-    // `seq` continues across sessions rather than restarting, so it orders the
-    // whole file and not just one process's rows. A replay seeded from a
-    // decision written before a restart has to be able to ask for "everything
-    // after that row" without also knowing which session each side came from.
-    // Gaps left by a prune are fine; only the ordering is load-bearing.
+    // `seq` continues across sessions rather than restarting, so a replay seeded
+    // from a pre-restart decision can ask for "everything after that row" without
+    // knowing which session either side came from. Gaps left by a prune are fine;
+    // only the ordering is load-bearing.
     let next_seq: i64 = conn
         .query_row(
             "SELECT max(seq) FROM (SELECT max(seq) AS seq FROM events
@@ -525,20 +468,14 @@ fn write(conn: &Connection, session_id: i64, seq: i64, record: &Record) -> rusql
 fn prune(conn: &Connection, retention: RetentionDays, keep_session: i64) {
     let cutoff = retention.cutoff(Utc::now()).as_millis();
     let mut removed = 0usize;
-    // `sessions` is in the list because the doc below claims retention is the
-    // only thing bounding this file, and it was not: one row per restart
-    // accumulated forever. Its time column is named differently, hence the pair.
-    //
-    // `continue`, not `return`: a failure on the first table must not skip
-    // `decisions` — the larger one, the one retention exists to bound — nor the
-    // vacuum after it.
-    // The running session is exempt from its own prune. A session row is dated
-    // at *process start* while its events and decisions are dated individually,
-    // so a daemon whose uptime exceeds the retention window — months, for an
-    // unattended controller with a 30-day window — deleted the row describing
-    // it and carried on writing rows that pointed at nothing. Nothing read
-    // `sessions` back until the replay tool did, at which point every export of
-    // a long-running process failed outright.
+    // `sessions` bounds restart rows too (differently named time column, hence the
+    // pair).
+    // `continue`, not `return`: a failed table must not skip `decisions` — the one
+    // retention
+    // exists to bound — or the vacuum after. The running session is spared: its row
+    // dates at
+    // process start while its rows date individually; a long-lived daemon would else
+    // delete the row describing itself.
     for (table, column, spare_running) in [
         ("events", "ts_ms", false),
         ("decisions", "ts_ms", false),
@@ -612,20 +549,14 @@ pub(crate) mod testing {
         conn.query_row(sql, [], |r| r.get(0)).unwrap()
     }
 
-    /// Everything `main.rs`'s loop does to the journal, minus the I/O: journal
-    /// the event, step, then journal the decision with the state *after* the
-    /// step. That order is what `seq` alignment depends on, so a helper writing
-    /// them any other way would be exercising a daemon that does not exist.
-    ///
-    /// The outcomes come from `registry::actuate` against a recording double
-    /// rather than being built here, so the `command` column is filled by the
-    /// same code that fills it in production. Hand-building them made a
-    /// recorded column and a replayed render two expressions of one local
-    /// variable, which is a comparison that cannot fail.
-    ///
-    /// `raw_after` injects a pre-parse capture after the nth event — what the
-    /// subscriber task does from another task in production, and the thing
-    /// `seq` exists to survive.
+    /// Everything `main.rs`'s loop does to the journal, minus the I/O: journal the
+    /// event,
+    /// step, then journal the decision with the state *after* the step — the order
+    /// `seq`
+    /// alignment depends on. Outcomes come from `registry::actuate` against a recording
+    /// double so `command` is filled by production code, and `raw_after` injects a
+    /// pre-parse capture after the nth event, mirroring the subscriber's cross-task
+    /// write that `seq` exists to survive.
     pub(crate) async fn record_with(
         path: &Path,
         events: &[Event],
@@ -834,12 +765,9 @@ mod tests {
         );
     }
 
-    /// A database written by a different build has columns this one does not
-    /// write, or lacks ones it does. `CREATE TABLE IF NOT EXISTS` accepts it
-    /// silently and every insert then fails against a missing column — a
-    /// warning per power of two and a journal that records nothing. Refusing
-    /// once, with the reason, is the failure the `user_version` stamp was put
-    /// there to make possible.
+    /// `CREATE TABLE IF NOT EXISTS` would otherwise accept a database with a
+    /// mismatched column set and fail every insert; the `user_version` stamp
+    /// makes refusing it, once, with the reason, possible instead.
     #[test]
     fn a_database_from_another_schema_version_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -880,18 +808,11 @@ mod tests {
         assert_eq!(config, r#"{"k":1}"#);
     }
 
-    /// All three pragmas, pinned by value rather than trusted.
-    ///
-    /// `auto_vacuum` is the reason this test exists: it can only be set while
-    /// the database is still empty, and `pragma_update` reports success either
-    /// way. Setting it after `journal_mode=WAL` — which writes a page — leaves
-    /// it silently at NONE, so the file would have grown forever while the code
-    /// looked like it pruned. `synchronous` matters just as much in the other
-    /// direction: FULL would put an SD-card fsync behind every record.
-    /// Asserted against the connection `prepare` ran on, not a reopened one:
-    /// `synchronous` is per-connection and is not stored in the file, so
-    /// checking it anywhere else would pass or fail on the reader's default and
-    /// say nothing about the writer's.
+    /// All three pragmas, pinned by value. `auto_vacuum` can only be set while the
+    /// database is empty and `pragma_update` reports success either way, so setting
+    /// it after `journal_mode=WAL` (itself a write) would silently leave it at NONE.
+    /// `synchronous` is asserted on `prepare`'s own connection, not a reopened one,
+    /// since it is per-connection and not stored in the file.
     #[test]
     fn prepare_configures_the_connection_for_a_control_loop() {
         let dir = tempfile::tempdir().unwrap();
@@ -1067,15 +988,11 @@ mod tests {
         assert_eq!(device, None);
     }
 
-    /// **A decision row can seed a replay.**
-    ///
-    /// Goes all the way round rather than checking columns: write a row, read
-    /// `state_json` back out of SQLite, and `restore` a real `Engine` from it.
-    /// The gap this closes was invisible precisely because nobody tested the
-    /// composition — `engine.rs` proved `EngineState` round-trips through JSON,
-    /// this module proved two columns persisted, and `mqtt_timed_out` fell
-    /// between them. Anything the snapshot gains from here is carried or this
-    /// fails.
+    /// A decision row seeds a replay: write a row, read `state_json` back out of
+    /// SQLite, and `restore` a real `Engine` from it. `engine.rs` alone proved
+    /// `EngineState` round-trips through JSON, and this module alone proved two
+    /// columns persisted; `mqtt_timed_out` fell between the two until this composed
+    /// them.
     #[tokio::test]
     async fn a_decision_row_restores_a_working_engine() {
         let dir = tempfile::tempdir().unwrap();
@@ -1122,14 +1039,10 @@ mod tests {
         assert_eq!(pre_net, -149.5);
     }
 
-    /// A row reads back as the types that wrote it.
-    ///
-    /// `ControlDecision`, `Outcome` and `Applied` were `Serialize`-only, so
-    /// `payload_json` and `outcome` could be written and never parsed — while a
-    /// commit message claimed everything stored was reachable through them. The
-    /// replay tool this journal exists to feed cannot work against write-only
-    /// columns, and the format is append-only, so the rows being readable is a
-    /// property of the rows, not of the tool that comes later.
+    /// A row reads back as the types that wrote it. `ControlDecision`, `Outcome`
+    /// and `Applied` being `Serialize`-only would let `payload_json` and `outcome`
+    /// be written and never parsed, which the replay tool this journal feeds
+    /// cannot work against, and the format is append-only.
     #[tokio::test]
     async fn a_decision_row_reads_back_as_the_types_that_wrote_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -1228,12 +1141,10 @@ mod tests {
         assert_eq!(count(&conn, "SELECT count(*) FROM sessions"), 0);
     }
 
-    /// A session row is dated at *process start* while its events and decisions
-    /// are dated individually, so a daemon whose uptime exceeds the retention
-    /// window would delete the row describing itself and go on writing rows
-    /// pointing at nothing. Nothing read `sessions` back until the replay tool
-    /// did, at which point every export of a long-running process failed
-    /// outright with `QueryReturnedNoRows`.
+    /// A session row is dated at process start while its events/decisions are
+    /// dated individually, so a long-uptime daemon would else delete the row
+    /// describing itself and keep writing rows pointing at nothing — which the
+    /// replay tool discovered as `QueryReturnedNoRows` on every long-running export.
     #[tokio::test]
     async fn prune_spares_the_running_sessions_own_row() {
         let dir = tempfile::tempdir().unwrap();
@@ -1255,12 +1166,10 @@ mod tests {
         );
     }
 
-    /// **The property the whole architecture exists for**, and it had no test.
-    ///
-    /// The control loop must never wait on the journal, so a queue that cannot
-    /// be drained has to drop and count rather than block. Proven by never
-    /// starting a writer: the receiver is dropped on the spot, so every `send`
-    /// fails exactly as a wedged writer would, and the calls still return.
+    /// The control loop must never wait on the journal: a queue that cannot be
+    /// drained drops and counts rather than blocks. Proven by never starting a
+    /// writer — the receiver is dropped on the spot, so every `send` fails
+    /// exactly as a wedged writer would, and the calls still return.
     #[tokio::test]
     async fn a_full_queue_drops_records_instead_of_blocking() {
         let (tx, rx) = mpsc::channel(1);
@@ -1298,12 +1207,9 @@ mod tests {
         assert_eq!(count(&conn, "SELECT count(*) FROM events"), 1);
     }
 
-    /// An unusable path disables the journal rather than failing startup —
-    /// the invariant carried over from the NDJSON capture.
-    ///
-    /// The disabled journal is still a `Journal`, and still accepts records.
-    /// That is the point: no caller has to know which one it holds, so there is
-    /// no conditional to forget at a new call site.
+    /// An unusable path disables the journal rather than failing startup. The
+    /// disabled journal is still a `Journal` and still accepts records, so no
+    /// caller has to know which one it holds or add a conditional at a new call site.
     #[test]
     fn an_unusable_path_disables_the_journal_without_disabling_the_caller() {
         let dir = tempfile::tempdir().unwrap();

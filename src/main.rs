@@ -81,16 +81,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Read before the tracing subscriber exists, for two reasons at once:
-    // building the subscriber needs `config.log_filter`, and a fatal parse
-    // error has nowhere useful to go through `tracing` anyway — there is no
-    // subscriber yet to send it to. `eprintln!` and `exit(1)` rather than `?`,
-    // for the same reason the CLI error path above does not use `?`: `main`
-    // renders a returned `Err` with `Debug`, which would turn a multi-line
-    // parse error into one quoted line full of `\n`. The message still reaches
-    // an operator either way — systemd's `StandardError=` defaults to the
-    // journal, so stderr at this point is captured exactly as if a subscriber
-    // had written it.
+    // Read before the subscriber exists: building it needs `config.log_filter`,
+    // and there's no subscriber yet to send a parse error to. `eprintln!` +
+    // `exit(1)` rather than `?`, since `main` renders a returned `Err` with
+    // `Debug`, turning a multi-line message into one quoted line full of `\n` — still
+    // reaches the operator since systemd's `StandardError=` defaults to the journal.
     let (config, warnings) = match Config::from_toml(&config_path) {
         Ok(pair) => pair,
         Err(e) => {
@@ -99,11 +94,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // `RUST_LOG` wins outright when it is set. It used to be merged with a
-    // hard-coded `zendure=info`, and `add_directive` *replaces* a directive with
-    // the same target rather than merging — so `RUST_LOG=zendure=debug` was
-    // silently overwritten back to `info` and the module's debug lines were
-    // unreachable by the one incantation an operator would try.
+    // `RUST_LOG` wins outright when set: `add_directive` *replaces* a directive
+    // with the same target rather than merging, so combining this with a
+    // hard-coded `zendure=info` would silently overwrite `RUST_LOG=zendure=debug` back
+    // to `info`, making debug lines unreachable.
     let filter = match std::env::var("RUST_LOG") {
         Ok(spec) if !spec.trim().is_empty() => tracing_subscriber::EnvFilter::new(spec),
         _ => tracing_subscriber::EnvFilter::new(config.log_filter.clone()),
@@ -122,10 +116,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stop = run::shutdown_signal()?;
 
     // Built here, at the edge, and handed in — the same treatment `stop`
-    // already gets. `run::run` used to build this registry itself, which
-    // meant nothing outside that function could ever hold the device it
-    // just constructed; see `run::run`'s own doc comment for why that seam
-    // matters to a test.
+    // already gets, so something outside `run::run` can hold the device it constructs.
+    // See `run::run`'s own doc comment for why that seam matters to a test.
     let devices = registry::from_config(&config);
 
     run::run(config, devices, stop).await

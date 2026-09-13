@@ -1,14 +1,12 @@
 //! Every battery this process drives, and the loop that reaches the right one.
 //!
-//! A `Vec<Box<dyn BatteryController>>` does not compile — the trait is not
-//! object-safe: `apply` returns `impl Future + Send` (RPITIT, which cannot
-//! appear in a vtable) and `Error` is an associated type with no
-//! `dyn`-compatible spelling. Both are load-bearing — the RPITIT keeps
-//! `ZendureClient::apply`'s future unboxed, and the associated `Error` lets
-//! each adapter keep its own error type — so reshaping the trait to get a
-//! `dyn` would trade them for a heap allocation per command. Generics do not
-//! help either: one concrete type per call cannot hold two kinds of adapter at
-//! once, which is the whole requirement. Hence an enum.
+//! `Vec<Box<dyn BatteryController>>` does not compile: the trait is not
+//! object-safe (`apply` returns `impl Future + Send`, RPITIT can't appear in
+//! a vtable, and `Error` has no `dyn`-compatible spelling). Both are
+//! load-bearing — RPITIT keeps `ZendureClient::apply`'s future unboxed, and
+//! the associated `Error` lets each adapter keep its own type — so fixing
+//! that costs a heap allocation per command. Generics don't help either: one concrete
+//! type per call can't hold two adapter kinds at once. Hence an enum.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -26,14 +24,10 @@ use crate::simulation::VirtualBattery;
 use crate::world::DeviceId;
 use crate::zendure::ZendureClient;
 
-/// One battery adapter, in whichever shape it actually is.
-///
-/// `Virtual` holds an `Arc` rather than an owned `VirtualBattery`, unlike the
-/// other two arms: `run.rs`'s synthetic meter (`source::synthetic`) reads the
-/// same battery's `flow()` back into the meter reading it manufactures, which
-/// is the whole point of that module — a naive synthetic feed that never
-/// looks at the battery again just lies. `from_config`, below, is what shares
-/// one clone into this registry and another into the meter task.
+/// One battery adapter, in whichever shape it actually is. `Virtual` holds
+/// an `Arc`, not an owned `VirtualBattery`: `run.rs`'s synthetic meter reads
+/// the same battery's `flow()` back into the reading it manufactures, so
+/// `from_config` shares one clone into this registry and another into the meter task.
 pub enum Battery {
     Zendure(ZendureClient),
     Virtual(Arc<VirtualBattery>),
@@ -42,28 +36,20 @@ pub enum Battery {
 }
 
 impl Battery {
-    /// The Zendure adapter, wired up here rather than in `run.rs`. This is
-    /// the only place that vendor is named when building the registry — the
-    /// coordinator hands this a host and a serial and gets back an opaque
-    /// `Battery`, the same way it already never sees `ZendureClient` once a
-    /// directive is routed through `actuate`.
+    /// The only place that names the Zendure vendor when building the registry:
+    /// the coordinator hands this a host and serial and gets back an opaque
+    /// `Battery`, the same way it never sees `ZendureClient` once a directive is
+    /// routed through `actuate`.
     pub fn zendure(ip: &str, sn: String) -> Self {
         Battery::Zendure(ZendureClient::new(ip, sn))
     }
 }
 
-/// Builds the registry `run.rs` drives, from configuration.
-///
-/// The one place a [`DeviceConfig`] becomes a live adapter — `run.rs` never
-/// matches on `DeviceConfig` itself, the same discipline `Battery::zendure`
-/// already kept for the vendor name. A virtual device always simulates the
-/// one real spec this crate knows (`AC2400_PLUS`): `DeviceConfig::Virtual`
-/// carries no rated limits of its own, the same way a real Zendure's rating
-/// is a fact about the hardware and not a config knob.
-///
-/// "Exactly one device" is still enforced upstream, in
-/// `config::take_device` — this only ever has the one `DeviceConfig` to
-/// convert.
+/// Builds the registry `run.rs` drives. The only place a [`DeviceConfig`]
+/// becomes a live adapter — `run.rs` never matches on it directly. A virtual
+/// device always simulates `AC2400_PLUS`, since `DeviceConfig::Virtual`
+/// carries no rated limits of its own. "Exactly one device" is enforced upstream in
+/// `config::take_device`.
 pub fn from_config(config: &Config) -> Devices {
     let battery = match &config.device {
         DeviceConfig::Zendure { ip, sn, .. } => Battery::zendure(ip, sn.clone()),
@@ -119,18 +105,11 @@ impl BatteryController for Battery {
     }
 }
 
-/// The read side of the same seam, delegating exactly as `BatteryController`
-/// does above: `run.rs` reaches through here for `prepare`/`poll` instead of
-/// naming `ZendureClient`, so a second device is one more match arm rather
-/// than a second name threaded through the coordinator loop.
-///
-/// `id` repeats `BatteryController`'s match rather than sharing it through a
-/// helper: both traits name a same-shaped `id(&self) -> &DeviceId`, on
-/// purpose, so the two capabilities agree on what a device is called — but
-/// that means a call site with *both* traits in scope, as this module is, has
-/// to say which one it means. `Devices::new` says so with a qualified call;
-/// `run.rs` never imports `BatteryController` at all, so its `.id()` is
-/// unambiguous and reaches this impl instead.
+/// The read side of the same seam: `run.rs` reaches through here for
+/// `prepare`/`poll` instead of naming `ZendureClient`. `id` repeats
+/// `BatteryController`'s match rather than sharing it, since both traits
+/// share `id(&self) -> &DeviceId` on purpose — a call site with both in scope (like
+/// `Devices::new`) must disambiguate with a qualified call.
 impl BatteryMonitor for Battery {
     fn id(&self) -> &DeviceId {
         match self {
@@ -145,12 +124,9 @@ impl BatteryMonitor for Battery {
         match self {
             Battery::Zendure(client) => client.spec(),
             Battery::Virtual(battery) => battery.spec(),
-            // `RecordingBattery` is the write-only double `actuate`'s tests
-            // share (see its doc comment in `device.rs`) — it answers for a
-            // device id and records commands, and was deliberately not
-            // burdened with a spec or a read capability it does not need.
-            // This constant is never read in production; it exists only so
-            // this match is exhaustive in a test build.
+            // `RecordingBattery` is a write-only test double, deliberately not given a
+            // spec or read capability. This constant is never read in production — it
+            // exists only so this match stays exhaustive in a test build.
             #[cfg(test)]
             Battery::Recording(_) => &AC2400_PLUS,
         }
@@ -176,11 +152,9 @@ impl BatteryMonitor for Battery {
 }
 
 /// The error a `RecordingBattery` reports for either read call — reachable
-/// only if a test asks a write-only double for a reading, which none of
-/// `actuate`'s tests today do. An `Err`, not a panic: consistent with the
-/// registry's rule (see `actuate`'s "no adapter registered" arm) that a
-/// misuse this module can name stays a reported failure rather than one that
-/// takes the test binary down with it.
+/// only if a test asks a write-only double for a reading. An `Err`, not a
+/// panic: consistent with the registry's rule that a nameable misuse stays a
+/// reported failure rather than one that takes the process down.
 #[cfg(test)]
 fn unreadable(id: &DeviceId) -> PollError {
     PollError {
@@ -190,25 +164,18 @@ fn unreadable(id: &DeviceId) -> PollError {
 }
 
 /// Every battery this process drives, keyed by the id its directives carry.
-///
-/// A `BTreeMap` rather than a `Vec` for the same reason `World` keeps its
-/// devices in one: `batteries()` and `primary()` need a stable, deterministic
-/// order (the journal replays a fixed sequence, and `allocate` already relies
-/// on `World`'s id order), and a lookup by `DeviceId` should be a real lookup
-/// rather than a linear scan re-implemented at every call site.
+/// A `BTreeMap`, not a `Vec`: `batteries()`/`primary()` need the stable,
+/// deterministic order the journal replay and `allocate` rely on, and a
+/// lookup by `DeviceId` should be real, not a linear scan.
 pub struct Devices {
     batteries: BTreeMap<DeviceId, Battery>,
 }
 
 impl Devices {
-    /// Keys each battery by its own `id()`, so the registry and the adapter
-    /// can never disagree about which slot it lives in.
-    ///
-    /// Qualified as `BatteryController::id` rather than `battery.id()`: with
-    /// both `BatteryController` and `BatteryMonitor` in scope in this module,
-    /// plain method-call syntax on a bare `Battery` is ambiguous — either
-    /// trait's `id` would do, and picking one here is arbitrary but has to be
-    /// written down.
+    /// Keys each battery by its own `id()`, so the registry and adapter can
+    /// never disagree about which slot it lives in. Qualified as
+    /// `BatteryController::id`, not `battery.id()`: with both `BatteryController`
+    /// and `BatteryMonitor` in scope, plain method syntax is ambiguous.
     pub fn new(batteries: impl IntoIterator<Item = Battery>) -> Self {
         Devices {
             batteries: batteries
@@ -225,39 +192,29 @@ impl Devices {
         self.batteries.get(id)
     }
 
-    /// Every registered battery, in id order. `allocate` still walks `World`
-    /// to decide which devices get a directive, not this — so nothing calls
-    /// this yet, the same way `World::batteries` sat unused for one commit
-    /// before `allocate` existed. Part of the registry's surface regardless:
-    /// a `Devices` with no way to iterate every device it holds would not be
-    /// a registry.
+    /// Every registered battery, in id order. Nothing calls this yet — `allocate`
+    /// still walks `World` to decide which devices get a directive — but a
+    /// `Devices` with no way to iterate every device it holds would not be a
+    /// registry.
     #[allow(dead_code)]
     pub fn batteries(&self) -> impl Iterator<Item = (&DeviceId, &Battery)> {
         self.batteries.iter()
     }
 
-    /// The lowest id, mirroring `World::battery` so the registry and the
-    /// world agree on which box is primary. `allocate` sizes a whole-house
-    /// setpoint against `world.batteries().next()`; if this ever picked a
-    /// different device the setpoint would be sized against one box and
-    /// delivered to another.
+    /// The lowest id, mirroring `World::battery` so the registry and world agree
+    /// on which box is primary. `allocate` sizes a whole-house setpoint against
+    /// `world.batteries().next()` — if this ever disagreed, the setpoint would
+    /// be sized against one box and delivered to another.
     pub fn primary(&self) -> Option<(&DeviceId, &Battery)> {
         self.batteries.iter().next()
     }
 }
 
-/// Apply every directive, in order, reporting each.
-///
-/// A failure does not stop the rest: one unreachable box must not leave the
-/// others uncommanded.
-///
-/// Sequential rather than concurrent, because commands in one step can depend
-/// on each other's order — "stop the car charger, then start charging the
-/// battery" must not overlap on a supply that cannot carry both.
-///
-/// The directive's address picks the adapter through `Devices::battery`.
-/// `Outcome.device` is journalled, so a line reading
-/// `{"device":"battery-b","outcome":"ok"}` has to mean that box was written to.
+/// Applies every directive in order, reporting each; a failure doesn't stop
+/// the rest. Sequential, not concurrent — commands in one step can depend on
+/// order (stop the car charger, then start the battery, must not overlap on
+/// one supply). `Outcome.device` is journalled, so a line naming a device means that
+/// box was actually written to.
 pub async fn actuate(
     devices: &Devices,
     directives: &[Directive],
@@ -275,11 +232,10 @@ pub async fn actuate(
                     tracing::error!("Failed to apply {what} to battery {device}: {e}");
                     e
                 }),
-                // Unroutable, not applied: an allocation named a device this
-                // registry does not hold. Reported as a failed outcome — so
-                // the journal shows the command never landed and the
-                // caller's status goes degraded — rather than dropped
-                // silently or sent to whoever happens to be the primary.
+                // Unroutable: an allocation named a device this registry does not hold.
+                // Reported as a failed outcome, so the journal shows the command never
+                // landed and the caller's status goes degraded — rather than dropped
+                // silently or sent to whoever happens to be primary.
                 None => {
                     tracing::error!(
                         "Cannot apply {what} to {device}: no adapter registered for that device",

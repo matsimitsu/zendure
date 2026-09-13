@@ -48,13 +48,11 @@ pub struct ShellyReading {
     pub c_current: f64,
 }
 
-/// Which Shelly Pro 3EM phase the solar inverter (e.g. Huawei Sun2000) feeds
-/// into. Solar production is read as the export on that single phase, since the
-/// meter's total nets solar export against loads on the other phases.
-///
-/// It lives with the adapter rather than with `Config` because A/B/C is a fact
-/// about this meter, not about the controller: a single-phase P1 meter has no
-/// such knob to configure.
+/// Which Shelly Pro 3EM phase the solar inverter feeds into. Production is
+/// read as the export on that single phase, since the meter's total nets
+/// solar export against loads on other phases. Lives with the adapter, not
+/// `Config`, since A/B/C is a fact about this meter — a single-phase P1 meter has no
+/// such knob.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum SolarPhase {
     A,
@@ -63,12 +61,9 @@ pub enum SolarPhase {
 }
 
 impl SolarPhase {
-    /// The one gate. Case-insensitive and trimming, because the value is typed
-    /// by a person into a configuration file.
-    ///
-    /// The message names what is wrong, not where it was read from: the caller
-    /// knows whether it was an environment variable or a TOML key, and this
-    /// does not.
+    /// The one gate: case-insensitive and trimming, since a person types this
+    /// into a config file. The error names what is wrong, not where it was read from —
+    /// the caller knows whether it came from an env var or a TOML key.
     pub(crate) fn parse(s: &str) -> Result<Self, String> {
         match s.trim().to_ascii_uppercase().as_str() {
             "A" => Ok(SolarPhase::A),

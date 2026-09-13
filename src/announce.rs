@@ -1,13 +1,10 @@
 //! What Home Assistant has already been told about, on this connection.
 //!
-//! Home Assistant learns about a sensor from a retained discovery document, and
-//! needs it again whenever the broker's retained store is lost. So the rule is
-//! "announce until it sticks, once per connection" — and that is a fact about
-//! Home Assistant, not about MQTT.
-//!
-//! Tracking *ids* rather than payloads is what makes the retry cheap: the
-//! caller hands over a closure, so a document that is already announced is
-//! never built.
+//! Home Assistant needs a retained discovery document again whenever the
+//! broker's retained store is lost, so the rule is "announce until it sticks,
+//! once per connection" — a fact about Home Assistant, not MQTT. Tracking ids
+//! rather than payloads means a caller's closure is never built once its id is already
+//! announced.
 
 use std::collections::HashSet;
 
@@ -24,35 +21,27 @@ impl Announcer {
         Announcer::default()
     }
 
-    /// Forget everything, because the broker may have forgotten it too.
-    ///
-    /// Called on every ConnAck: a broker that restarted may have lost its
-    /// retained store, and a broker we reconnected to may not be the same
-    /// broker. Re-announcing costs a few retained publishes; failing to
-    /// re-announce means every entity silently disappears from Home Assistant
-    /// until someone restarts the controller.
+    /// Forget everything, since the broker may have too. Called on every
+    /// ConnAck: a restarted or swapped broker may have lost its retained
+    /// store. Re-announcing costs a few retained publishes; skipping it means every
+    /// entity silently disappears from Home Assistant until a restart.
     pub fn reset(&self) {
         guard(&self.announced).clear();
     }
 
-    /// Announce `id` unless it is already announced on this connection.
-    ///
-    /// Marked on acceptance, never on attempt. A document the sink refused has
-    /// not reached the broker, and marking it here would suppress every retry
-    /// for the life of the connection — the sensor missing from Home Assistant
-    /// with nothing in the log to say why. Because callers re-offer on every
-    /// poll and every MQTT event, a refused document simply lands on the next
-    /// one.
+    /// Announce `id` unless already announced on this connection. Marked on
+    /// acceptance, never on attempt: a refused document hasn't reached the
+    /// broker, and marking it here would silently suppress every retry for
+    /// the connection's life. Callers re-offer on every poll and MQTT event, so a
+    /// refused document lands on the next one.
     pub fn announce(&self, publisher: &dyn Publisher, id: &str, build: impl FnOnce() -> Message) {
         if guard(&self.announced).contains(id) {
             return;
         }
-        // The lock is dropped between the check and the insert, so a `reset` on
-        // the subscriber task can land in between and be undone by the insert
-        // below. Benign, and not worth holding a lock across a publish for: the
-        // message went into the publisher's own queue, which survives the
-        // reconnect, and anything already handed to rumqttc is replayed from
-        // its `pending` list. The record stays accurate either way.
+        // The lock is dropped between check and insert, so a `reset` from the
+        // subscriber task can land in between and be undone by the insert below —
+        // benign, since the message is already in the publisher's own queue
+        // (survives reconnect) or replayed from rumqttc's `pending` list.
         if publisher.publish(build()) == Accepted::Queued {
             guard(&self.announced).insert(id.to_string());
         }
@@ -118,11 +107,9 @@ mod tests {
         assert_eq!(built, 1);
     }
 
-    /// A document the sink refused has not reached the broker.
-    ///
-    /// Marking on attempt would suppress every retry for the life of the
-    /// connection, which is a sensor missing from Home Assistant with nothing
-    /// in the log to say why.
+    /// A document the sink refused has not reached the broker; marking on
+    /// attempt would suppress every retry for the connection's life, leaving a sensor
+    /// missing from Home Assistant with nothing in the log to say why.
     #[test]
     fn a_refused_document_is_offered_again() {
         let p = RecordingPublisher::refusing();

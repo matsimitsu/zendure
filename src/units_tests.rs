@@ -9,10 +9,9 @@ use std::time::Duration;
 use super::*;
 
 // --- Display forwards the caller's format spec ----------------------------
-//
-// The failure this guards is silent: a hand-written `write!(f, "{}", self.0)`
-// drops `f.precision()`, and `format!("{v:.1}")` in `publish_rte` starts
-// emitting 85.23456789 instead of 85.2 with nothing to notice it.
+// A hand-written `write!(f, "{}", self.0)` drops `f.precision()`, so
+// `format!("{v:.1}")` in `publish_rte` would silently emit 85.23456789
+// instead of 85.2.
 
 #[test]
 fn float_display_honors_precision() {
@@ -368,11 +367,10 @@ fn battery_power_sums_over_a_fleet() {
     assert_eq!(extreme, BatteryPower(i32::MAX));
 }
 
-/// Zero and negative are rejected, not clamped.
-///
-/// This is the bug the type exists for. `prune` deletes rows older than
-/// `now - days`; with a negative count that cutoff is in the *future*, so the
-/// "prune" deletes the entire journal and logs it as a success.
+/// Zero and negative are rejected, not clamped: this is the bug the type
+/// exists for. `prune` deletes rows older than `now - days`; a negative count
+/// puts the cutoff in the *future*, so "prune" deletes the entire journal and logs it
+/// as a success.
 #[test]
 fn retention_rejects_windows_that_would_delete_the_present() {
     for bad in [0, -1, -5, i64::MIN] {
@@ -410,13 +408,11 @@ fn retention_cutoff_is_the_window_behind_now() {
     assert_eq!(cutoff, Timestamp::from_millis(expected.timestamp_millis()));
 }
 
-/// Reading a value back has to enforce the same invariant constructing it does.
-///
-/// `#[serde(transparent)]` derives both halves and the derived `Deserialize`
-/// writes the field directly, so every clamp is bypassed when deserialized from
-/// external sources like `replay --set` and hand-edited fixtures. With
-/// `min_soc=1000` (the device's format) as example, it becomes `Soc(1000)`,
-/// against which `soc > min_soc` is never true.
+/// Reading a value back must enforce the same invariant constructing it does:
+/// a derived `Deserialize` writes the field directly, bypassing every clamp
+/// for external sources like `replay --set` or hand-edited fixtures. E.g.
+/// `min_soc=1000` (the device's format) becomes `Soc(1000)`, against which `soc >
+/// min_soc` is never true.
 #[test]
 fn clamping_newtypes_clamp_on_the_way_in_too() {
     assert_eq!(serde_json::from_str::<Soc>("1000").unwrap(), Soc::new(1000));

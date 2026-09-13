@@ -15,15 +15,11 @@ fn ha_device() -> serde_json::Value {
     })
 }
 
-/// One sensor, and the only place its id is spelled.
-///
-/// The id is needed twice by nature: once in the discovery document that tells
-/// Home Assistant which topic to watch, and once in the publish that puts a
-/// value on that topic. Spelling it twice made a typo silent in both
-/// directions — an entity that never receives a value, or a value nothing
-/// subscribes to — and the announce-once map keys on the same string, so a
-/// mismatch would also quietly defeat that. With one constant per sensor a
-/// mismatch does not compile.
+/// One sensor, and the only place its id is spelled: needed both in the
+/// discovery document (which topic to watch) and the publish (which topic
+/// gets the value), and the announce-once map keys on the same string — a
+/// mismatch between them would be silent. One constant per sensor makes a mismatch fail
+/// to compile instead.
 struct Sensor {
     id: &'static str,
     name: &'static str,
@@ -52,11 +48,9 @@ impl Sensor {
     }
 }
 
-/// The document itself, for the sensors whose id is only known at runtime.
-///
-/// Pack temperatures cannot be table entries — the pack count comes from a poll
-/// — so the table's rows delegate here rather than the dynamic case
-/// duplicating the shape.
+/// The document itself, for sensors whose id is only known at runtime (pack
+/// temperatures: the pack count comes from a poll). The table's static rows delegate
+/// here rather than duplicating the shape.
 fn sensor_discovery(
     prefix: &str,
     id: &str,
@@ -501,12 +495,10 @@ mod tests {
         assert_eq!(doc["state_class"], "measurement");
     }
 
-    /// Every announced sensor gets values, and every value has a sensor.
-    ///
-    /// The ids are constants now, so a typo will not compile — but a sensor
-    /// added to the table and never published, or published and never
-    /// announced, still compiles fine. Both are silent in production: an entity
-    /// that sits at "unknown" for ever, or a topic nothing subscribes to.
+    /// Every announced sensor gets values, and every value has a sensor. Ids
+    /// are constants, so a typo won't compile — but a sensor added to the
+    /// table and never published, or published and never announced, still compiles
+    /// fine: an entity stuck at "unknown" forever, or a topic nothing subscribes to.
     #[test]
     fn every_announced_sensor_is_published_and_the_reverse() {
         let announced = RecordingPublisher::new();

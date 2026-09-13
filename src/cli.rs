@@ -1,15 +1,12 @@
 //! What the binary was asked to do.
 //!
 //! Parsing only — no I/O, no `std::env`, so the whole surface is testable
-//! against an argument vector. Hand-rolled rather than pulled from a crate:
-//! there are two subcommands and eight flags, and the one thing that has to
-//! be exactly right is that **no arguments still starts the daemon**,
+//! against an argument vector. No arguments must always start the daemon,
 //! unchanged, since that is how systemd invokes it.
 //!
-//! The offline subcommands are parsed *before* any configuration is read, so
-//! `export` and `replay` run on a laptop with no broker. That is also why
-//! [`Invocation::Export`] and [`Invocation::Replay`] carry no config field —
-//! there is none to read even by accident, so `--config` is rejected on both
+//! The offline subcommands parse *before* any configuration is read, so
+//! `export`/`replay` run on a laptop with no broker; [`Invocation::Export`] and
+//! [`Invocation::Replay`] carry no config field, so `--config` is rejected on both
 //! structurally rather than by a check someone has to remember.
 
 use std::path::PathBuf;
@@ -85,13 +82,11 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Invocation, Stri
         "-h" | "--help" | "help" => Ok(Invocation::Help),
         "export" => parse_export(args),
         "replay" => parse_replay(args),
-        // Anything else that looks like a flag is a daemon argument — there
-        // is no explicit `daemon` subcommand to type, so `--config` or
-        // `--check` showing up first is what "no arguments, but configured"
-        // looks like. Anything that is not one of the two flags below still
-        // falls through to `parse_daemon`'s own catch-all, which reports it
-        // the same way `parse_export`/`parse_replay` report an argument they
-        // do not recognise.
+        // Anything else that looks like a flag is a daemon argument: there is
+        // no explicit `daemon` subcommand, so `--config`/`--check` showing up
+        // first is "no arguments, but configured". Anything else falls
+        // through to `parse_daemon`'s own catch-all, reported the same way as an
+        // unrecognised `parse_export`/`parse_replay` argument.
         "--config" | "--check" => parse_daemon(std::iter::once(first).chain(args)),
         other => Err(format!("unknown command `{other}`\n\n{HELP}")),
     }
@@ -170,11 +165,10 @@ fn parse_replay<I: Iterator<Item = String>>(mut args: I) -> Result<Invocation, S
         }
     }
 
-    // Rejected here rather than warned about later: `--verify` asks whether the
-    // engine still decides what it decided, and `--set` changes what it is
-    // deciding with, so together they compare two different controllers and the
-    // answer is "they differ" almost by construction. It is an argument
-    // combination, and every other argument error already lives in this file.
+    // Rejected here, not warned about later: `--verify` asks whether the
+    // engine still decides what it decided, but `--set` changes what it's
+    // deciding with, so together they'd compare two different controllers and answer
+    // "they differ" almost by construction.
     if verify && !overrides.is_empty() {
         return Err(
             "replay: --verify compares a replay against what was recorded, so it cannot be \
@@ -194,12 +188,10 @@ fn value<I: Iterator<Item = String>>(args: &mut I, flag: &str) -> Result<String,
     args.next().ok_or_else(|| format!("{flag} wants a value"))
 }
 
-/// Unix milliseconds or RFC 3339.
-///
-/// Both, because the two callers are different people: a timestamp copied out
-/// of the journal is milliseconds, and a time remembered from a log line is a
-/// date. Digits are unambiguous — no RFC 3339 instant is all digits — so the
-/// two can share one argument without a flag to say which.
+/// Unix milliseconds or RFC 3339: a timestamp copied from the journal is
+/// milliseconds, one remembered from a log line is a date. Digits are
+/// unambiguous — no RFC 3339 instant is all digits — so both can share one argument
+/// without a flag to say which.
 fn instant(raw: &str) -> Result<Timestamp, String> {
     if raw.is_empty() {
         return Err("a timestamp is required, as unix milliseconds or RFC 3339".to_string());

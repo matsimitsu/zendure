@@ -1,32 +1,21 @@
-//! Turning one objective decision into per-device commands.
+//! Turning one objective decision into per-device commands: the objective
+//! decides *what* the house should do, allocation decides *which box* does
+//! it. Keeping them apart means a second battery or a competing car charger
+//! is a change to this file alone.
 //!
-//! The objective decides *what the house should do* — charge at 1200 W, stand
-//! down, hold. Allocation decides *which box does it*. Keeping the two apart is
-//! what lets a second battery, or a car charger competing for the same surplus,
-//! arrive as a change to this file and nothing else: the controller keeps
-//! answering one question about the house, and `main.rs` keeps actuating a list
-//! it does not interpret.
-//!
-//! Today the list is always one element long, because exactly one device is
-//! registered. It is still a list, and still built by walking the world, so no
-//! caller decides on its own that one element is all there can be.
+//! The list is always one element today, because exactly one device is
+//! registered — but it's built by walking the world, not hardcoded, so no
+//! caller assumes that's permanent.
 
 use crate::command::Command;
 use crate::models::ControlDecision;
 use crate::world::{DeviceId, World};
 
-/// One command addressed to one device, tagged by device class.
-///
-/// A per-class enum, mirroring `Measurement` on the output side, because
-/// commands are not uniform across classes: a battery takes a power setpoint,
-/// a charger takes a current plus an enable that is emphatically not
-/// "set current to zero". A single flat command type would either grow charger
-/// variants that `ZendureClient` has to match and reject, or force a lossy
-/// common denominator.
-///
-/// The id rides on the variant rather than inside `Command`: `Command`'s
-/// `Display` is the wire format the journal quotes and `command_tests.rs`
-/// pins, and a device serial has no business in it.
+/// One command addressed to one device, tagged by device class — commands
+/// aren't uniform across classes (a battery takes a power setpoint, a
+/// charger a current plus an enable). The id rides on the variant, not
+/// inside `Command`, whose `Display` is the wire format the journal and
+/// `command_tests.rs` pin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Directive {
     Battery { device: DeviceId, command: Command },
@@ -49,34 +38,13 @@ impl Directive {
     }
 }
 
-/// Turn one objective decision into per-device commands.
-///
-/// Identity while there is one battery — but written as an iteration over the
-/// world rather than a hardcoded `vec![]`, so the dropped-command bug it
-/// replaces is structurally unrepeatable. The split rule for a second battery
-/// and the battery-vs-car ranking land here, and nowhere else knows how many
-/// devices exist.
-///
-/// Order is `World`'s device order, which is sorted by id — so a replayed
-/// journal lists the same devices in the same sequence every run, and
-/// `actuate` applies them in a sequence that is reproducible rather than
-/// whatever a hash happened to yield.
-///
-/// The two arms differ because what does not broadcast is a command's
-/// *magnitude*:
-///
-/// - `SetIdle`/`SetStandby` carry none. "Stand down" means the same thing to
-///   every box, and the MQTT failsafe is only a failsafe if it reaches all of
-///   them.
-/// - `SetCharge`/`SetDischarge` carry a whole-house figure sized against one
-///   battery's headroom, so handing it to a second box asks the house for a
-///   multiple of it. Splitting it is a policy — by headroom, fill-first,
-///   highest-SoC-first — and the wrong one silently mis-commands hardware.
-///
-/// Until that rule exists a setpoint goes to the primary battery only, and the
-/// rest are left loudly uncommanded rather than quietly over-commanded. No
-/// panic and no `debug_assert`: on the decision path of an unattended
-/// controller, a degraded fleet and an error line beat a dead process.
+/// Turns one objective decision into per-device commands, walking `World`
+/// (sorted by id, so replay/actuate order is reproducible) rather than using
+/// a hardcoded list. `SetIdle`/`SetStandby` carry no magnitude and broadcast
+/// to every device since the failsafe only works if it reaches all of them; a sized
+/// `SetCharge`/`SetDischarge` is scoped to one battery's headroom, so it goes to the
+/// primary only, leaving the rest logged as uncommanded rather than over-commanded — no
+/// panic on this decision path.
 pub fn allocate(decision: &ControlDecision, world: &World) -> Vec<Directive> {
     let command = Command::from(decision);
 

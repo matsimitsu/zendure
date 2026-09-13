@@ -93,24 +93,11 @@ pub async fn run_subscriber(
             }
         }
 
-        // Both of these are offered after *every* event, and both are
-        // non-blocking, and that is the whole point.
-        //
-        // `subscribe().await` is a send on rumqttc's 50-slot request channel,
-        // and `poll` — which this very task is inside — is the only thing that
-        // drains it. After an outage that channel is full (`clean` moves the
-        // backlog to `pending`, the delivery task immediately refills the
-        // channel, and `poll` returns `Ok(ConnAck)` on reconnect *before* any
-        // `select`), so awaiting the subscribe parked this task forever on a
-        // queue only it could drain. No meter readings ever again, no exit, and
-        // no restart — the controller would sit re-asserting failsafe idle for
-        // good while looking perfectly healthy.
-        //
-        // `try_subscribe` cannot park. Every `poll` above drains one request,
-        // so a slot frees within a few iterations and the retry lands. Setting
-        // the channel capacity to 0, which rumqttc's own docs suggest, would be
-        // worse here: at 0 the send blocks until `poll` receives it, and we are
-        // inside `poll`'s caller, so it would deadlock on every connect.
+        // Both offered after every event, non-blocking. Awaiting `subscribe()`
+        // sends on rumqttc's 50-slot request channel, drained only by this
+        // task's own `poll`, so after an outage it parks this task forever.
+        // `try_subscribe` can't park; rumqttc's own capacity-0 advice would deadlock
+        // every connect instead, since we're inside poll's caller.
         if !subscribed {
             match client.try_subscribe(&shelly_topic, QoS::AtMostOnce) {
                 Ok(()) => subscribed = true,

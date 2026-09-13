@@ -5,17 +5,11 @@ use crate::fixtures::journey;
 use crate::journal::read;
 use crate::world::DeviceId;
 
-/// The fixture checked in at `tests/fixtures/journey.json`.
-///
-/// Strictly a **format** pin: a fixture exported by an older build has to stay
-/// readable, so renaming a field of `EngineState`, `SessionConfig`, `Event` or
-/// anything they contain fails here. Deliberately *not* a behaviour pin —
-/// `a_recording_replays_to_the_commands_it_recorded` owns that, records and
-/// replays in one process and so can never go stale, whereas a golden that
-/// pinned behaviour would fail on any deliberate change with "regenerate me" as
-/// the documented fix, which erases the signal it just gave.
-///
-/// Regenerate with `cargo test regenerate_the_checked_in_fixture -- --ignored`.
+/// The fixture checked in at `tests/fixtures/journey.json`: strictly a
+/// **format** pin — renaming a field of `EngineState`, `SessionConfig`,
+/// `Event` or anything they contain fails here. Not a behaviour pin (that's
+/// `a_recording_replays_to_the_commands_it_recorded`, which can't go stale). Regenerate
+/// with `cargo test regenerate_the_checked_in_fixture -- --ignored`.
 const CHECKED_IN: &str = include_str!("../tests/fixtures/journey.json");
 
 fn config() -> SessionConfig {
@@ -155,20 +149,20 @@ async fn a_recording_replays_to_the_commands_it_recorded() {
     );
 }
 
-/// The anti-vacuity guard. It is *not* redundant with
-/// `engine.rs`'s `the_same_journey_diverges_without_the_snapshot`: that one
-/// proves `EngineState` carries enough to resume, this one proves `run`
-/// actually consults `fixture.seed`. A `run` that ignored the seed entirely
-/// would pass every other test in this file.
+/// The anti-vacuity guard: not redundant with `engine.rs`'s
+/// `the_same_journey_diverges_without_the_snapshot`, which proves
+/// `EngineState` carries enough to resume — this proves `run` actually consults
+/// `fixture.seed`, which a `run` ignoring the seed would otherwise still pass every
+/// other test in this file without doing.
 #[tokio::test]
 async fn a_fixture_seeded_from_a_fresh_engine_replays_differently() {
     let dir = tempfile::tempdir().unwrap();
 
-    // Export only the tail, so the seed carries history a fresh engine could
-    // not have. The tail opens on a discharge-shaped reading, which is the
-    // sharpest case: a controller that just started holds `last_idle_start`, so
-    // `min_idle_before_discharge` suppresses it to idle, while one that was
-    // already charging is free to turn around.
+    // Export only the tail, so the seed carries history a fresh engine
+    // couldn't have. The tail opens on a discharge-shaped reading, the
+    // sharpest case: a just-started controller holds `last_idle_start`, so
+    // `min_idle_before_discharge` suppresses it to idle, while one already charging is
+    // free to turn around.
     let events = journey::session();
     let fixture = recorded_fixture(&dir, events[2].at(), end()).await;
 
@@ -275,11 +269,9 @@ fn an_override_of_the_wrong_type_is_refused() {
 }
 
 /// A value the knob's type *can* hold but its domain cannot is clamped by the
-/// constructor, not waved through.
-///
-/// `min_soc = Soc(1000)` makes `soc > min_soc` false forever, so a replay
-/// answering "why did it never discharge?" would answer about a controller that
-/// cannot exist — the constructor clamps out-of-range values instead.
+/// constructor, not waved through. `min_soc = Soc(1000)` would make `soc >
+/// min_soc` false forever, so a replay answering "why did it never discharge?" would
+/// answer about a controller that cannot exist.
 #[test]
 fn an_override_outside_a_knobs_domain_is_clamped_by_its_constructor() {
     let clamped = apply_overrides(&config(), &[("min_soc".into(), "1000".into())]).unwrap();

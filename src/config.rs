@@ -17,20 +17,13 @@ use crate::units::{
 
 /// Where the journal lives unless `JOURNAL_PATH` says otherwise.
 ///
-/// Named so the daemon's default and `export --db`'s default are one string
-/// rather than two copies that drift. It is *only* a default, not the effective
-/// path: `export` reads no environment at all — that is what makes a fixture
-/// reproducible from a copied database — so a deployment that sets
-/// `JOURNAL_PATH` has to pass `--db` as well. The alternative, having the tool
-/// read one variable, would make "reads no configuration" a claim with an
-/// exception in it.
+/// Only a default, not the effective path: `export` reads no environment at
+/// all, so a deployment that sets `JOURNAL_PATH` must pass `--db` too.
 pub const DEFAULT_JOURNAL_PATH: &str = "/var/lib/zendure/journal.db";
 
-/// Where the rolling round-trip-efficiency window is persisted.
-///
-/// Under `/var/lib` rather than `/tmp` because the window is 24 hours long and
-/// `/tmp` is cleared on boot, which silently rebuilt it from scratch on every
-/// restart.
+/// Where the rolling round-trip-efficiency window is persisted. Not `/tmp`:
+/// the window is 24 hours long and `/tmp` clears on boot, which would
+/// silently rebuild it from scratch every restart.
 pub const DEFAULT_RTE_STATE_PATH: &str = "/var/lib/zendure/rte_state.json";
 
 /// Where `--config` reads from unless told otherwise.
@@ -56,12 +49,8 @@ fn parse_weekday(s: &str) -> Result<Weekday, String> {
 
 /// `[clock] timezone`, wrapping `chrono_tz::Tz`.
 ///
-/// Hand-written rather than routed through `chrono-tz`'s own `serde` feature:
-/// that feature's error is just "not a valid timezone", and drops the "e.g.
-/// Europe/Amsterdam" half that tells an operator what to write instead.
-/// `TIMEZONE` has given that hint since the environment-variable days; a
-/// configuration file deserves the same one, not a stricter, less helpful
-/// gate that happens to live in a different crate.
+/// Hand-written so the error names an example (`e.g. Europe/Amsterdam`);
+/// `chrono-tz`'s own `serde` feature says only "not a valid timezone".
 #[derive(Debug, Clone, Copy)]
 struct TimezoneName(Tz);
 
@@ -77,10 +66,8 @@ impl<'de> Deserialize<'de> for TimezoneName {
 }
 
 /// `[tuning] balance_weekday`. `"none"`, `"off"` or `""` (case-insensitive,
-/// trimmed) disable the periodic cell-balancing full charge; anything else is
-/// read as a weekday through the same [`parse_weekday`] `BALANCE_WEEKDAY` has
-/// always used, so a configuration file and an environment variable accept
-/// identical spellings.
+/// trimmed) disable the periodic cell-balancing full charge; anything else
+/// parses as a weekday via [`parse_weekday`].
 #[derive(Debug, Clone, Copy)]
 struct BalanceDay(Option<Weekday>);
 
@@ -97,30 +84,18 @@ impl<'de> Deserialize<'de> for BalanceDay {
     }
 }
 
-/// Consumes a parsed TOML table one key at a time.
-///
-/// Every accessor removes the key it reads, so whatever is left once every
-/// key this schema knows about has been asked for is — by construction, not
-/// by a second pass that has to remember to check — a key the schema does
-/// not recognise. [`Taker::finish`] turns what remains into warnings.
-///
-/// All three leaf accessors return `Result`, including the lenient one: a
-/// *leaf* being the wrong type can be forgiven with a default, but a
-/// *container* being the wrong type cannot, because there is nothing
-/// underneath it to fall back to. `tuning = "x"` cannot warn-and-default
-/// fourteen times over; it has to fail once, loudly, before any of those
-/// fourteen defaults are chosen.
+/// Consumes a parsed TOML table one key at a time; every accessor removes
+/// the key it reads, so whatever remains is by construction unrecognised
+/// and [`Taker::finish`] turns it into warnings. A wrong-typed *leaf* can
+/// fall back to a default, but a wrong-typed *container* has nothing underneath it to
+/// fall back to, so it must fail once, loudly, rather than warn-and-default many times
+/// over.
 struct Taker {
     root: toml::Table,
-    /// Dotted paths of every table this reader has explicitly walked
-    /// through — `"mqtt"`, `"tuning"`, and so on. `finish` uses this to tell
-    /// a specific unknown key inside a known section (`tuning.mni_soc`,
-    /// named on its own) apart from a whole section this schema never
-    /// mentions at all (`[extra_stuff]`, named once, however many keys it
-    /// holds). The two look identical once the known keys have been
-    /// drained — both are "a table with something left in it" — so nothing
-    /// short of remembering which tables were ever asked about can
-    /// distinguish them.
+    /// Dotted paths of every table this reader walked into. `finish` needs it
+    /// to tell an unknown key inside a known section (`tuning.mni_soc`) from a
+    /// section the schema never mentions (`[extra_stuff]`, named once): once
+    /// the known keys are drained both are just "a table with something left".
     known_tables: HashSet<String>,
     /// Warnings from `lenient` leaves whose value was present but the wrong
     /// shape. `finish` appends the unknown-key warnings to these and hands
@@ -137,12 +112,9 @@ impl Taker {
         }
     }
 
-    /// Removes and returns the value at `path`, or `None` if any segment of
-    /// it is simply absent — an ordinary, unremarkable case for every
-    /// caller. Descending through a value that *is* present but is not a
-    /// table is the one error every caller shares, so it is handled once
-    /// here rather than three times over in `required`, `optional` and
-    /// `lenient`.
+    /// Removes and returns the value at `path`, or `None` if any segment is
+    /// absent. Descending through a present-but-not-a-table value is the one
+    /// error every caller shares, so it is handled here rather than in each.
     fn take(&mut self, path: &str) -> Result<Option<toml::Value>, String> {
         let mut segments = path.split('.');
         let leaf = segments.next_back().expect("path is never empty");
@@ -178,11 +150,10 @@ impl Taker {
         }
     }
 
-    /// A connection setting with a default the caller applies itself (e.g.
-    /// `.unwrap_or(1883)`). Absence is fine — that is what the default is
-    /// for — but a value that is *present* and the wrong type is still
-    /// fatal: `port = "1883"` is a typo worth stopping for, not a tuning
-    /// knob worth guessing past.
+    /// A connection setting with a caller-applied default (e.g.
+    /// `.unwrap_or(1883)`). Absence takes the default, but a value that is
+    /// *present* and the wrong type is still fatal: `port = "1883"` is a
+    /// typo worth stopping for, not a knob worth guessing past.
     fn optional<T: DeserializeOwned>(&mut self, path: &str) -> Result<Option<T>, String> {
         match self.take(path)? {
             None => Ok(None),
@@ -194,21 +165,10 @@ impl Taker {
     }
 
     /// A tuning knob: absent or wrong-shaped, `default` is used and the
-    /// caller finds out why via the returned warnings rather than a startup
-    /// failure. Getting one of these wrong means the controller decides
-    /// slightly differently; it must never be the reason the controller
-    /// stops running.
-    ///
-    /// **Warning and falling back rather than failing is deliberate, not
-    /// laziness.** `Config` is read at process startup, and systemd restarts
-    /// this service on failure — so parsing a knob strictly would put a typo
-    /// on the path that exits `main`, and the daemon would restart-loop while
-    /// the battery held whatever command it last received. Loud and running
-    /// beats silent and stopped. `journal.retention_days` is the sharpest
-    /// example: a bad value there is a *logging* concern, and `journal.rs`
-    /// holds the line that a logging failure must never become a control
-    /// failure — an unusable journal path already degrades to "no journal"
-    /// for exactly this reason.
+    /// caller finds out via the returned warnings. Warning rather than
+    /// failing is deliberate: `Config` is read at startup and systemd
+    /// restarts a failed unit, so a strict parse would restart-loop the daemon while
+    /// the battery held its last command.
     fn lenient<T: DeserializeOwned + std::fmt::Debug>(
         &mut self,
         path: &str,
@@ -233,21 +193,11 @@ impl Taker {
         }
     }
 
-    /// Whether a top-level table is present at all, without removing
-    /// anything from it — a presence check that runs *before* any field of
-    /// that table is read.
-    ///
-    /// `mqtt`, `shelly` and `meter` each need this: their presence, not a
-    /// flag inside them, is what selects a backend (a real broker, a real
-    /// Shelly, a synthetic house). `known_tables` (below) is a different
-    /// thing — a record of tables this reader has already walked *into* via
-    /// `take` — and cannot answer "is the table there at all" for one that
-    /// turns out to be entirely absent, which is exactly the case this exists
-    /// to distinguish from "present but empty."
-    ///
-    /// A key that is present but not a table is fatal, the same rule `take`
-    /// enforces for a nested path: `mqtt = "x"` is the "table that is not a
-    /// table" case `config.example.toml`'s header already names.
+    /// Whether a top-level table is present, without removing anything from
+    /// it, checked *before* any field in it is read. `mqtt`, `shelly` and
+    /// `meter` need this: their presence, not a flag inside them, selects a
+    /// backend, and `known_tables` (which only records tables walked *into*) can't
+    /// answer that for an absent one. A present-but-not-a-table key is still fatal.
     fn has_table(&self, name: &str) -> Result<bool, String> {
         match self.root.get(name) {
             None => Ok(false),
@@ -256,17 +206,11 @@ impl Taker {
         }
     }
 
-    /// Turns whatever is left after every known key has been taken into one
-    /// warning per surviving leaf, and returns them alongside every warning
-    /// `lenient` already collected.
-    ///
-    /// A table this reader walked through (`known_tables`) recurses, so a
-    /// leftover key inside it is named on its own (`tuning.mni_soc`). A
-    /// table it never touched at all does not recurse — it is named once,
-    /// at its own path, with nothing underneath it examined. A fully-drained
-    /// known table recurses into nothing and produces no warning at all,
-    /// which is what makes a config with every key spelled correctly
-    /// perfectly silent.
+    /// Turns whatever is left after every known key is taken into one
+    /// warning per surviving leaf, alongside every warning `lenient` already
+    /// collected. A table walked into recurses, naming a leftover key inside
+    /// it (`tuning.mni_soc`); an untouched table is named once at its own path, and a
+    /// fully-drained known table warns about nothing.
     fn finish(self) -> Vec<String> {
         fn walk(
             table: toml::Table,
@@ -299,14 +243,9 @@ impl Taker {
     }
 }
 
-/// A single battery, as `[[device]]` describes it — before it becomes a live
-/// adapter. `registry::from_config` is the only place this turns into a
-/// [`crate::registry::Battery`]; every field here is exactly what that one
-/// conversion needs and nothing this file itself acts on.
-///
-/// Only two kinds exist, and the array this comes from is still checked for
-/// exactly one entry (see [`take_device`]) — a device *list* is a later
-/// commit's job, this one only ever hands back one battery.
+/// A single battery, as `[[device]]` describes it. `registry::from_config` is
+/// the only place this becomes a [`crate::registry::Battery`]. Two kinds exist,
+/// and the array is checked for exactly one entry (see [`take_device`]).
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeviceConfig {
     Zendure {
@@ -315,10 +254,10 @@ pub enum DeviceConfig {
         poll_interval: Duration,
     },
     /// `simulation::VirtualBattery`'s constructor, minus the rated
-    /// [`crate::device::BatterySpec`] — a virtual device always simulates the
-    /// one real model this crate knows about (`AC2400_PLUS`), the same way a
-    /// `DeviceConfig::Zendure` never lets a config file pick a different
-    /// rating for hardware whose rating is a fact, not a setting.
+    /// [`crate::device::BatterySpec`]: a virtual device always simulates the
+    /// one model this crate knows (`AC2400_PLUS`), the same way `Zendure`
+    /// never lets a config file pick a rating — hardware rating is a fact, not a
+    /// setting.
     Virtual {
         id: String,
         packs: Vec<WattHours>,
@@ -338,11 +277,10 @@ impl DeviceConfig {
         }
     }
 
-    /// How often `run.rs`'s poll timer fires. A `Virtual` device has no
-    /// `poll_interval_secs` field to read — there is no network round trip to
-    /// pace, only an in-process model — so this hands back a fixed cadence
-    /// close to a real Zendure's rather than inventing a config key nothing
-    /// needs to tune yet.
+    /// How often `run.rs`'s poll timer fires. `Virtual` has no
+    /// `poll_interval_secs` to read — no network round trip to pace, only
+    /// an in-process model — so this returns a fixed cadence close to a real Zendure's
+    /// instead of a config key nothing needs yet.
     pub fn poll_interval(&self) -> Duration {
         match self {
             DeviceConfig::Zendure { poll_interval, .. } => *poll_interval,
@@ -397,16 +335,10 @@ pub struct WebConfig {
     pub port: u16,
 }
 
-/// Which meter feeds the engine its grid readings.
-///
-/// Defaults to `Shelly` — today's only real meter, and the one every
-/// deployed config still describes by leaving `[meter]` out entirely, per
-/// `config.example.toml`'s own comment. `Synthetic` is what
-/// `config.example.virtual.toml` selects instead, so a laptop with no Shelly
-/// and no broker in sight can still feed the engine something to decide
-/// against — see `source::synthetic`'s module doc comment for why a naive
-/// synthetic feed (one that never reads the battery's own flow back) would
-/// prove nothing.
+/// Which meter feeds the engine its grid readings. Defaults to `Shelly`,
+/// selected by leaving `[meter]` out. `Synthetic` lets a laptop with no
+/// broker feed the engine — see `source::synthetic` for why the battery's own flow must
+/// feed back.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MeterConfig {
     Shelly,
@@ -414,17 +346,10 @@ pub enum MeterConfig {
 }
 
 /// Pulls the required `[[device]]` array out of the root table before
-/// `Taker` ever sees it.
-///
-/// An array of tables does not fit the dotted-path model the rest of this
-/// file uses, and there would be no lenient path to share with it anyway:
-/// every field here is fatal, per the failure policy `config.example.toml`
-/// states — a device that cannot be reached is the "cannot talk at all"
-/// case, not the "decides slightly differently" one.
-///
-/// `kind = "zendure"` or `kind = "virtual"` is accepted, and only one entry.
-/// A device *list* on `Config` is a later commit's job; this one only has one
-/// battery to hand back.
+/// `Taker` ever sees it: an array of tables doesn't fit the dotted-path
+/// model, and every field here is fatal anyway — an unreachable device is
+/// "cannot talk at all", not "decides slightly differently". Exactly one entry, `kind =
+/// "zendure"` or `"virtual"`.
 fn take_device(root: &mut toml::Table) -> Result<DeviceConfig, String> {
     let value = root
         .remove("device")
@@ -622,7 +547,8 @@ pub struct Config {
     /// skipped, so large loads (e.g. EV charging) pull from grid+solar instead
     /// of draining the home battery. 0 disables the guard (default).
     pub solar_discharge_block_threshold: SolarPower,
-    /// Minimum idle duration before discharge is allowed (prevents charge→discharge oscillation)
+    /// Minimum idle duration before discharge is allowed (prevents charge→discharge
+    /// oscillation)
     pub min_idle_before_discharge: Duration,
     /// IANA timezone (e.g. Europe/Amsterdam)
     pub timezone: Tz,
@@ -682,18 +608,10 @@ impl std::fmt::Debug for Config {
 }
 
 /// The decision-relevant half of [`Config`], recorded once per session so a
-/// replay knows what tuning produced a row.
-///
-/// Built by hand rather than derived on `Config`, and that is the point:
-/// connection settings are not decision inputs, so a fixture carrying them
-/// would be neither hermetic nor safe to pass around. Durations are whole
-/// seconds because `Duration`'s own serde emits `{"secs":_,"nanos":_}`, which
-/// reads badly next to every other bare number in the journal.
-///
-/// These fourteen field names are also, verbatim, `config.example.toml`'s
-/// `[tuning]` table — a test asserts the two key sets are equal, so a name
-/// cannot drift between "what a replay can `--set`" and "what a config file
-/// can spell".
+/// replay knows the tuning that produced it. Connection settings are
+/// excluded to keep a fixture hermetic; durations are whole seconds rather
+/// than `Duration`'s own `{"secs":_,"nanos":_}` serde. These field names match
+/// `config.example.toml`'s `[tuning]` table verbatim, checked equal by a test.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionConfig {
     pub charge_margin: PowerMargin,
@@ -713,14 +631,11 @@ pub struct SessionConfig {
 }
 
 impl SessionConfig {
-    /// The permissive tuning tests decide under: no decision-interval cooldown,
-    /// generous margins, no balance day.
-    ///
-    /// One list, shared by `Controller::test_default` and by any test that
-    /// needs a fixture's `session.config` — which is the point. A replay is
-    /// only a fair comparison if it runs the same knobs the recording did, and
-    /// two hand-written copies of fourteen numbers would eventually disagree
-    /// about one of them and make a passing `--verify` mean nothing.
+    /// The permissive tuning tests decide under: no decision-interval
+    /// cooldown, generous margins, no balance day. Shared by
+    /// `Controller::test_default` and any fixture needing `session.config`,
+    /// so a replay runs the same knobs the recording did instead of two hand-written
+    /// copies drifting apart and making `--verify` meaningless.
     #[cfg(test)]
     pub(crate) fn test_default() -> Self {
         Self {
@@ -744,20 +659,10 @@ impl SessionConfig {
 
 impl Config {
     /// The tuning knobs, without anything that says how to reach a device.
-    ///
-    /// Destructures `self` exhaustively — no `..` — so that adding a field to
-    /// `Config` is a compile error here rather than a knob that silently stops
-    /// being recorded. That failure would be invisible in the worst way: the
-    /// thing you open `config_json` to find out would be the thing missing from
-    /// it. `Controller::restore` takes the same precaution for the same reason.
-    ///
-    /// Everything bound to `_` is deliberate, and the rule is one line long:
-    /// a fixture has to be hermetic, so nothing that says how to *reach* a
-    /// device belongs in it. `timezone` is the one that looks like tuning and
-    /// is not — every journaled `Event` already carries a resolved `Clock`, so
-    /// a replay never re-derives it. Solar phase went the same way when it
-    /// moved into `ShellyConfig`: it lives under `shelly`, which this already
-    /// excludes wholesale.
+    /// Destructures `self` exhaustively (no `..`) so a new `Config` field is
+    /// a compile error here, not a knob silently missing from `config_json`.
+    /// `timezone` is excluded because every journaled `Event` already carries a
+    /// resolved `Clock`; solar phase is excluded via `shelly`.
     pub fn session(&self) -> SessionConfig {
         let Config {
             // Connection settings: how to reach things, not what to decide.
@@ -811,20 +716,12 @@ impl Config {
 }
 
 impl Config {
-    /// Parses a TOML configuration file, per the failure policy
-    /// `config.example.toml`'s header documents: not valid TOML, a table
-    /// that is not a table, a missing or wrong-typed connection setting, or
-    /// anything about a device is fatal; a wrong-typed tuning knob, a bad
-    /// journal or logging setting, or an unknown key warns and falls back to
-    /// its default.
-    ///
-    /// Returns the warnings rather than logging them: this runs before the
-    /// tracing subscriber exists, since `main` needs `Config.log_filter` to
-    /// build it.
-    ///
-    /// Builds `Config` from an exhaustive struct literal — no
-    /// `..Default::default()` — so a field added without a matching line here
-    /// is a compile error.
+    /// Parses a TOML configuration file: a missing/wrong-typed connection
+    /// setting or anything about a device is fatal; a wrong-typed tuning
+    /// knob, journal/logging setting, or unknown key warns and falls back
+    /// to its default. Returns warnings instead of logging them, since this runs before
+    /// the tracing subscriber exists; builds `Config` from an exhaustive struct literal
+    /// (no `..Default::default()`), so a new field is a compile error.
     pub fn from_toml_str(text: &str) -> Result<(Config, Vec<String>), String> {
         let mut root = text.parse::<toml::Table>().map_err(|e| e.to_string())?;
 
@@ -859,12 +756,10 @@ impl Config {
             None
         };
 
-        // `[meter]` picks which source feeds the engine. Absent means
-        // `Shelly`, the only meter every config written before this table
-        // existed ever had — the same "presence selects a default" rule
-        // `[mqtt]` and `[shelly]` follow, in the other direction: those two
-        // default to *absent*, this one defaults to a *variant*, because
-        // "no meter at all" was never a coherent controller.
+        // `[meter]` picks which source feeds the engine; absent means
+        // `Shelly`. `[mqtt]`/`[shelly]` default to *absent* on absence,
+        // while this defaults to a *variant*, since "no meter at all" is
+        // never a coherent controller.
         let meter = if taker.has_table("meter")? {
             let kind = taker.required::<String>("meter.kind")?;
             match kind.as_str() {
@@ -937,12 +832,11 @@ impl Config {
 
         let journal_path =
             taker.lenient::<PathBuf>("journal.path", PathBuf::from(DEFAULT_JOURNAL_PATH))?;
-        // MUST go through `lenient`. `RetentionDays::new` rejects 0 and
-        // negatives, and its `Deserialize` surfaces that as a deserialize
-        // error — see the type's own doc comment. Routed through `required`
-        // instead, `retention_days = 0` would be a fatal startup error, and
-        // systemd's `Restart=on-failure` would restart-loop the daemon while
-        // the battery held whatever command it last received.
+        // MUST go through `lenient`: `RetentionDays::new` rejects 0 and
+        // negatives via `Deserialize`. Routed through `required` instead,
+        // `retention_days = 0` would be a fatal startup error, and systemd's
+        // `Restart=on-failure` would restart-loop the daemon while the battery held its
+        // last command.
         let journal_retention_days = taker.lenient::<RetentionDays>(
             "journal.retention_days",
             RetentionDays::new(90).expect("90 is a valid retention"),

@@ -1,23 +1,13 @@
 //! A synthetic house meter, so a brokerless run exercises the controller
-//! instead of proving nothing.
+//! instead of proving nothing. It makes a fake house (load, solar curve,
+//! battery) and pushes readings onto the same [`MqttEvent`] channel the real subscriber
+//! uses, so the coordinator loop cannot tell the two apart.
 //!
-//! With no MQTT broker there is no Shelly, so nothing produces a
-//! [`MeterObservation`] and the engine only ever sees `MqttTimeout` — a
-//! controller that only fires its failsafe has not been tested. This module
-//! makes a fake house (a load, a solar curve, a battery) and pushes readings
-//! onto the same [`MqttEvent`] channel the real subscriber uses, so the
-//! coordinator loop cannot tell the two apart.
-//!
-//! **The feedback term is the entire point of this file.** Computing
-//! `grid = load - solar` once per tick and never looking at the battery again
-//! runs, and lies: the meter reports a fixed surplus forever, the controller
-//! charges harder, and it pins at its cap while looking alive. Subtracting
-//! `battery.flow()` closes the loop — a charging battery pushes the grid
-//! figure toward import, and the controller backs off.
-//!
-//! `run.rs` spawns [`run_synthetic_meter`] instead of the real
-//! `mqtt::run_subscriber` when `[meter] kind = "synthetic"` is configured —
-//! see `config::MeterConfig` and `registry::from_config`.
+//! **The feedback term is the entire point.** `grid = load - solar` alone
+//! lies: the meter reports a fixed surplus forever, the controller charges
+//! harder, and pins at its cap while looking alive. Subtracting
+//! `battery.flow()` closes the loop — a charging battery pushes the grid figure toward
+//! import, and the controller backs off.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,22 +41,11 @@ impl HouseProfile {
     }
 
     /// The house's own load and its solar production at this hour, before the
-    /// battery is accounted for.
-    ///
-    /// Solar follows a cosine centred on noon and clamped at zero, rather than
-    /// a gaussian: a gaussian only *approaches* zero at the edges of the day,
-    /// and a test asserting "zero at 3am" would be asserting an approximation.
-    /// `cos(pi * (hour - 12) / 12)` is negative for every hour more than six
-    /// hours from noon — that is, before roughly 06:00 and after roughly
-    /// 18:00 — and `.max(0.0)` turns that negative stretch into an exact,
-    /// reproducible zero rather than a small positive number that happens to
-    /// round away in a demo. At noon the cosine is exactly `1.0`, so
-    /// production is exactly the rated peak, not merely close to it.
-    ///
-    /// The load is returned unchanged: a constant base load is enough to make
-    /// the feedback loop in [`observation`] observable, and giving it its own
-    /// time-of-day shape would be a second bell curve to get right for a case
-    /// nothing here needs yet.
+    /// battery. Solar follows a cosine centred on noon, clamped at zero (not
+    /// a gaussian, which only approaches zero at the day's edges): `cos(pi *
+    /// (hour-12)/12)` is negative before ~06:00 and after ~18:00, and exactly `1.0` at
+    /// noon — an exact, reproducible zero/peak rather than an approximation. The load
+    /// is returned unchanged; a second bell curve isn't needed yet.
     pub fn at(&self, clock: &Clock) -> (Watts, SolarPower) {
         const PEAK_HOUR: f64 = 12.0;
         const HALF_DAY: f64 = 12.0;
@@ -81,32 +60,24 @@ impl HouseProfile {
     }
 }
 
-/// Which synthetic phase carries the solar export, mirroring the real Pro 3EM
-/// installation (see `source/shelly.rs`'s doc comment): one phase nets the
-/// inverter's production against its own load, the other two carry load only.
-/// There is no configuration knob for it here — unlike `SolarPhase`, this is
-/// not describing a real wiring choice a person made, just picking one of the
-/// three synthetic phases to be "the" solar phase so all three are not
-/// identical.
+/// Which synthetic phase carries the solar export, mirroring a real Pro 3EM
+/// installation: one phase nets production against its own load, the other
+/// two carry load only. No config knob, unlike `SolarPhase` — this just picks one of
+/// three synthetic phases to be "the" solar phase so all three aren't identical.
 const SOLAR_PHASE: usize = 0;
 
-/// How the load (net of the battery) is split across three synthetic phases
-/// before solar is netted out of [`SOLAR_PHASE`]. Unequal and summing to
-/// `1.0` so the three phases are plausible values rather than three identical
-/// thirds — a real house's phases are never balanced that evenly, and
-/// `MeterReading.phases` is journaled, so three identical numbers would be a
-/// small standing lie about a real installation to whoever reads it back.
+/// How the load (net of battery) splits across three synthetic phases before
+/// solar is netted out of [`SOLAR_PHASE`]. Unequal, summing to `1.0`: a real
+/// house's phases are never balanced evenly, and since `MeterReading.phases`
+/// is journaled, three identical thirds would be a standing lie to whoever reads it
+/// back.
 const PHASE_WEIGHTS: [f64; 3] = [0.4, 0.35, 0.25];
 
-/// Folds the battery's own flow into a [`HouseProfile`] reading to produce the
-/// normalized observation a real meter would report: `grid.total = load -
-/// solar - battery.flow()`. See this module's doc comment for why the
-/// `battery.flow()` term cannot be dropped.
-///
-/// A free function taking the flow as a plain [`BatteryPower`], rather than a
-/// method that reaches into a battery itself, so the arithmetic is testable
-/// against a chosen flow without constructing (or ticking) a real
-/// [`VirtualBattery`].
+/// Folds the battery's own flow into a [`HouseProfile`] reading: `grid.total =
+/// load - solar - battery.flow()` (see the module doc for why that term can't
+/// be dropped). A free function taking flow as a plain [`BatteryPower`], not
+/// a method on the battery, so the arithmetic is testable against a chosen flow without
+/// constructing or ticking a real [`VirtualBattery`].
 fn observation(profile: &HouseProfile, clock: &Clock, flow: BatteryPower) -> MeterObservation {
     let (load, solar) = profile.at(clock);
 
@@ -131,22 +102,11 @@ fn observation(profile: &HouseProfile, clock: &Clock, flow: BatteryPower) -> Met
     }
 }
 
-/// Feeds synthetic [`MeterObservation`]s onto the coordinator's own
-/// `MqttEvent` channel, once a second — the Shelly's own rate, so a
-/// brokerless run sees the same cadence a real one does, not an
-/// artificially fast or slow substitute.
-///
-/// Takes `battery` as an `Arc` rather than a reference: the device registry
-/// holds its own clone so the same battery can be actuated by the controller
-/// and read by this loop at once. There is no cycle in that sharing — the
-/// battery is read here, never written to; only [`super::super::device`]'s
-/// `BatteryController::apply` writes it, through its own clone of the same
-/// `Arc`.
-///
-/// If `tx.send` fails, the receiving end — the coordinator loop — is gone, so
-/// there is nothing left to feed. Logging and returning is correct; retrying
-/// or spinning would just burn CPU narrating a shutdown that has already
-/// happened.
+/// Feeds synthetic [`MeterObservation`]s onto the coordinator's `MqttEvent`
+/// channel once a second — the Shelly's own rate. Takes `battery` as an
+/// `Arc`, shared with the device registry's own clone: read-only here, only
+/// [`super::super::device`]'s `BatteryController::apply` writes it. If `tx.send` fails
+/// the coordinator is gone, so logging and returning (not retrying) is correct.
 pub async fn run_synthetic_meter(
     profile: HouseProfile,
     battery: Arc<VirtualBattery>,
@@ -257,13 +217,10 @@ mod tests {
         )
     }
 
-    /// The test the sign error in the arithmetic would have failed: a
-    /// discharging battery is positive `BatteryPower`, and subtracting a
-    /// positive number must *reduce* the grid figure (push it toward export),
-    /// while a charging battery's negative flow must *increase* it (push it
-    /// toward import). Getting the sign backwards would make a discharging
-    /// battery look like it was importing more, which is exactly backwards
-    /// from what a real meter would show.
+    /// The test a sign error in the arithmetic would fail: discharging is
+    /// positive `BatteryPower`, so subtracting it must *reduce* the grid
+    /// figure (toward export); charging's negative flow must *increase* it (toward
+    /// import) — backwards would show a discharging battery as importing more.
     #[tokio::test]
     async fn battery_flow_pushes_the_grid_reading_in_the_correct_direction() {
         let clock = clock_at(9); // some solar, but not the whole story here

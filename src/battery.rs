@@ -5,11 +5,9 @@ use crate::models::ZendureProperties;
 use crate::units::{BatteryPower, PowerCap, Soc, Watts};
 
 /// Current battery state, used by the controller to make decisions.
-///
-/// `Serialize`/`Deserialize` because this is a `Measurement` in the `World`,
-/// and the world is journalled per decision; `PartialEq` so two
-/// recorded worlds can be compared. Every field is already a `#[serde(transparent)]`
-/// newtype or a `bool`, so the JSON is the bare numbers and flags.
+/// `Serialize`/`Deserialize` because this is a journalled `Measurement` in
+/// the `World`; `PartialEq` compares recorded worlds. Every field is a
+/// `#[serde(transparent)]` newtype or `bool`, so the JSON is bare numbers/flags.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BatteryState {
     pub soc: Soc,
@@ -22,21 +20,18 @@ pub struct BatteryState {
     pub soc_calibrating: bool,
     /// True when the battery reports it has reached its SOC limit and refuses charging.
     pub soc_limit_reached: bool,
-    /// True when the device reports an error (isError). We deliberately ignore
-    /// faultLevel: it also goes non-zero for benign conditions like WiFi
-    /// hiccups or firmware update checks, which caused spurious idling.
-    /// While faulted, the controller stays idle and does not command power or
-    /// overwrite the device's power-cap setpoints.
+    /// True when the device reports `isError`. `faultLevel` is deliberately
+    /// ignored: it also goes non-zero for benign WiFi hiccups or firmware update
+    /// checks, which caused spurious idling. While faulted, the controller
+    /// stays idle and never overwrites the power-cap setpoints.
     pub fault: bool,
 }
 
 impl BatteryState {
     /// A healthy mid-charge battery, for tests. Variants are struct updates:
     /// `BatteryState { soc: Soc::new(80), ..BatteryState::test_sample() }`.
-    ///
-    /// Shared rather than restated per module — five test modules were writing
-    /// the same seven fields, and the caps in particular were arbitrary
-    /// non-zero headroom in every one of them.
+    /// Shared because five test modules were duplicating the same seven
+    /// fields, with arbitrary non-zero cap headroom in each.
     #[cfg(test)]
     pub(crate) fn test_sample() -> Self {
         Self {
@@ -55,15 +50,11 @@ impl BatteryState {
         let charge = Watts::from_device(props.output_pack_power.unwrap_or(0));
         Self {
             soc: Soc::new(props.electric_level.unwrap_or(0)),
-            // Honor the device's reported caps verbatim. A reported 0 means the
-            // device zeroed its own power-cap setpoint — we deliberately let that
-            // stop charging/discharging rather than overwriting it mid-run (the
-            // caps are only written once, at startup). An *absent* field falls
-            // back to the model's rated cap.
-            //
-            // Output is not clamped to the rating: `inverseMaxPower` is the
-            // feed-in limit the device itself enforces, so it is authoritative
-            // even when it disagrees with the spec.
+            // A reported 0 means the device zeroed its own setpoint; honored
+            // deliberately (caps are only written once, at startup) rather than
+            // overwritten mid-run. Absent falls back to the rated cap. Not
+            // clamped to the rating: `inverseMaxPower` is authoritative even when it
+            // disagrees with the spec.
             max_discharge_power: props
                 .inverse_max_power
                 .map(PowerCap::new)

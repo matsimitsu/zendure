@@ -21,12 +21,10 @@ pub struct Engine {
     mqtt_timeout: Duration,
 }
 
-/// What `Engine::step` wants done for one event: the directives to actuate
-/// (at most one decision per step, allocated across however many devices the
-/// world holds), the decision to publish if the controller made one, and a
-/// status transition to publish if the event itself caused one. Actuating a
-/// directive and observing whether it succeeded stays outside the engine —
-/// that's I/O, done by the caller.
+/// What `Engine::step` wants done for one event: at most one decision,
+/// allocated into directives across however many devices the world holds,
+/// plus a status transition if the event caused one. Actuating a directive
+/// and observing success stays outside the engine — that's the caller's I/O.
 #[derive(Debug, Default, PartialEq)]
 pub struct Step {
     pub directives: Vec<Directive>,
@@ -34,18 +32,11 @@ pub struct Step {
     pub status: Option<&'static str>,
 }
 
-/// Everything needed to resume the fold from a point in time: the world the
-/// next decision reads, the controller's history, and the failsafe latch.
-///
-/// These are the three pieces that make `step` a fold rather than a function —
-/// feed the same event to two engines holding the same `EngineState` and they
-/// produce the same `Step`. That is the property the journal exists to preserve
-/// across a process restart.
-///
-/// `mqtt_timed_out` looks like an implementation detail and is not: it decides
-/// whether a timeout tick reports a status transition and whether a resuming
-/// meter reading announces `"operational"`. Two engines differing only in this
-/// flag produce different steps.
+/// Everything needed to resume the fold: the world, the controller's history,
+/// and the `mqtt_timed_out` latch. Equal `EngineState` fed the same event must
+/// yield the same `Step` — what the journal preserves across a restart.
+/// `mqtt_timed_out` alone decides a timeout tick's status transition and a resuming
+/// meter reading's `"operational"` report.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EngineState {
     pub world: World,
@@ -63,11 +54,10 @@ impl Engine {
         }
     }
 
-    /// The battery state the engine is currently deciding against, for
-    /// callers that just want to log it (e.g. alongside a decision). `None`
-    /// only when no device has reported yet — which cannot happen in
-    /// production, since `main.rs` seeds the world from a startup poll that
-    /// fails startup on error.
+    /// The battery state the engine is deciding against, for callers that
+    /// want to log it. `None` only when no device has reported yet —
+    /// unreachable in production since `main.rs` seeds the world from a startup poll
+    /// that fails startup on error.
     pub fn battery(&self) -> Option<&BatteryState> {
         self.world.battery()
     }
@@ -143,16 +133,11 @@ impl Engine {
         }
     }
 
-    /// Latches the *reporting*, not the command. Idle is re-asserted on every
-    /// timeout tick because the engine cannot know whether the write landed:
-    /// latching on the decision meant a single failed `apply_command` left the
-    /// device running its last command for the rest of the outage, with the
-    /// controller believing it had stood down. The two failures correlate in
-    /// practice — whatever kills the meter feed often takes the battery's
-    /// network with it.
-    ///
-    /// `status` is first-tick-only, so the warning and the `mqtt_timeout`
-    /// transition are logged once per outage rather than once per interval.
+    /// Latches the *reporting*, not the command: idle is re-asserted on every
+    /// timeout tick because the engine cannot know whether the write landed —
+    /// latching on the decision would leave a failed write's device running
+    /// its last command for the rest of the outage. `status` is first-tick-only, so
+    /// `mqtt_timeout` logs once per outage, not once per interval.
     fn step_mqtt_timeout(&mut self) -> Step {
         let first_tick = !self.mqtt_timed_out;
         self.mqtt_timed_out = true;
@@ -324,18 +309,11 @@ mod tests {
         assert_eq!(step.status, None);
     }
 
-    /// Two `Engine`s fed the same event sequence, one run to completion before
-    /// the other starts, must produce identical steps at every position. `step`
-    /// takes `&mut self` and a borrowed event and nothing else, so the only
-    /// thing that can vary is state the engine should not be carrying.
-    ///
-    /// It does **not** catch an engine reading ambient time: the two runs are
-    /// microseconds apart against a millisecond clock, so a hidden `Utc::now()`
-    /// would read the same value twice. What rules that out is that `step`'s
-    /// signature gives it nothing to read.
-    ///
-    /// Whole `Step`s are compared rather than individual fields, so a field
-    /// `ControlDecision` gains later is covered automatically.
+    /// Two engines fed the same events, one after the other, must produce
+    /// identical steps, since `step` takes only `&mut self` and a borrowed
+    /// event — only disallowed state can vary. It does not catch a hidden
+    /// `Utc::now()` (ruled out because `step`'s signature has nothing to read); whole
+    /// `Step`s are compared so a later field is covered automatically.
     #[test]
     fn the_fold_is_deterministic() {
         fn events() -> [Event; 5] {
@@ -374,16 +352,11 @@ mod tests {
     /// has to produce the `"operational"` transition.
     const SPLIT: usize = 5;
 
-    /// **The property the journal exists for.** A decision is a fold over
-    /// everything that came before it, so a controller restarted mid-stream
-    /// either resumes the fold exactly or silently becomes a different
-    /// controller that happens to share a config file.
-    ///
-    /// Engine A runs the whole journey in one process. Engine C is a *fresh*
-    /// engine — built from the same config but with none of the history — that
-    /// is handed A's snapshot at the split point and runs the rest. Every step
-    /// after the boundary has to match, including the status transitions, which
-    /// is what proves `mqtt_timed_out` came across with everything else.
+    /// **The property the journal exists for**: a decision is a fold over
+    /// everything before it, so restarting mid-stream must resume the fold
+    /// exactly, not silently become a different controller sharing a config
+    /// file. Matching status transitions after a restore proves `mqtt_timed_out` came
+    /// across too, not just the world and controller history.
     #[test]
     fn a_restored_engine_resumes_the_fold_exactly() {
         let events = crate::fixtures::journey::events();

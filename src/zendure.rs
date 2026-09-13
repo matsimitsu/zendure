@@ -103,12 +103,10 @@ impl ZendureClient {
         *guard(&self.storage_mode) = mode;
     }
 
-    /// Write the charge/discharge power-cap setpoints to the device.
-    ///
-    /// These are read/write setpoints the device can reset to 0 (which stalls
-    /// all power flow). We write them **only at startup** — a deliberate,
-    /// restart-controlled action — and never overwrite them mid-run, so if the
-    /// device zeroes a cap while running we stand down rather than fighting it.
+    /// Charge/discharge power-cap setpoints. The device can reset these to 0,
+    /// stalling all power flow. Written only at startup, never mid-run — if the
+    /// device zeroes a cap while running, the controller stands down rather
+    /// than fighting it.
     pub async fn write_power_caps(&self) -> Result<(), reqwest::Error> {
         self.ensure_ram_mode().await?;
         self.write_properties(serde_json::json!({
@@ -118,15 +116,9 @@ impl ZendureClient {
         .await
     }
 
-    /// Apply a command to the battery via the Zendure REST API.
-    ///
-    /// - SetCharge: wakes to RAM mode, sets acMode=1 (only on mode change) and inputLimit.
-    /// - SetDischarge: wakes to RAM mode, sets acMode=2 (only on mode change) and outputLimit.
-    /// - SetIdle: sets inputLimit=0, outputLimit=0 (stays in RAM mode for quick resume).
-    /// - SetStandby: sets smartMode=0 (flash), inputLimit=0, outputLimit=0.
-    ///
-    /// acMode is only sent when switching between charge/discharge to avoid
-    /// unnecessary inverter resets when just adjusting power levels.
+    /// Apply a command via the Zendure REST API. `acMode` is sent only when
+    /// switching between charge and discharge, since writing it resets the
+    /// inverter; SetIdle/SetStandby leave it untouched.
     pub async fn apply_command(&self, command: &Command) -> Result<(), reqwest::Error> {
         match *command {
             Command::SetCharge(power_watts) => {
@@ -233,11 +225,11 @@ impl BatteryMonitor for ZendureClient {
             error: e.to_string(),
         })?;
 
-        // Sync tracked storage mode with the device's actual state. The client
-        // defaults to RAM, but the device may have been left in Flash/standby
-        // (e.g. after an idle-timeout standby before a restart). Without this,
-        // ensure_ram_mode() short-circuits and never wakes the device, so it keeps
-        // reporting chargeMaxLimit=0 / inverseMaxPower=0 and every command clamps to 0W.
+        // Sync tracked storage mode with the device's actual state: it may be in
+        // Flash/standby (e.g. after an idle-timeout before a restart). Without
+        // this, `ensure_ram_mode` short-circuits and never wakes the device, so
+        // it keeps reporting chargeMaxLimit=0 / inverseMaxPower=0 and every command
+        // clamps to 0W.
         let initial_storage_mode = if initial_report.properties.smart_mode == Some(1) {
             StorageMode::Ram
         } else {
@@ -254,14 +246,10 @@ impl BatteryMonitor for ZendureClient {
             tracing::warn!("Failed to write power caps at startup: {e}");
         }
 
-        // Re-read so the reading reflects the caps we just wrote, otherwise the
-        // first decision would use the pre-write (possibly 0) limits.
-        //
-        // Captured raw-then-parsed like every other read, which is a
-        // behaviour change from the inline handshake this replaces: that
-        // re-read went through the typed `get_properties` and its bytes were
-        // never captured at all. This is one extra `zendure_poll` raw row per
-        // session.
+        // Re-read so the reading reflects the caps just written — otherwise the
+        // first decision would use the pre-write (possibly 0) limits. Captured
+        // raw-then-parsed like every other read, adding one extra `zendure_poll`
+        // raw row per session.
         match self.get_properties_raw().await {
             Ok(body) => match parse_report(body, self.spec()) {
                 Ok(reading) => Ok(reading),

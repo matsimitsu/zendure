@@ -10,39 +10,24 @@ use crate::backpressure::tally;
 use crate::publish::{Accepted, Message, Publisher};
 use crate::sync::guard;
 
-/// How many messages may be waiting for the broker before we start dropping.
-///
-/// Sized against the steady-state rate rather than a fixed budget, so a change
-/// to the publish set does not silently invalidate the arithmetic: a poll sends
-/// roughly a dozen messages every 10s and a decision up to 7 more, which puts
-/// this at something over half a minute of backlog — long enough to ride out a
-/// broker restart, short enough that a dead broker is reported in the same
-/// minute it died. Deliberately larger than rumqttc's own 50-slot request
-/// channel: ours is the one that is allowed to fill.
+/// How many messages may wait for the broker before we start dropping. Sized
+/// against the steady-state rate (~12 messages/10s from polling, up to 7 more
+/// per decision): over half a minute of backlog, long enough to ride out a
+/// restart, short enough to report a dead broker within the minute it died. Larger than
+/// rumqttc's own 50-slot request channel, since ours is the one allowed to fill.
 const QUEUE_DEPTH: usize = 256;
 
 /// Awaiting this is what drains whatever is still queued at shutdown.
 pub type PublisherTask = tokio::task::JoinHandle<()>;
 
-/// Publishes through a queue and a task, so the decision path never waits on a
-/// broker.
-///
-/// Two queue depths, deliberately. The control path `try_send`s into ours and
-/// drops when it is full; the task then `await`s rumqttc's own bounded channel,
-/// where awaiting is correct — when the broker is gone the task parks, our
-/// queue absorbs the backlog, and only then do we drop and count. Doing the
-/// non-blocking send against rumqttc's channel directly would work too, but it
-/// would leave nothing to absorb a reconnect and no place to drain at shutdown.
-///
-/// Two counters, for the reason `Journal` has two: a delivery path that fails
-/// *every* message drains the queue faster than a healthy one, so the queue
-/// never fills, `dropped` never moves, and a silent total failure would look
-/// exactly like a quiet night.
-///
-/// `try_send` drops the **newest** message, and these are latest-value topics,
-/// so a sustained stall keeps stale values and discards fresh ones. Coalescing
-/// per topic in the task is the principled fix; it is not here because drops
-/// should be rare and FIFO is the idiom already in the tree.
+/// Publishes through a queue and a task so the decision path never waits on a broker.
+/// Two queue depths: ours `try_send`s and drops when full, while the task safely
+/// `await`s rumqttc's own bounded channel — a gone broker parks the task, and only our
+/// queue absorbs the backlog before we drop and count.
+/// Two counters: a path failing *every* message drains the queue faster than a healthy
+/// one, so `dropped` never moves and total failure looks like a quiet night.
+/// `try_send` drops the **newest** message, so on these latest-value topics a stall
+/// keeps stale values and discards fresh ones.
 pub struct MqttPublisher {
     /// `Option` so `close` can drop the last sender, which is what ends the
     /// task's `recv` loop and lets a bounded drain finish.
@@ -75,12 +60,10 @@ impl MqttPublisher {
         (publisher, task)
     }
 
-    /// How many messages are waiting for the broker right now.
-    ///
-    /// Only our own queue: not the one the delivery task is holding, nor the
-    /// ≤50 already handed to rumqttc, nor whatever its eventloop has moved to
-    /// `pending`. Enough to say what a drain that ran out of time was up
-    /// against.
+    /// How many messages are waiting for the broker right now. Only our own
+    /// queue — not rumqttc's ≤50-slot request channel, nor whatever its
+    /// eventloop has moved to `pending` — but enough to say what a timed-out drain was
+    /// up against.
     pub fn queued(&self) -> usize {
         guard(&self.tx)
             .as_ref()
@@ -198,25 +181,19 @@ mod tests {
     use std::time::Duration;
     use tokio::time::timeout;
 
-    /// A client pointed at a port with nothing behind it, whose eventloop is
-    /// returned to the caller and never polled.
-    ///
-    /// The eventloop must be *held*, not dropped: dropping it closes rumqttc's
-    /// request channel, which makes every send fail instantly — a different
-    /// condition entirely, and not the one that reached production.
+    /// A client pointed at a port with nothing behind it; its eventloop is
+    /// returned to the caller and never polled. It must be held, not dropped:
+    /// dropping it closes rumqttc's request channel, making every send fail
+    /// instantly instead of parking — a different condition than production.
     fn unreachable_client() -> (AsyncClient, EventLoop) {
         let opts = MqttOptions::new("zendure-test", "127.0.0.1", 1);
         AsyncClient::new(opts, 50)
     }
 
-    /// Fixture validity, not a test of this crate.
-    ///
-    /// It asserts a property of rumqttc — that an awaited send on a bounded
-    /// request channel nobody drains blocks forever — and it cannot fail
-    /// because of anything in this repo. It is here because every other test in
-    /// this section is worthless if that property does not hold: they would be
-    /// proving the new code survives a condition the fixture never creates.
-    /// Kept knowingly, at the cost of one runtime and a 50ms loop.
+    /// Fixture validity, not a test of this crate: asserts that an awaited
+    /// send on a bounded rumqttc channel nobody drains blocks forever. Every
+    /// other test in this section is worthless if that doesn't hold, so it's kept
+    /// deliberately at the cost of one runtime and a 50ms loop.
     #[tokio::test]
     async fn fixture_check_awaiting_a_publish_blocks_when_nobody_drains() {
         let (client, _eventloop) = unreachable_client();
@@ -248,13 +225,11 @@ mod tests {
         );
     }
 
-    /// The regression test for the production defect.
-    ///
-    /// Same client, same never-drained eventloop, but publishing through
-    /// `MqttPublisher`. `publish` is synchronous, so the compiler already
-    /// guarantees the decision path cannot wait here — what this asserts is the
-    /// rest of the contract: it keeps accepting, it finishes, and it *says* it
-    /// degraded rather than discarding quietly.
+    /// The regression test for the production defect: same never-drained
+    /// eventloop, but publishing through `MqttPublisher`. `publish` is
+    /// synchronous so the compiler already guarantees it can't wait; this
+    /// asserts the rest — it keeps accepting, finishes, and reports that it degraded
+    /// rather than discarding quietly.
     #[tokio::test]
     async fn publishing_never_blocks_when_the_broker_never_drains() {
         let (client, _eventloop) = unreachable_client();
@@ -280,12 +255,9 @@ mod tests {
         );
     }
 
-    /// Why there are two counters rather than one.
-    ///
-    /// A delivery path that fails *every* message drains the queue faster than
-    /// a healthy one, so the queue never fills and `dropped` never moves. A
-    /// total failure would look exactly like a quiet night. Dropping the
-    /// eventloop is that condition: the client is dead and every send errors
+    /// A path failing every message drains the queue faster than a healthy
+    /// one, so `dropped` never moves and total failure looks like a quiet
+    /// night. Dropping the eventloop creates exactly that: every send errors
     /// immediately instead of parking.
     #[tokio::test]
     async fn a_client_whose_eventloop_is_gone_counts_failures_not_drops() {
@@ -309,11 +281,9 @@ mod tests {
         assert_eq!(publisher.dropped(), 0, "the queue never filled");
     }
 
-    /// A vanished sink must not be reported as backpressure.
-    ///
-    /// Both refusals used to fold into one counter and one `"MQTT queue full"`
-    /// line, so a delivery task that had died — after which *nothing* is ever
-    /// published again — read in the log exactly like a slow broker.
+    /// A vanished sink must not be reported as backpressure: without separate
+    /// refusal kinds, a dead delivery task — after which nothing is ever published
+    /// again — would read in the log exactly like a slow broker.
     #[tokio::test]
     async fn a_dead_delivery_task_is_not_reported_as_a_full_queue() {
         let (client, _eventloop) = unreachable_client();
@@ -366,14 +336,11 @@ mod tests {
             .expect("the task did not panic");
     }
 
-    /// Why the drain needs a deadline at all.
-    ///
     /// With the broker gone the delivery task parks on rumqttc's channel and
-    /// cannot finish, so a shutdown that awaited it unconditionally would hang
-    /// until systemd turned `TimeoutStopSec` into a SIGKILL. The deadline
-    /// itself lives in `run.rs` and is exercised by `run`'s own drain test;
-    /// what this pins is the precondition — that the task really does park,
-    /// with messages still queued behind it.
+    /// never finishes, so an unconditional await would hang until systemd's
+    /// `TimeoutStopSec` turns into a SIGKILL. The deadline lives in `run.rs`;
+    /// this pins only the precondition — the task really does park with messages still
+    /// queued.
     #[tokio::test]
     async fn a_parked_delivery_task_leaves_messages_queued() {
         let (client, _eventloop) = unreachable_client();

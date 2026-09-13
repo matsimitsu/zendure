@@ -1,23 +1,12 @@
 //! Physical quantities as newtypes.
 //!
-//! Two axes, per `CLAUDE.md`. **Units** name what a number measures. **Roles**
-//! distinguish values that share a unit but mean different things: a signed
-//! flow at the meter, a non-negative cap, and a commanded setpoint are all
-//! watts, and mixing them must not compile.
-//!
-//! Every type is `#[serde(transparent)]`, so it serializes as the bare number
-//! it wraps and every wire format — MQTT, HA discovery, the NDJSON journal, the
-//! RTE state file — is byte-identical to before these types existed.
-//!
-//! Casts live in here, inside named conversions, and nowhere else. A cast in
-//! the decision path means a quantity crossed a boundary without anyone saying
-//! what the conversion meant; a cast inside `GridPower::exporting` is that
-//! statement.
-//!
-//! `Amps` / `MilliAmps` are deliberately absent. They belong to the charger
-//! (where Peblar's milliamp setpoint and Vestel's whole-amp setpoint are 1000x
-//! apart and must be distinct types). Adding them now would mean dead code
-//! carrying an `#[allow]` until that adapter exists.
+//! Two axes, per `CLAUDE.md`: **units** name what a number measures, and
+//! **roles** distinguish values sharing a unit but meaning different things —
+//! a signed flow, a non-negative cap, and a commanded setpoint are all watts,
+//! and mixing them must not compile. Every type is `#[serde(transparent)]`,
+//! serializing as the bare number it wraps, so every wire format (MQTT, HA
+//! discovery, the journal, the RTE state file) is unchanged. Casts live only in named
+//! conversions here, never in the decision path.
 
 // Several accessors here are exercised only by the test modules and the
 // wire-format guards, which the non-test build doesn't compile — the same
@@ -31,12 +20,10 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-/// Forward `Display` to the wrapped primitive so format specs survive.
-///
-/// This matters more than it looks: `write!(f, "{}", self.0)` silently drops
-/// the caller's precision, which would turn `format!("{v:.1}")` in `publish_rte`
-/// from `85.2` into `85.23456789`. Delegating to the primitive's own `fmt`
-/// honours width, precision, sign and fill exactly as before.
+/// Forward `Display` to the wrapped primitive so format specs survive:
+/// `write!(f, "{}", self.0)` silently drops the caller's precision, turning
+/// `format!("{v:.1}")` in `publish_rte` from `85.2` into `85.23456789`.
+/// Delegating to the primitive's own `fmt` honours width, precision, sign and fill.
 macro_rules! forward_display {
     ($t:ty, $inner:ty) => {
         impl fmt::Display for $t {
@@ -53,19 +40,11 @@ macro_rules! forward_display {
 // reproduce it.
 pub(crate) use forward_display;
 
-/// `Deserialize` for a newtype whose constructor enforces an invariant, routing
-/// the wire value through that constructor instead of writing the field
-/// directly.
-///
-/// `#[serde(transparent)]` derives *both* halves, and the derived `Deserialize`
-/// builds the struct field-by-field — so every clamp in this module was
-/// bypassed by anything that read a value back. CLAUDE.md's rule is that
-/// validation lives in the constructor and no call site re-checks; a derived
-/// `Deserialize` is a call site that skips it.
-///
-/// Serialization stays `transparent`, so the wire format — MQTT, HA discovery,
-/// the journal, a fixture — is unchanged in both directions for any value that
-/// was valid to begin with.
+/// `Deserialize` for a newtype whose constructor enforces an invariant,
+/// routing the wire value through that constructor instead of writing the
+/// field directly: a derived `Deserialize` builds the struct field-by-field,
+/// bypassing every clamp. Serialization stays `transparent`, unchanged for any value
+/// that was already valid.
 macro_rules! validating_deserialize {
     ($t:ty, $inner:ty, $ctor:expr) => {
         impl<'de> Deserialize<'de> for $t {
@@ -76,13 +55,10 @@ macro_rules! validating_deserialize {
     };
 }
 
-/// The same, for a constructor that *rejects* rather than clamps.
-///
-/// A sibling rather than a generalisation of the macro above: those
-/// constructors are infallible by design — a SOC of 200 is a number someone
-/// meant as a percentage and clamping it is the kind reading — while this one
-/// has values it must refuse outright, and the refusal has to reach the
-/// deserializer as an error rather than become a silent default.
+/// The same, for a constructor that *rejects* rather than clamps: those
+/// other constructors are infallible by design (a SOC of 200 clamps kindly
+/// to 100), while this one has values it must refuse outright, and the refusal must
+/// reach the deserializer as an error, not a silent default.
 macro_rules! validating_deserialize_result {
     ($t:ty, $inner:ty, $ctor:expr) => {
         impl<'de> Deserialize<'de> for $t {
@@ -122,11 +98,9 @@ pub struct Celsius(pub f64);
 forward_display!(Celsius, f64);
 
 /// One pack's temperature reading. A named pair rather than `(usize, u32)`,
-/// which said neither what the index was counting nor what unit the number
-/// was in.
-///
-/// It belongs here beside the `DeciKelvin` it wraps: the adapter constructs it,
-/// and `discovery.rs` only ever borrows what it's handed to publish.
+/// which said neither what the index counted nor what unit the number was
+/// in. Belongs here beside the `DeciKelvin` it wraps: the adapter constructs
+/// it, and `discovery.rs` only ever borrows what it's handed to publish.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PackTemperature {
     pub index: usize,
@@ -135,12 +109,10 @@ pub struct PackTemperature {
 
 // --- Watts: the integer-watt arithmetic unit -------------------------------
 
-/// Integer watts. The unit the device speaks and the controller computes in —
-/// a working type, not a role: it carries no claim about sign or purpose.
-///
-/// Role types (`Setpoint`, `PowerCap`, `BatteryPower`, `PowerMargin`) convert
-/// into and out of it through named methods, so every place a quantity changes
-/// meaning is a call you can grep for.
+/// Integer watts: the unit the device speaks and the controller computes
+/// in — a working type, not a role, carrying no claim about sign or purpose.
+/// Role types (`Setpoint`, `PowerCap`, `BatteryPower`, `PowerMargin`) convert into and
+/// out of it through named methods, so every meaning change is a call you can grep for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Watts(pub i32);
@@ -190,10 +162,8 @@ impl Neg for Watts {
 // --- Roles over watts -----------------------------------------------------
 
 /// Signed power at the grid meter, in watts. Positive = importing from the
-/// grid, negative = exporting to it.
-///
-/// `f64` because the Shelly reports fractional watts and because
-/// `ControlDecision.grid_power` is a float on the wire.
+/// grid, negative = exporting to it. `f64` because the Shelly reports
+/// fractional watts and `ControlDecision.grid_power` is a float on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct GridPower(pub f64);
@@ -451,27 +421,18 @@ impl Soc {
         f64::from(self.0.saturating_sub(floor.0)) / 100.0
     }
 
-    /// A state of charge from `stored / capacity`, for `simulation.rs` reading
-    /// its integrated energy back out as a percentage. `Soc` has no
-    /// fractional representation, so this rounds to the nearest whole percent
-    /// and routes through [`Soc::new`] — the same clamp every other
-    /// constructor here goes through, which is what makes a capacity rounding
-    /// error or a stored value that has drifted a hair below zero land at 0 or
-    /// 100 instead of panicking or wrapping.
-    ///
-    /// NaN — a zero-capacity pack computing `0.0 / 0.0` — maps to
-    /// [`Soc::ZERO`] rather than being handed to the rounding and the cast
-    /// below: `NaN as u32` is a defined-but-meaningless `0` in Rust today, and
-    /// this says that explicitly instead of leaning on it.
+    /// A state of charge from `stored / capacity`. Rounds to a whole percent
+    /// and routes through [`Soc::new`], so a value a hair below zero lands at
+    /// 0 rather than wrapping. NaN (a zero-capacity pack computing `0.0 / 0.0`)
+    /// maps to [`Soc::ZERO`] explicitly, rather than leaning on `NaN as u32` being a
+    /// defined-but-meaningless `0`.
     pub fn from_fraction(fraction: f64) -> Self {
         if fraction.is_nan() {
             return Soc::ZERO;
         }
-        // The cast saturates rather than wraps (Rust's `as` has done so for
-        // float-to-int since the 2018 edition), so a negative fraction (stored
-        // dipping a hair below zero from floating-point error) or one above 1
-        // (a rounding blip past full) lands at 0 or `u32::MAX` and `Soc::new`
-        // clamps it the rest of the way to the valid range.
+        // The cast saturates rather than wraps (float-to-int `as` has done so
+        // since the 2018 edition): a negative fraction lands at 0, one above 1
+        // lands at `u32::MAX`, and `Soc::new` clamps either the rest of the way.
         Soc::new((fraction * 100.0).round() as u32)
     }
 
@@ -498,16 +459,10 @@ impl Percent {
     }
 }
 
-/// A round-trip conversion efficiency, in percent, clamped to 1–100.
-///
-/// Not a bare [`Percent`]: `simulation.rs` divides by this to turn a
-/// discharge's stored-energy loss back into the meter-side power that
-/// produced it, and a `0` would mint infinite energy out of a battery that
-/// gave up nothing. Clamping the low end at 1 rather than rejecting keeps it
-/// a peer of `Soc` — a config or fixture with a nonsensical value degrades to
-/// "almost total loss" instead of refusing to build a simulated battery over
-/// it. The high end at 100 is the ordinary ceiling: nothing converts energy
-/// at better than perfect.
+/// A round-trip conversion efficiency, in percent, clamped to 1–100. Not a
+/// bare [`Percent`]: `simulation.rs` divides by this, so a `0` would mint
+/// infinite energy out of a battery that gave up nothing; clamping at 1 degrades a
+/// nonsensical value to "almost total loss" instead of rejecting it.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct Efficiency(f64);
@@ -518,10 +473,9 @@ forward_display!(Efficiency, f64);
 
 impl Efficiency {
     /// Clamps to 1–100. NaN clamps to neither bound under `f64::clamp` (it
-    /// compares false against both, so an unguarded clamp would return the
-    /// NaN unchanged) and is mapped to 1 instead — the worst-but-defined
-    /// efficiency, rather than a value that turns every energy computation
-    /// downstream into NaN.
+    /// compares false against both, so an unguarded clamp returns NaN
+    /// unchanged) and is mapped to 1 instead — worst-but-defined, rather than a value
+    /// that turns every downstream energy computation into NaN.
     pub fn new(percent: f64) -> Self {
         if percent.is_nan() {
             return Efficiency(1.0);
@@ -563,19 +517,11 @@ impl WattHours {
     }
 
     /// Energy back to the average power over an interval — the inverse of
-    /// [`WattHours::integrate`] for a span `simulation.rs` already knows was
-    /// at constant power, which is exactly the shape of `advance_to`'s
-    /// clamped stored-energy delta over the interval it was clamped within.
-    ///
-    /// Guards `dt == 0`: dividing by zero seconds would produce an infinite
-    /// or NaN wattage rather than "no time passed, so nothing flowed."
-    ///
-    /// Rounds rather than truncating: `simulation.rs` gets here by inverting
-    /// an efficiency division and multiplication it just applied, and that
-    /// round trip leaves the odd `999.9999999998`-style float behind even
-    /// when every input was a whole watt. Truncating would turn that into a
-    /// silent, systematic 1 W undercount; rounding recovers the whole number
-    /// the computation actually meant.
+    /// [`WattHours::integrate`] for a span `simulation.rs` knows was at
+    /// constant power. Guards `dt == 0` (else an infinite/NaN wattage) and
+    /// rounds rather than truncates, since inverting an efficiency division leaves
+    /// `999.9999999998`-style floats that truncation would turn into a systematic 1 W
+    /// undercount.
     pub fn over(self, dt: Duration) -> Watts {
         if dt.is_zero() {
             return Watts::ZERO;
@@ -649,11 +595,10 @@ impl<Tz: chrono::TimeZone> From<chrono::DateTime<Tz>> for Timestamp {
     }
 }
 
-/// A signed span between two [`Timestamp`]s, in milliseconds.
-///
-/// Signed, and deliberately not a `Duration`: a backwards NTP step makes a span
-/// negative, and today that correctly reads as "not yet elapsed". Saturating it
-/// to zero would flip every comparison against a `Duration::ZERO` threshold.
+/// A signed span between two [`Timestamp`]s, in milliseconds. Deliberately
+/// not a `Duration`: a backwards NTP step makes a span negative, which reads
+/// as "not yet elapsed"; saturating it to zero would flip every comparison against a
+/// `Duration::ZERO` threshold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Elapsed(i64);
 
@@ -708,26 +653,13 @@ impl PartialOrd<Duration> for Elapsed {
     }
 }
 
-/// A journal retention window, in whole days.
-///
-/// A newtype because the alternative bit: retention was a bare `i64` threaded
-/// through four signatures, and `prune` computes `now - days`. A negative value
-/// therefore puts the cutoff in the *future*, and "delete everything older than
-/// the cutoff" deletes the entire journal — at every startup and every midnight,
-/// reporting it as a successful prune. A value near `i64::MAX` panicked
-/// `chrono::Duration::days` on the writer thread, where the panic was swallowed.
-///
-/// Both are impossible to express now: the constructor is the only way in, it
-/// clamps once, and `cutoff` owns the arithmetic so no call site repeats it.
-///
-/// `Deserialize` is routed through that constructor rather than derived, for
-/// the reason [`validating_deserialize`] gives — and this type is the sharpest
-/// case of it. A transparent derive builds the field directly, so
-/// `retention_days = 0` read off a wire would produce `RetentionDays(0)`, put
-/// `cutoff` at *now*, and delete the entire journal at startup and every
-/// midnight: the exact failure the paragraph above says is impossible to
-/// express. Nothing deserialized one while the only source was the environment,
-/// which is why it went unnoticed; a configuration file is a wire.
+/// A journal retention window, in whole days. `prune` computes `now - days`,
+/// so a negative value puts the cutoff in the *future*, deleting the entire
+/// journal at every startup and midnight while reporting success; a value near
+/// `i64::MAX` panics `chrono::Duration::days` on the writer thread, where the panic is
+/// swallowed. The constructor is the only way in and clamps once; `Deserialize` routes
+/// through it rather than deriving, since a transparent derive would let
+/// `retention_days = 0` off a wire (a config file is a wire) put `cutoff` at *now*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct RetentionDays(i64);

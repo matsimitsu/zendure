@@ -6,22 +6,17 @@ use crate::event::Event;
 use crate::units::{GridPower, Soc, SolarPower};
 use crate::world::{DeviceId, Measurement, MeterReading};
 
-/// A run the engine can be folded over, for tests that need a *sequence*
-/// rather than one event. Shared by `engine.rs` and the replay tests, which
-/// need the same journey — a second copy would be a second thing to keep in
-/// step, and the two disagreeing would make a `--verify` test meaningless.
-///
-/// The constants are public because a caller building the world this is folded
-/// into has to agree with it on the device id and the day ordinal, or the
-/// midnight reset fires on the first step.
+/// A run the engine can be folded over, for tests needing a *sequence* rather
+/// than one event. Shared by `engine.rs` and the replay tests so a `--verify`
+/// test can't disagree with itself. Constants are public because a caller's
+/// world must agree on the device id and day ordinal, or the midnight reset fires on
+/// the first step.
 pub mod journey {
     use super::*;
 
-    /// A recent instant, not a round number near the epoch. `1_000_000_000` ms
-    /// is January 1970, which is beyond any retention window — so a test that
-    /// recorded two sessions into one journal had the second one's startup
-    /// prune delete the first, and the restart it was trying to observe with
-    /// it.
+    /// A recent instant, not a round number near the epoch: `1_000_000_000` ms
+    /// is January 1970, outside any retention window, so a second session's
+    /// startup prune would delete the first — and the restart it was meant to observe.
     pub const NOW_MS: i64 = 1_757_000_000_000;
     pub const DAY: u32 = 100;
     pub const BATTERY_ID: &str = "test-battery";

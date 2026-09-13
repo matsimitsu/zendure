@@ -1,14 +1,10 @@
 //! What the offline subcommands do, once `cli` has said which one.
 //!
-//! Separate from `main.rs`, which is the async coordinator loop and shares
-//! nothing with these — they are all synchronous and touch no device.
-//! `export` and `replay_fixture` read no configuration at all — see
-//! `cli.rs`'s module doc comment for why `Invocation` cannot even hand them
-//! one by accident. `check_config` is the exception: reading configuration,
-//! strictly, is its entire job. Separate from `cli.rs`, which deliberately
-//! holds parsing alone so the whole argument surface stays testable against a
-//! vector of strings. The run half needed a home of its own rather than
-//! whichever file happened to have a `main` in it.
+//! Separate from `main.rs` (the async coordinator loop): these are all
+//! synchronous and touch no device. `export` and `replay_fixture` read no
+//! configuration at all — see `cli.rs`'s module doc for why `Invocation`
+//! cannot even hand them one. `check_config` is the exception: strictly reading
+//! configuration is its entire job.
 
 use std::io::Write;
 use std::path::Path;
@@ -18,12 +14,10 @@ use crate::journal::read;
 use crate::replay::{self, Fixture};
 use crate::units::Timestamp;
 
-/// `zendure export` — a stretch of the journal as a replay fixture.
-///
-/// Reads no configuration: a fixture carries the tuning it was decided under,
-/// recorded in the journal's own session row, and nothing about how to reach a
-/// device. That is what makes this runnable against a copied database on a
-/// laptop with no broker in sight.
+/// `zendure export` — a stretch of the journal as a replay fixture. Reads no
+/// configuration: a fixture carries the tuning it was decided under, recorded
+/// in the journal's own session row, and nothing about how to reach a device — runnable
+/// against a copied database on a laptop with no broker in sight.
 pub fn export(
     db: &Path,
     from: Timestamp,
@@ -73,22 +67,13 @@ pub fn replay_fixture(
     Ok(())
 }
 
-/// `zendure --check` — parse a config file the way the daemon would, but
-/// strictly.
-///
-/// The daemon is lenient: a wrong-typed tuning knob warns and falls back,
-/// because systemd restarts a failed unit and a typo would restart-loop a
-/// controller that is holding a battery command steady.
-///
-/// `--check` inverts that deliberately. It runs at deploy time, where there is
-/// no battery command to strand, and Ansible uses it as a `validate:` hook — so
-/// a parse error is fatal and *any* warning is promoted to a failure too.
-/// Without that asymmetry the daemon's leniency would just be a way for a typo
-/// to reach production quietly.
-///
-/// The effective config prints to stdout via `Config`'s hand-written `Debug`
-/// (which redacts `mqtt_password`) whatever the outcome, so a failing check
-/// still shows the value that was chosen.
+/// `zendure --check` — parses a config file like the daemon, but strictly.
+/// The daemon is lenient (a wrong-typed knob warns and falls back, since a typo must
+/// not restart-loop a controller holding a battery command steady); `--check` runs at
+/// deploy time with nothing to strand, and Ansible uses it as a `validate:` hook, so a
+/// parse error or any warning is fatal instead.
+/// Prints the effective config via `Config`'s `Debug` (redacting `mqtt_password`)
+/// regardless of outcome.
 pub fn check_config(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let (config, warnings) = Config::from_toml(path)?;
 

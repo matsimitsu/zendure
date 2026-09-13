@@ -1,29 +1,17 @@
 //! Where a published reading goes.
 //!
-//! The trait is **synchronous and infallible by construction**, and that is the
-//! whole point of this module. Every publish used to be an `async fn` awaited
-//! inside the coordinator's `select!`, against a client whose request channel
-//! holds 50 entries and is drained only by the task polling the MQTT eventloop.
-//! With no broker that task never drains it, so once ~50 publishes had queued,
-//! `publish().await` never returned: no polls, no decisions, and **no failsafe
-//! re-assertion** — the battery held its last command for the length of the
-//! outage, which is the exact state the failsafe exists to prevent.
-//!
-//! The old shape made "do not block the decision path" a rule a reviewer had to
-//! enforce, and the 50-slot channel quietly enforced the opposite. A sink with
-//! no future to await and no error to handle cannot be misused that way: the
-//! decision path structurally cannot wait on a broker.
+//! `Publisher` is synchronous and infallible by construction: rumqttc's request
+//! channel holds only 50 entries and is drained solely by the task polling the
+//! eventloop, so an awaited `publish()` with no broker connected never returns
+//! past ~50 queued messages — stalling the coordinator's `select!` with no
+//! failsafe re-assertion, and the battery stuck on its last command for the
+//! length of the outage.
 
 use rumqttc::QoS;
 
-/// How a message is delivered, as one role rather than two loose booleans.
-///
-/// QoS and retain only ever move together here — telemetry is a value the next
-/// reading supersedes, a discovery document is a retained description Home
-/// Assistant needs on reconnect — so they travel as one word. Passing
-/// `(QoS::AtLeastOnce, true)` positionally at three call sites was the same
-/// class of uncheckable pair that `ControlPath` replaced for the two status
-/// strings.
+/// How a message is delivered. QoS and retain always move together: telemetry
+/// is a value the next reading supersedes (QoS 0, not retained); a discovery
+/// document is retained for Home Assistant on reconnect (QoS 1, retained).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Delivery {
     /// A reading the next one supersedes. QoS 0, not retained.
@@ -73,46 +61,28 @@ impl Message {
     }
 }
 
-/// Whether the sink took a message.
-///
-/// Not an error: there is nothing a caller in the decision path could usefully
-/// do about a broker that is not there, and no caller is obliged to look. It is
-/// a report, and exactly one kind of caller needs it — an announcement, which
-/// must be repeated until it lands, where a reading is superseded by the next
-/// one a second later.
+/// Whether the sink took a message. Not an error: no caller in the decision
+/// path could act on a missing broker. Only an announcement, which must repeat
+/// until accepted, needs to check this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Accepted {
     Queued,
     Dropped,
 }
 
-/// A sink for outgoing readings.
-///
-/// `&self` rather than `&mut self` for the same reason `BatteryController` takes
-/// it: the coordinator holds this immutably across a `select!` and the
-/// implementation keeps its own interior mutability. Synchronous and
-/// infallible: no future to await, no error to handle.
+/// A sink for outgoing readings. `&self`, not `&mut self`: the coordinator
+/// holds this immutably across a `select!`, so implementations keep their own
+/// interior mutability. Synchronous and infallible — no future to await, no
+/// error to handle.
 pub trait Publisher: Send + Sync {
     fn publish(&self, message: Message) -> Accepted;
 }
 
-/// The brokerless sink: `run.rs` reaches for this when `[mqtt]` is absent from
-/// configuration, so a laptop with no broker can still run the whole
-/// coordinator loop.
-///
-/// **Returns `Accepted::Queued`, never `Accepted::Dropped`.** That looks
-/// backwards for something that discards every message, but it is the whole
-/// reason this type is safe to substitute for a real sink: `Announcer::announce`
-/// (`announce.rs`) only marks an id announced once the sink reports `Queued`,
-/// specifically so a refused document is retried rather than silently given up
-/// on. Answering `Dropped` here would not mean "nothing was sent" — it would
-/// make every discovery document, every poll, look like a broker that is
-/// permanently full, and `Announcer` would rebuild and re-offer all of them,
-/// forever, on a hot loop that goes nowhere. `Queued` says "this sink took the
-/// message," which is the one thing actually true about a sink whose entire
-/// job is to take a message and do nothing with it. Do not "simplify" this to
-/// `Dropped` because nothing is being delivered — that reasoning is exactly
-/// the bug this comment exists to prevent.
+/// The brokerless sink used when `[mqtt]` is absent, so a laptop with no
+/// broker can still run the whole coordinator loop. Returns `Accepted::Queued`,
+/// never `Dropped`: `Announcer` marks an id announced only on `Queued`, so
+/// `Dropped` here would make it re-offer every discovery document forever on a hot
+/// loop.
 pub struct NullPublisher;
 
 impl Publisher for NullPublisher {

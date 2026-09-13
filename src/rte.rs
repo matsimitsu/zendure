@@ -141,10 +141,6 @@ impl RteTracker {
     }
 
     /// Estimate usable energy (kWh) that can be recovered from the battery.
-    ///
-    /// - `soc`: current state of charge (0–100%)
-    /// - `min_soc`: minimum allowed SOC (0–100%)
-    /// - `pack_capacities`: capacity of each connected pack
     pub fn usable_kwh(
         &self,
         soc: Soc,
@@ -416,12 +412,11 @@ mod tests {
         assert!(tracker.rte_percent().is_none());
     }
 
-    /// The old-format JSON is a live file in production holding a 24h window.
-    /// `PersistedState` has no `#[serde(default)]` anywhere, so any shape
-    /// change makes it fail to parse — and `load` swallows that with a
-    /// warning, silently losing the window. This pins the wire format: parse
-    /// the exact old-format string, check the values landed correctly, and
-    /// assert re-serializing it produces byte-identical output.
+    /// The old-format JSON is a live production file holding a 24h window;
+    /// with no `#[serde(default)]` anywhere, any shape change fails to parse
+    /// and `load` swallows it with a warning, silently losing the window.
+    /// Pins the wire format: parses the exact old string and asserts re-serializing it
+    /// is byte-identical.
     #[test]
     fn test_persisted_state_wire_format_unchanged() {
         let json = r#"{"samples":[{"ts":1.0,"charge_wh":2.0,"discharge_wh":3.0}],"last_charge_power":100.0,"last_discharge_power":0.0,"last_sample_ts":1.0}"#;

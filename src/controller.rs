@@ -12,19 +12,10 @@ use crate::world::World;
 
 const RAMP_FACTOR: f64 = 0.75;
 
-/// The controller's mutable history, split out so a decision can be replayed.
-///
-/// `Controller`'s other fields are configuration — read once from [`Config`] and
-/// never written — so they belong to the session, not to the moment, and travel
-/// in the journal's `sessions` row instead of on every decision. What is left
-/// here is exactly the state that makes the same input produce a different
-/// output depending on what came before: the hysteresis and cooldown history,
-/// the idle timers, and the daily counters.
-///
-/// Restoring these into a controller built from the same config reproduces the
-/// decision. Dropping any one of them does not fail loudly — it replays *almost*
-/// right, which is worse, so the equivalence test in this module exists to make
-/// an omission fail.
+/// Mutable history, split from the config fields (which live in the journal's
+/// `sessions` row) so a decision can be replayed: hysteresis/cooldown history,
+/// idle timers, and daily counters. Dropping a field replays silently wrong
+/// rather than failing loudly; the equivalence test in this module catches that.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ControllerState {
     pub last_mode: ControlMode,
@@ -66,20 +57,10 @@ impl Controller {
         Self::from_session(&config.session(), clock)
     }
 
-    /// Build from the tuning half alone — thirteen of `SessionConfig`'s
-    /// fourteen fields, taken from the shape the journal records and a fixture
-    /// carries. The fourteenth, `mqtt_timeout_secs`, belongs to `Engine` rather
-    /// than here.
-    ///
-    /// This is what makes "a fixture is hermetic" true rather than asserted: a
-    /// replay has no `Config` and must not need one, and a controller that can
-    /// be *constructed* from the fixture's own tuning cannot be secretly
-    /// reading a connection setting. It does not make the controller pure —
-    /// `decide` still reads a `World` and a `Clock`, both of which arrive with
-    /// the events. What keeps the knob list honest is `Config::session`'s
-    /// exhaustive destructure, which turns a new field into a compile error
-    /// there; routing `from_config` through here means there is one list rather
-    /// than two that have to agree.
+    /// Builds from `SessionConfig`'s tuning fields alone (`mqtt_timeout_secs`
+    /// belongs to `Engine`), so a fixture with no `Config` can construct an
+    /// equivalent controller for replay. `Config::session`'s exhaustive
+    /// destructure turns a new field into a compile error here, keeping one knob list.
     pub fn from_session(session: &SessionConfig, clock: &Clock) -> Self {
         let min_mode_duration = Duration::from_secs(session.min_mode_duration_secs);
         let min_decision_interval = Duration::from_secs(session.min_decision_interval_secs);
@@ -142,12 +123,10 @@ impl Controller {
             day_ordinal,
             ..Clock::test_at(now_ms)
         };
-        // Through `from_session` so the knobs come from the one list a fixture
-        // would also carry. Only the history differs from a freshly started
-        // controller, and it differs deliberately: a minute of slack on both
-        // cooldowns — comfortably past `min_mode_duration` and
-        // `min_decision_interval` — and no idle start, so a test's first event
-        // is never suppressed by timing it did not ask about.
+        // Via `from_session` so knobs match the fixture list; only the history
+        // differs, deliberately: a minute of slack on both cooldowns (past
+        // `min_mode_duration` and `min_decision_interval`), and no idle start,
+        // so a test's first event is never suppressed by timing it didn't ask about.
         let mut controller = Self::from_session(&SessionConfig::test_default(), &clock);
         controller.state.last_mode_change = now - Elapsed::of(Duration::from_secs(60));
         controller.state.last_decision = now - Elapsed::of(Duration::from_secs(60));
@@ -171,11 +150,9 @@ impl Controller {
         Some(self.decide_at(world, battery, clock))
     }
 
-    /// `battery` is resolved by the caller rather than looked up here: this
-    /// objective is written for exactly one battery, and saying so at the
-    /// signature is more honest than hiding a `.next()` inside the pipeline.
-    /// When a second one lands, that resolution moves into the allocator, not
-    /// here.
+    /// `battery` is resolved by the caller: this objective is written for
+    /// exactly one battery. When a second one lands, that resolution moves to
+    /// the allocator, not here.
     pub(crate) fn decide_at(
         &mut self,
         world: &World,
@@ -199,10 +176,9 @@ impl Controller {
         }
 
         // 0b. Device-reported fault — stay idle. Idle only writes inputLimit=0 /
-        // outputLimit=0, so we neither command power nor overwrite the device's
-        // chargeMaxLimit/inverseMaxPower setpoints. If a genuine fault zeroed
-        // those limits, we leave them at 0 and stand down rather than forcing a
-        // charge.
+        // outputLimit=0, never chargeMaxLimit/inverseMaxPower, so a fault that
+        // zeroed those setpoints is left at 0 rather than overwritten by a
+        // forced charge.
         if battery.fault {
             tracing::warn!("Device reports a fault, idling");
             self.force_idle(clock);
@@ -232,18 +208,18 @@ impl Controller {
         }
     }
 
-    /// Determines the desired mode based on grid state, battery SOC, and time.
-    ///
-    /// Uses hysteresis: the threshold to *start* charging/discharging is more
-    /// aggressive than the threshold to *keep* doing so. This prevents
-    /// oscillation when the battery's own grid effect pushes the meter reading
-    /// close to the start threshold.
+    /// Determines the desired mode from grid state, battery SOC, and time.
+    /// Hysteresis: starting charge/discharge needs the full threshold, but
+    /// once active only crossing back past 0W stops it, since the meter
+    /// reading includes the battery's own effect and would otherwise oscillate near the
+    /// start threshold.
     fn target_mode(&self, world: &World, battery: &BatteryState, clock: &Clock) -> ControlMode {
         // Adjust for battery's own grid effect: the meter reading includes
         // the battery's consumption (charging) or production (discharging).
         let underlying_grid = world.underlying_grid();
 
-        // Hysteresis: once charging, keep going as long as we're still exporting (< 0W).
+        // Hysteresis: once charging, keep going as long as we're still exporting (<
+        // 0W).
         // Only require the full start threshold to *begin* charging.
         let charge_threshold = if self.state.last_mode == ControlMode::Charge {
             GridPower::ZERO
@@ -258,7 +234,8 @@ impl Controller {
             return ControlMode::Charge;
         }
 
-        // Hysteresis: once discharging, keep going as long as we're still importing (> 0W).
+        // Hysteresis: once discharging, keep going as long as we're still importing (>
+        // 0W).
         let discharge_threshold = if self.state.last_mode == ControlMode::Discharge {
             GridPower::ZERO
         } else {
@@ -777,7 +754,8 @@ mod tests {
     #[test]
     fn idle_within_deadband() {
         let mut ctrl = controller_no_cooldown();
-        // 0W is at discharge_start_threshold (0W) and above charge_start_threshold (-100W)
+        // 0W is at discharge_start_threshold (0W) and above charge_start_threshold
+        // (-100W)
         let decision = decide_at(
             &mut ctrl,
             &world(GridPower(0.0), SolarPower::new(0.0), &battery(50)),
@@ -981,7 +959,8 @@ mod tests {
     fn discharge_reduces_power_when_overproducing() {
         let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(60));
         // Battery discharging 400W but grid exporting 50W (overshot).
-        // underlying_grid = -50 + 400 = 350W → real demand still high, stay discharging.
+        // underlying_grid = -50 + 400 = 350W → real demand still high, stay
+        // discharging.
         // Power: 400 + (-50 - 5) = 345W (reduces toward balance).
         let bat = battery_discharging(50, 400);
         let decision = decide_at(
@@ -1462,7 +1441,8 @@ mod tests {
 
     #[test]
     fn charge_hysteresis_keeps_charging_within_deadband() {
-        // underlying_grid = -50W, which is between charge_start_threshold (-100W) and 0W.
+        // underlying_grid = -50W, which is between charge_start_threshold (-100W) and
+        // 0W.
         // From idle: -50 > -100 → would NOT start charging.
         // But already charging: threshold drops to 0W, -50 < 0 → keeps charging.
         let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(60));
@@ -1491,7 +1471,8 @@ mod tests {
     fn charge_hysteresis_stops_when_importing() {
         // Already charging, but underlying_grid >= 0 → even hysteresis can't save it.
         // Battery charging at 200W, grid reads +10W → underlying = 10 + (-200) = -190W.
-        // Wait, let's use a simpler case: battery idle, grid +10W → underlying = +10 >= 0.
+        // Wait, let's use a simpler case: battery idle, grid +10W → underlying = +10 >=
+        // 0.
         let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(60));
         let decision = decide_at(
             &mut ctrl,
@@ -1517,10 +1498,12 @@ mod tests {
 
     #[test]
     fn discharge_hysteresis_keeps_discharging_near_zero() {
-        // Already discharging. Set a higher start threshold to make the deadband visible.
+        // Already discharging. Set a higher start threshold to make the deadband
+        // visible.
         let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(60));
         ctrl.discharge_start_threshold = GridPower(100.0);
-        // underlying_grid = 50W: below start threshold (100W) but above hysteresis (0W).
+        // underlying_grid = 50W: below start threshold (100W) but above hysteresis
+        // (0W).
         let decision = decide_at(
             &mut ctrl,
             &world(GridPower(50.0), SolarPower::new(0.0), &battery(50)),
@@ -1544,8 +1527,10 @@ mod tests {
 
     #[test]
     fn discharge_hysteresis_stops_when_exporting() {
-        // Already discharging, but underlying_grid = -10 <= 0 → not > 0 → stops discharging.
-        // -10 is also > charge_start_threshold (-100) → not enough export to charge → idle.
+        // Already discharging, but underlying_grid = -10 <= 0 → not > 0 → stops
+        // discharging.
+        // -10 is also > charge_start_threshold (-100) → not enough export to charge →
+        // idle.
         let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(60));
         let decision = decide_at(
             &mut ctrl,
@@ -1557,7 +1542,8 @@ mod tests {
 
     #[test]
     fn discharge_hysteresis_boundary_at_zero() {
-        // Already discharging, underlying_grid = 0.0 exactly → 0.0 > 0.0 is false → stops.
+        // Already discharging, underlying_grid = 0.0 exactly → 0.0 > 0.0 is false →
+        // stops.
         let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(60));
         ctrl.discharge_start_threshold = GridPower(100.0);
         let decision = decide_at(
@@ -1629,16 +1615,9 @@ mod tests {
 
     #[test]
     fn charge_hysteresis_with_battery_draw_prevents_oscillation() {
-        // Battery charging at 300W. Grid meter reads -20W (small export).
-        // underlying_grid = -20 + (-300) = -320W → well below 0 → keeps charging.
-        // Without hysteresis (threshold -100): -320 < -100 → would also charge.
-        // The real value of hysteresis shows when grid reads +80W:
-        // underlying = 80 + (-300) = -220W. Without hysteresis: -220 < -100 → charge.
-        // But what about +80 from idle? underlying = 80 → not < -100 → idle. Good.
-        //
-        // Key scenario: grid reads -20W while charging 300W.
-        // From idle this would be: underlying = -20, -20 > -100 → idle (correct, too little export).
-        // While charging: underlying = -20 + (-300) = -320, -320 < 0 → keep charging (correct).
+        // Battery charging 300W, grid reads -20W → underlying = -20 + (-300) = -320W.
+        // From idle: -20 > -100 (start threshold) → would stay idle. While
+        // charging: -320 < 0 (hysteresis threshold) → keeps charging.
         let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(60));
         let bat = battery_charging(50, 300);
         let decision = decide_at(
@@ -1653,7 +1632,8 @@ mod tests {
     fn discharge_hysteresis_with_battery_output_prevents_oscillation() {
         // Battery discharging 400W. Grid reads -30W (slight export = overshot).
         // underlying_grid = -30 + 400 = 370W → still > 0 → keep discharging.
-        // From idle: underlying = -30 → not > 0 threshold → idle. Hysteresis prevents flip.
+        // From idle: underlying = -30 → not > 0 threshold → idle. Hysteresis prevents
+        // flip.
         let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(60));
         let bat = battery_discharging(50, 400);
         let decision = decide_at(
@@ -1698,12 +1678,9 @@ mod tests {
         assert_eq!(decision.mode, ControlMode::Discharge);
     }
 
-    /// Simulates a discharge scenario with Shelly Pro 3EM providing
-    /// direct signed grid power every second.
-    ///
-    /// Scenario: House consuming 150W, battery idle long enough.
-    /// The battery should ramp up from idle to ~150W discharge, covering the
-    /// house demand and bringing net grid power close to zero.
+    /// Shelly Pro 3EM gives direct signed grid power every second. House
+    /// consuming 150W, battery idle long enough: should ramp from idle to
+    /// ~150W discharge, converging net grid power to near zero.
     #[test]
     fn discharge_converges_to_house_consumption() {
         let mut ctrl = controller_no_cooldown();
@@ -1751,7 +1728,8 @@ mod tests {
         // Same mode: 145 + (5 - 5) = 145W — stable!
         assert_eq!(d3.power_watts, Setpoint::new(145), "step 3: steady state");
 
-        // Final check: battery is discharging within the discharge margin of house demand.
+        // Final check: battery is discharging within the discharge margin of house
+        // demand.
         let final_net = house_total - f64::from(d3.power_watts.get());
         assert!(
             final_net.abs() < 10.0,

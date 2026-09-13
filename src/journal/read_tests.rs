@@ -55,14 +55,11 @@ async fn a_recorded_run_reads_back_as_events_paired_with_their_commands() {
     assert_eq!(recording.config, config());
 }
 
-/// **The property the whole `seq` column exists for.**
-///
 /// `mqtt.rs` writes its pre-parse `shelly` capture from a different task, so it
-/// can land between an event and the decision that event caused. Alignment by
-/// "the next row" would then attribute the raw row's position to the decision,
-/// and alignment by timestamp cannot separate them at all — a decision carries
-/// its event's millisecond. This is the only test that fails if either
-/// regression is made.
+/// can land between an event and the decision it caused. Alignment by "the next
+/// row" would misattribute it, and alignment by timestamp can't separate them at
+/// all — a decision carries its event's millisecond. `seq` is what fixes this, and this
+/// is the only test that fails if either regression returns.
 #[tokio::test]
 async fn a_raw_capture_between_an_event_and_its_decision_does_not_misalign_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -146,11 +143,10 @@ async fn one_session_is_not_reported_as_a_restart() {
     );
 }
 
-/// `prune` deletes `sessions WHERE started_ms < cutoff`, and a session row is
-/// dated at process start while its rows are dated individually — so a daemon
-/// outliving the retention window would delete the row describing itself. The
-/// writer exempts its own session; a reader meeting an already-orphaned row
-/// must still produce a fixture rather than failing outright.
+/// A session row dates at process start while its own rows date individually,
+/// so a daemon outliving the retention window deletes the row describing
+/// itself; the writer exempts its own session, but a reader meeting an
+/// already-orphaned one must still produce a fixture rather than fail.
 #[tokio::test]
 async fn a_pruned_session_degrades_instead_of_failing() {
     let dir = tempfile::tempdir().unwrap();
@@ -363,15 +359,10 @@ fn a_decision_that_commanded_nothing_pairs_as_an_empty_list() {
 }
 
 /// Rows belonging to an event outside the slice must not be swept onto the last
-/// frame. `pair` bounds the final frame at `i64::MAX` on purpose — it is the
-/// query that keeps the two lists consistent, not the walk — so this pins the
-/// end-to-end property rather than the helper in isolation.
-///
-/// Both halves of that consistency are load-bearing: a decision carries its
-/// event's `ts_ms`, so the same `ts_ms <= to` bound excludes both; and the read
-/// happens in one transaction, so the daemon cannot append a decision between
-/// the two queries and leave it with no event to belong to. That interleaving
-/// is what produced fixtures asserting two commands on a single-battery step.
+/// frame. `pair` bounds its final frame at `i64::MAX` on purpose — consistency
+/// is the query's job: a decision carries its event's `ts_ms`, so one `ts_ms <=
+/// to` bound excludes both, and one transaction stops a decision being appended between
+/// the two queries with no event to belong to.
 #[tokio::test]
 async fn a_bounded_range_does_not_pick_up_a_later_events_commands() {
     let dir = tempfile::tempdir().unwrap();

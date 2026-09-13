@@ -1,16 +1,11 @@
 //! A simulated battery with a real integrating energy model, so the
-//! controller can eventually run against no hardware at all.
+//! controller can run against no hardware at all. Not a stub that echoes
+//! back what it was told: it keeps its own store of [`crate::units::WattHours`]
+//! and integrates real power over real time, so an overcharging setpoint hits
+//! a ceiling and an empty battery really does stop discharging.
 //!
-//! Not a stub that echoes back what it was told: a controller exercised
-//! against one of those would "work" no matter how wrong its decisions were.
-//! `VirtualBattery` keeps its own store of [`crate::units::WattHours`] and
-//! integrates real power over real time, so a setpoint that would overcharge
-//! the pack hits a ceiling and an empty battery really does stop discharging.
-//!
-//! `registry::from_config` is what selects it: a `[[device]] kind = "virtual"`
-//! entry builds one of these instead of a `ZendureClient`, and from that point
-//! on `run.rs` reaches it only through [`BatteryController`] and
-//! [`BatteryMonitor`], the same as any real device.
+//! `[[device]] kind = "virtual"` selects it; `run.rs` reaches it only through
+//! [`BatteryController`] and [`BatteryMonitor`], like any device.
 
 use std::sync::Mutex;
 
@@ -25,24 +20,17 @@ use crate::sync::guard;
 use crate::units::{BatteryPower, Efficiency, Setpoint, Soc, WattHours, Watts};
 use crate::world::DeviceId;
 
-/// A simulated battery: a rated spec (what it will accept), a set of pack
-/// capacities (how much it can hold), and an integrating model of what it
-/// currently holds.
-///
-/// The model lives behind a `Mutex` rather than being a plain field because
-/// [`BatteryController::apply`] takes `&self` — the trait's own doc comment
-/// explains why, and `ZendureClient` and the test-only `RecordingBattery`
-/// hold their mutable state behind the same kind of lock for the same reason.
+/// A simulated battery: a rated spec (what it accepts), pack capacities (how
+/// much it can hold), and an integrating model of what it currently holds.
+/// The model lives behind a `Mutex`, not a plain field, because
+/// [`BatteryController::apply`] takes `&self` — see that trait's own doc comment.
 pub struct VirtualBattery {
     id: DeviceId,
     spec: BatterySpec,
     /// Capacities of the connected packs; their sum is the usable capacity.
-    /// Kept as a `Vec` rather than collapsing it to one `WattHours` at
-    /// construction because a heterogeneous fleet (a smaller expansion pack
-    /// alongside the base unit) is the reason this is a list and not a single
-    /// number in the first place — a future change to per-pack behaviour
-    /// (different efficiencies, different degradation) has somewhere to hang
-    /// without changing this field's shape.
+    /// A `Vec`, not one collapsed `WattHours`, since a heterogeneous fleet
+    /// (a smaller expansion pack alongside the base unit) needs per-pack values —
+    /// leaving room for future per-pack behaviour without changing this field's shape.
     packs: Vec<WattHours>,
     charge_efficiency: Efficiency,
     discharge_efficiency: Efficiency,
@@ -100,17 +88,10 @@ impl VirtualBattery {
 
     /// Integrates the model forward from `model.last` to `now`, in place.
     /// Every public read or write goes through this first, so `model.last`
-    /// never falls behind what was last reported or commanded.
-    ///
-    /// In order:
-    /// 1. The elapsed time. Nothing to do if none has passed.
-    /// 2. The energy the last commanded flow moved over that span.
-    /// 3. That energy applied to `stored`, with efficiency in the physically
-    ///    correct direction.
-    /// 4. `stored` clamped into `[0, capacity]`.
-    /// 5. The *achieved* flow recomputed from what the clamp actually let
-    ///    happen, replacing the commanded flow `model.power` held on entry.
-    /// 6. `model.last` moved to `now`.
+    /// never falls behind. In order: elapsed time; energy moved over that
+    /// span; applied to `stored` with efficiency in the correct direction; clamped into
+    /// `[0, capacity]`; achieved flow recomputed from what the clamp let happen;
+    /// `model.last` advanced to `now`.
     fn advance_to(&self, model: &mut Model, now: Instant) {
         // Step 1.
         let dt = now.saturating_duration_since(model.last);
@@ -118,29 +99,21 @@ impl VirtualBattery {
             return;
         }
 
-        // Step 2. Both arguments to `integrate` are the same value —
-        // `model.power`, the flow commanded (or last achieved) since
-        // `model.last`. That is only a legitimate use of a *trapezoidal*
-        // integrator, which is built to handle a changing rate, because the
-        // rate here provably did not change across this span: `apply` (below)
-        // integrates the old power up to the moment a new command replaces
-        // it, and this method is the only other writer of `model.power` —
-        // and it runs at the *end* of the span it is integrating, never in
-        // the middle. So between the last `model.last` and `now`, `power` was
-        // piecewise-constant, and a trapezoid over a constant is exact; it is
-        // just a very flat one. A reviewer seeing a trapezoidal call with
-        // identical endpoints should read that as "this is a constant", not
-        // as a mistake — the constancy is the whole reason it's licensed.
+        // Step 2. Both arguments to `integrate` are `model.power`: legitimate
+        // for a trapezoidal integrator only because the rate provably didn't
+        // change across this span — `apply` integrates the old power up to a
+        // new command, and this is the only other writer, at the *end* of the span. A
+        // trapezoid over a constant is exact; identical endpoints mean "constant", not
+        // a mistake.
         let moved = WattHours::integrate(model.power.into_watts(), model.power.into_watts(), dt);
 
         let before = model.stored;
         let capacity = self.capacity();
 
-        // Step 3. Charging adds `moved * eta_charge` to the pack — some of
-        // what was drawn is lost to heat before it lands. Discharging removes
-        // `moved / eta_discharge` — the pack must give up *more* than it
-        // delivers. Getting this backwards is the classic simulated-battery
-        // bug: it makes a round trip *gain* energy instead of losing it.
+        // Step 3. Charging adds `moved * eta_charge` (heat lost before it
+        // lands); discharging removes `moved / eta_discharge` (the pack gives up more
+        // than it delivers). Backwards, a round trip would *gain* energy instead of
+        // losing it.
         let after = if model.power.charging() > Watts::ZERO {
             WattHours(before.get() + moved.get().abs() * self.charge_efficiency.fraction())
         } else if model.power.discharging() > Watts::ZERO {
@@ -153,13 +126,10 @@ impl VirtualBattery {
         let clamped = WattHours(after.get().clamp(0.0, capacity.get()));
 
         // Step 5. Recompute the achieved flow from what actually happened to
-        // `stored`, not from the setpoint that was commanded. This is the
-        // subtle step and it is not optional: a pack that just clamped to
-        // full absorbed less than it was told to, and it has to *report*
-        // less — a full pack that keeps claiming its commanded 1200 W of
-        // charge tells every future consumer of `flow()` that it is still
-        // taking power it has, in fact, stopped accepting. A feedback loop
-        // closed around that figure would never converge.
+        // `stored`, not the commanded setpoint: a pack clamped to full
+        // absorbed less than commanded and must *report* less — claiming its
+        // stale 1200W setpoint would tell every `flow()` consumer it's still charging,
+        // and a feedback loop closed on that figure would never converge.
         let achieved = clamped.get() - before.get();
         model.power = if model.power.charging() > Watts::ZERO {
             // Invert step 3: the meter-side energy that would have produced
@@ -180,13 +150,10 @@ impl VirtualBattery {
     }
 
     /// The test seam behind [`VirtualBattery::flow`] and
-    /// [`crate::device::BatteryController::apply`]: everything here is
-    /// deterministic given an explicit instant, so tests drive it directly
-    /// instead of racing a real clock. `tokio::time::Instant` rather than
-    /// `std::time::Instant` for the same reason `rte.rs`'s `Instant` choice
-    /// would if it needed replaying: production behaviour is identical, but a
-    /// test can run under a paused Tokio clock and integrate a simulated hour
-    /// in microseconds instead of actually waiting one.
+    /// [`crate::device::BatteryController::apply`]: deterministic given an
+    /// explicit instant, so tests drive it directly instead of racing a real
+    /// clock. `tokio::time::Instant`, not `std::time::Instant`, lets a test run under a
+    /// paused Tokio clock and integrate a simulated hour in microseconds.
     pub(crate) fn apply_at(&self, now: Instant, command: &Command) {
         let mut model = guard(&self.model);
 
@@ -230,12 +197,8 @@ impl VirtualBattery {
             max_charge_power: self.spec.max_charge_power,
             current_power: model.power,
             // A simulated pack never recalibrates and never faults — those
-            // are real-hardware conditions this model doesn't produce. A
-            // later commit can inject them deliberately once something
-            // exercises the controller's handling of them; inventing the
-            // knob before that exists would be speculative API with no call
-            // site, which is exactly what `units.rs`'s own header warns
-            // against.
+            // are real-hardware conditions this model doesn't produce, so both read as
+            // always-false rather than a fabricated value.
             soc_calibrating: false,
             soc_limit_reached: soc >= Soc::FULL,
             fault: false,
@@ -243,10 +206,9 @@ impl VirtualBattery {
     }
 
     /// The flow the battery is currently reporting — the achieved figure
-    /// `advance_to` last computed, not necessarily the commanded one. A later
-    /// commit closes a feedback loop through this: the objective reads it
-    /// back to decide the next setpoint, which is the entire reason a full
-    /// pack has to report zero here instead of its stale commanded power.
+    /// `advance_to` last computed, not necessarily the commanded one. The
+    /// objective reads this back to decide the next setpoint, which is why a full pack
+    /// must report zero here instead of its stale commanded power.
     pub fn flow(&self) -> BatteryPower {
         let mut model = guard(&self.model);
         self.advance_to(&mut model, Instant::now());
@@ -260,12 +222,10 @@ impl VirtualBattery {
 
 impl BatteryController for VirtualBattery {
     /// A simulated pack has no network to be unreachable over and no partial
-    /// write to fail halfway through — `apply` only ever mutates an in-process
-    /// `Mutex`. `Infallible` states that plainly, rather than reaching for a
-    /// `String` (as the test-only `RecordingBattery` does, because it *can*
-    /// fail on purpose) for an error that can never actually occur: the
-    /// compiler can see an `Ok` is the only possible outcome, and so can every
-    /// caller of `actuate`.
+    /// write to fail halfway through — `apply` only mutates an in-process
+    /// `Mutex`. `Infallible` states that plainly (unlike the test-only
+    /// `RecordingBattery`'s `String`, which fails on purpose): the compiler sees `Ok`
+    /// is the only outcome, and so does every caller of `actuate`.
     type Error = std::convert::Infallible;
 
     fn id(&self) -> &DeviceId {
@@ -301,17 +261,11 @@ impl BatteryMonitor for VirtualBattery {
 }
 
 impl VirtualBattery {
-    /// Builds the [`BatteryReading`] `prepare`/`poll` hand back: the model's
-    /// state plus telemetry that is honest about what a simulated pack does
-    /// not have.
-    ///
-    /// `pack_capacities` is always `Some` — every tick, not only the first —
-    /// because unlike a real device this model never fails to report them;
-    /// `run.rs`'s "keep the last known set" fallback exists for a report that
-    /// *can* omit them, which this one never does. No temperatures (a
-    /// simulated pack generates none) and no `min_soc` (nothing here ever
-    /// floors it below zero), so both read as the caller's own defaults
-    /// rather than a fabricated number.
+    /// Builds the [`BatteryReading`] `prepare`/`poll` hand back, honest about
+    /// what a simulated pack doesn't have. `pack_capacities` is always
+    /// `Some` (this model never fails to report them, so `run.rs`'s "keep the last
+    /// known set" fallback never engages); no temperatures or `min_soc`, so both read
+    /// as the caller's defaults.
     fn reading_as_battery_reading(&self) -> BatteryReading {
         let state = self.reading();
         BatteryReading {
@@ -363,16 +317,12 @@ mod tests {
 
     #[tokio::test]
     async fn charging_for_an_hour_at_95_percent_adds_950_wh() {
-        // 1000 W held for 1 h is 1000 Wh at the meter (`WattHours::integrate`
-        // of a constant, pinned by units_tests.rs's own
-        // `watt_hours_integrate_power_over_time`). 95% of that lands in the
-        // pack: 1000 * 0.95 = 950 Wh.
-        //
-        // Capacity is 100,000 Wh rather than a rounder 10,000: at 10,000 the
-        // resulting SOC lands on an exact x.5 boundary, where the tiny
-        // floating-point error `1000.0 * 0.95` actually carries (it is not
-        // quite 950.0) flips which way `Soc::from_fraction`'s rounding goes —
-        // a real edge case, but not the one this test is for.
+        // 1000 W for 1 h = 1000 Wh at the meter; 95% lands in the pack: 1000 * 0.95 =
+        // 950 Wh.
+        // Capacity is 100,000 Wh, not a rounder 10,000: at 10,000 the SOC
+        // lands on an exact x.5 boundary where the tiny float error in
+        // `1000.0 * 0.95` (not quite 950.0) flips `Soc::from_fraction`'s rounding — a
+        // real edge case, but not the one this test is for.
         let t0 = Instant::now();
         let battery = battery(100_000.0, Soc::new(50));
 
@@ -405,15 +355,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_full_round_trip_returns_eta_squared_of_the_energy_put_in() {
-        // Charge 1000 W for 1 h: 1000 Wh drawn, 950 Wh actually stored (the
-        // previous test's arithmetic). Then discharge long enough to remove
-        // exactly those 950 Wh again: discharging removes `moved / eta`, so
-        // `moved = 950 * 0.95 = 902.5` Wh must leave at the meter, which at
-        // 1000 W takes `902.5 / 1000` h = 0.9025 h = 3249 s.
-        //
-        // Energy in was 1000 Wh; energy out was 902.5 Wh. The ratio,
-        // 902.5 / 1000 = 0.9025, is exactly 0.95 * 0.95 = eta^2 — charging
-        // loses one factor of eta, discharging loses another.
+        // Charge 1000 W for 1h: 950 Wh stored. Discharging removes `moved /
+        // eta`, so `moved = 950*0.95 = 902.5` Wh must leave the meter, taking
+        // `902.5/1000` h = 0.9025h = 3249s at 1000W. Energy in 1000 Wh, out
+        // 902.5 Wh: ratio 0.9025 = 0.95*0.95 = eta^2 — charging loses one factor of
+        // eta, discharging loses another.
         let t0 = Instant::now();
         let battery = battery(1_000_000.0, Soc::new(50)); // capacity high enough never to clamp
 

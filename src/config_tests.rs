@@ -54,10 +54,9 @@ fn config() -> Config {
 }
 
 /// **A fixture has to be hermetic.** `config_json` is written into an
-/// append-only journal and is meant to be handed around — into a replay, a
-/// bug report, a test case. Anything describing how to reach a device makes
-/// that unsafe, and no amount of care at the call site fixes a leak once the
-/// rows are written.
+/// append-only journal and handed around — into a replay, a bug report, a
+/// test case — so anything describing how to reach a device makes that unsafe, with no
+/// fix once the rows are written.
 #[test]
 fn the_session_config_carries_no_connection_settings() {
     let json = serde_json::to_string(&config().session()).unwrap();
@@ -77,12 +76,10 @@ fn the_session_config_carries_no_connection_settings() {
     }
 }
 
-/// Pins the exact bytes, the way `world.rs` and `command_tests.rs` do.
-///
-/// Two things at once: durations are bare seconds rather than serde's
-/// `{"secs":_,"nanos":_}`, so the journal reads as numbers throughout; and
-/// the key set is fixed, so a knob quietly dropped from `session()` fails
-/// here even if `Config` still has it.
+/// Pins the exact bytes, the way `world.rs` and `command_tests.rs` do:
+/// durations are bare seconds rather than serde's `{"secs":_,"nanos":_}`,
+/// and the key set is fixed, so a knob quietly dropped from `session()` fails here even
+/// if `Config` still has it.
 #[test]
 fn the_session_config_serializes_to_the_exact_pinned_shape() {
     assert_eq!(
@@ -447,18 +444,10 @@ fn the_tuning_table_has_exactly_the_session_config_keys() {
     assert_eq!(toml_keys, session_keys);
 }
 
-/// Production's values, pinned as an explicit `Config` literal rather than
-/// reached for a helper that would hide which value belongs to which field —
-/// thirty fields, written out in full. If this ever disagrees with
-/// `config.example.toml`, the example file is what is wrong: it is supposed
-/// to be the record of what production runs, not the other way around.
-///
-/// This used to compare `config.example.toml` against `Config::from_vars` fed
-/// production's actual environment variables (the twelve the ansible unit
-/// file set) — proof that the environment path and the TOML path agreed
-/// before the environment path was deleted. That proof lives in git history
-/// now (`from_env`/`from_vars` are gone); this literal is what pins it in the
-/// tree.
+/// Production's values, pinned as an explicit `Config` literal (all thirty
+/// fields, in full) rather than a helper that would hide which value belongs
+/// to which field. If this ever disagrees with `config.example.toml`, the example file
+/// is wrong: it is the record of what production runs, not the other way around.
 #[test]
 fn the_example_config_is_what_production_runs() {
     let production = Config {

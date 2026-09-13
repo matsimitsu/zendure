@@ -1,15 +1,8 @@
 //! The coordinator loop: the process's whole runtime, lifted out of `main`.
 //!
 //! `main` parses arguments, initialises logging, reads configuration and calls
-//! [`run`]. The split exists so tests can provide custom device registries and
-//! stop conditions without building real hardware.
-//!
-//! The loop has tests that drive it end to end with a virtual battery, a null
-//! publisher (no broker), and a synthetic meter (no hardware). See [`run`]'s own
-//! doc comment for details on how the seams work.
-//!
-//! [`shut_down`]'s ordering — the subtlest thing in the file — is still
-//! covered separately, by its own unit test below.
+//! [`run`]. The split lets tests supply their own device registry and stop
+//! condition, so the loop runs end to end with no hardware and no broker.
 
 use std::future::Future;
 use std::time::Duration;
@@ -36,13 +29,9 @@ use crate::{controller, rte};
 use tokio::sync::mpsc;
 
 /// How long each half of a shutdown waits before giving up and saying so.
-///
-/// Bounded rather than unbounded, and used for both the MQTT drain and the
-/// journal's: the only other thing that would end an unbounded wait is
-/// systemd's `TimeoutStopSec`, and that ends it with SIGKILL, which loses the
-/// rows the wait was protecting. A deadline at least gets to name what it left
-/// behind. Two seconds is long enough for a healthy broker to take a full queue
-/// and short enough to be invisible in a `systemctl restart`.
+/// Bounded: an unbounded wait would only end via systemd's `TimeoutStopSec`
+/// and SIGKILL, losing the rows it was protecting. Two seconds drains a full
+/// queue from a healthy broker and is invisible in a `systemctl restart`.
 const DRAIN_DEADLINE: Duration = Duration::from_secs(2);
 
 /// The MQTT half of shutdown: the publisher `shut_down` drains, and the task
@@ -70,22 +59,15 @@ impl std::fmt::Display for StopReason {
     }
 }
 
-/// The stop condition production runs with.
-///
-/// Registers both handlers eagerly and returns a future that resolves on the
-/// first of them, so a registration failure is reported at startup rather than
-/// leaving a process that cannot be asked to stop.
-///
-/// The future is not polled until the loop begins, and startup first makes four
-/// HTTP round trips with a 5s timeout each plus a 5s sleep in
-/// `ensure_ram_mode`, so for up to ~25s a `systemctl stop` appears to do
-/// nothing. The signal is *latched*, not lost: tokio installs its handler at
-/// registration and the first loop iteration takes it — a delay well inside
-/// systemd's default `TimeoutStopSec`, not a hang.
-///
-/// Without a SIGTERM arm the process simply dies, taking everything still
-/// queued for the journal's writer with it. The row most worth having is the
-/// last decision before a restart.
+/// The stop condition production runs with. Registers both handlers eagerly, so a
+/// registration
+/// failure surfaces at startup rather than leaving the process unable to be asked to
+/// stop.
+/// Startup's four HTTP round trips plus `ensure_ram_mode`'s 5s sleep make `systemctl
+/// stop` look
+/// ignored for ~25s, but the signal latches at registration, well inside systemd's
+/// `TimeoutStopSec` — without this arm, SIGTERM kills the process outright, taking
+/// queued journal writes with it.
 pub fn shutdown_signal() -> Result<impl Future<Output = StopReason>, std::io::Error> {
     use tokio::signal::unix::{SignalKind, signal};
 
@@ -100,18 +82,14 @@ pub fn shutdown_signal() -> Result<impl Future<Output = StopReason>, std::io::Er
     })
 }
 
-/// Actuate a decision, record what happened, and report it once.
-///
-/// Both arms of the loop — a decision and the failsafe idle — do exactly this,
-/// differing only in the `ControlPath`, which carries the log wording, both
-/// status strings, and the journal's `kind`.
-///
-/// The journal write happens **after** `actuate`, so each recorded outcome
-/// reflects whether the write to that device actually landed — which is what
-/// you want when reconstructing an incident.
-///
-/// `engine` is borrowed rather than its state passed in, because the state has
-/// to be read after actuation too.
+/// Actuate a decision, record what happened, and report it once. The two callers differ
+/// only in
+/// `ControlPath` (log wording, both status strings, the journal's `kind`). The journal
+/// write
+/// happens after `actuate`, so the recorded outcome reflects whether the write to the
+/// device
+/// actually landed. `engine` is borrowed, not its state passed in, because the state
+/// must be read again after actuation.
 #[allow(clippy::too_many_arguments)]
 async fn apply_decision(
     devices: &Devices,
@@ -153,13 +131,11 @@ async fn apply_decision(
     mqtt::publish_cycle_counts(publisher, prefix, &engine.cycle_counts());
 }
 
-/// Everything a poll advances and publishes that no decision ever reads.
-///
-/// Round-trip efficiency, pack temperatures, SOC and battery power are all
-/// derived from a [`BatteryReading`]'s telemetry, which the objective does not
-/// consult, and they are published for graphing rather than fed to the
-/// engine. A struct groups these together, moving only once through the
-/// telemetry rather than scattering updates across the loop.
+/// Everything a poll advances and publishes that no decision ever reads: RTE, pack
+/// temperatures,
+/// SOC and battery power come from a [`BatteryReading`]'s telemetry, published for
+/// graphing and
+/// never consulted by the objective.
 struct PollTelemetry {
     rte: rte::RteTracker,
     /// Sticky: a report that carries no pack data leaves the last known set in
@@ -199,14 +175,10 @@ impl PollTelemetry {
         }
     }
 
-    /// Fold one poll in, then publish what it produced.
-    ///
-    /// Not `async`: every publish is a synchronous hand-off to the publisher's
-    /// queue, and `save` is a plain file write.
-    ///
-    /// Takes the whole [`BatteryReading`] rather than a report and a state
-    /// separately, so both halves come from the one adapter call that produced
-    /// them.
+    /// Fold one poll in, then publish what it produced. Not `async`: every publish is a
+    /// synchronous hand-off to the publisher's queue and `save` is a plain file write.
+    /// Takes the
+    /// whole [`BatteryReading`] so both halves come from one adapter call.
     fn record_and_publish(
         &mut self,
         publisher: &dyn Publisher,
@@ -252,20 +224,14 @@ impl PollTelemetry {
     }
 }
 
-/// Start the journal, and whichever combination of a broker connection and a
-/// meter source `config` asks for, then fold events until `stop` resolves or
-/// every feeder task goes away.
-///
-/// `devices` is built by the caller (`main.rs`'s `registry::from_config`) and
-/// handed in, rather than built here, for the same reason `stop` already was:
-/// both are the process's real edges — signals and hardware — and building
-/// them inside `run` would leave no seam for a test to hold a handle on
-/// either one. `main` is the only production call site and it always passes
-/// the registry it just built; the seam exists for
-/// `tests::run_drives_real_decisions_against_a_virtual_battery`, which
-/// constructs its own `Devices`, keeps an `Arc<VirtualBattery>` clone the
-/// registry also holds, and asserts on the battery directly once the loop
-/// exits — no journal, no SQLite, in that assertion's path at all.
+/// Starts the journal and whichever combination of broker and meter source `config`
+/// asks for,
+/// then folds events until `stop` resolves or every feeder task goes away. `devices` is
+/// handed in
+/// rather than built here — like `stop`, it's a real process edge, and building it
+/// inside `run`
+/// would leave tests no handle on it (the wiring test keeps an `Arc<VirtualBattery>`
+/// clone from it).
 pub async fn run(
     config: Config,
     devices: Devices,
@@ -280,11 +246,12 @@ pub async fn run(
         unreachable!("devices was just constructed with exactly the one battery above")
     };
 
-    // The battery's identity in the world, fixed for the life of the process,
-    // and taken from the adapter that will answer for it — the world's key and
-    // the address on a directive have to be the same string the adapter matches
-    // against, so there is one source for it. Stable across restarts in a way
-    // an index into a list would not be.
+    // The battery's identity in the world, fixed for the life of the process and taken
+    // from the
+    // adapter that answers for it, so the world's key and a directive's address are
+    // always the
+    // same string the adapter matches against. Stable across restarts, unlike an index
+    // into a list.
     let device_id = primary.id().clone();
 
     // On by default: by the time you think to enable logging, the bug you
@@ -340,12 +307,11 @@ pub async fn run(
     let ha_prefix = config.ha_publish_prefix.clone();
 
     let (tx, mut rx) = mpsc::channel::<MqttEvent>(64);
-    // Every task that can produce an `MqttEvent` — the real MQTT subscriber,
-    // the synthetic meter, both, or (impossible per `Config::from_toml_str`'s
-    // coherence checks) neither. `rx.recv()` returning `None` below means
-    // every sender is gone, which is only true once every feeder here has
-    // ended — the same "closed channel means stop" reading a single
-    // subscriber used to carry alone.
+    // Every task that can produce an `MqttEvent` — the subscriber, the synthetic meter,
+    // both, or
+    // (impossible per `Config::from_toml_str`'s coherence checks) neither. `rx.recv()`
+    // returning
+    // `None` below is true only once every feeder here has ended.
     let mut feeders: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     // The publisher: a real, queued sink over MQTT if `[mqtt]` is configured,
@@ -362,12 +328,12 @@ pub async fn run(
                 let (mqtt_publisher, publisher_task) = MqttPublisher::open(mqtt_client.clone());
                 let publisher: std::sync::Arc<dyn Publisher> = mqtt_publisher.clone();
 
-                // A synthetic meter has no Shelly topic to subscribe to, but this
-                // task still has to run — it is what drives the broker's
-                // eventloop, without which nothing this publisher queues ever
-                // reaches the socket. An empty topic never matches a real
-                // publish, so the subscribe-and-parse half of the loop below
-                // simply never fires.
+                // A synthetic meter has no Shelly topic, but this task must still run:
+                // it drives
+                // the broker's eventloop, without which nothing queued ever reaches the
+                // socket. An
+                // empty topic never matches a real publish, so the subscribe-and-parse
+                // half of the loop below simply never fires.
                 let shelly_topic = config
                     .shelly
                     .as_ref()
@@ -440,13 +406,14 @@ pub async fn run(
         mqtt_timeout,
     );
 
-    // Seed the world from the startup poll, so the first meter reading already
-    // has a battery to decide about. A failure to read it fails startup above,
-    // which is why `decide`'s `None` branch is unreachable in production.
-    //
-    // As an event through the fold, and journalled like any other, rather than
-    // written into the world directly. `step` on a `DeviceUpdate` only folds
-    // it in and returns an empty `Step`, so nothing else about startup changes.
+    // Seeds the world from the startup poll (as an `Event::DeviceUpdate` through the
+    // fold and
+    // journal, not written into `World` directly) so a replay has a battery from the
+    // first tick —
+    // skip the journal here and the opening minutes of a session become unreplayable. A
+    // failure to
+    // read it fails startup above, so `decide`'s `None` branch is unreachable in
+    // production.
     let startup = Event::DeviceUpdate {
         at: Clock::now(config.timezone),
         id: device_id.clone(),
@@ -460,16 +427,14 @@ pub async fn run(
     // of them, so it waits on this rather than on a second signal handler.
     let (web_stop_tx, web_stop_rx) = tokio::sync::oneshot::channel::<()>();
 
-    // The dashboard's live-state feed: a `watch` cell `run()` updates after
-    // every event it folds, independent of the MQTT publisher and the
-    // journal — see `web`'s module doc comment. `None` without `[web]`, so a
-    // controller with no dashboard neither reads the journal at startup nor
-    // clones a snapshot every tick into a channel nobody is listening to.
-    //
-    // Spawned separately from `feeders`: that list means "producer of
-    // `MqttEvent`s whose death should stop the loop", which an HTTP listener
-    // is not. A bind failure warns and runs without a dashboard, the same
-    // way a missing `[mqtt]` runs brokerless.
+    // The dashboard's live-state feed: a `watch` cell updated after every folded event,
+    // independent of the MQTT publisher and journal (see `web`'s module doc). `None`
+    // without
+    // `[web]` skips reading the journal at startup and cloning snapshots nobody listens
+    // to.
+    // Spawned apart from `feeders` (whose death stops the loop, unlike an HTTP
+    // listener); a bind failure just warns and runs without a dashboard, the same way a
+    // missing `[mqtt]` runs brokerless.
     let mut dashboard_tx: Option<web::DashboardStateSender> = None;
     let mut web_task = None;
     if let Some(web_cfg) = &config.web {
@@ -693,13 +658,13 @@ pub async fn run(
     )
     .await;
 
-    // Holds no journal-writer sender and only ever reads the journal, so it
-    // has no bearing on `shut_down`'s ordering — awaited after, once its own
-    // shutdown signal has fired. Bounded like the MQTT drain above: an SSE
-    // response body is a stream that runs for as long as the dashboard
-    // channel does, so `with_graceful_shutdown` alone can wait forever for a
-    // connection that will never end on its own — the deadline is what
-    // actually ends it.
+    // Holds no journal-writer sender, so it has no bearing on `shut_down`'s ordering —
+    // awaited
+    // after, once its own shutdown signal fires. Bounded like the MQTT drain: an SSE
+    // body is a
+    // stream that runs as long as the dashboard channel does, so
+    // `with_graceful_shutdown` alone
+    // would wait forever for a connection that never ends on its own.
     if let Some(mut handle) = web_task
         && tokio::time::timeout(DRAIN_DEADLINE, &mut handle)
             .await
@@ -715,28 +680,19 @@ pub async fn run(
     Ok(())
 }
 
-/// Stop everything in the one order that does not lose rows or stall. The
-/// order is not the one it looks like it should be.
-///
-/// The publisher drains **first**, while the feeders still run, because the
-/// MQTT feeder owns the eventloop that is the only thing moving bytes to the
-/// broker; aborting it first leaves the publisher awaiting a channel nobody
-/// drains, stalling every shutdown for the full deadline. This half is skipped
-/// in brokerless mode.
-///
-/// Then the journal. Its writer stops when every sender is gone and every
-/// feeder holds one, so the feeders must finish first — and `abort` only
-/// schedules cancellation, so awaiting it is what guarantees the captured clone
-/// is gone. **This half is unconditional:** the journal is what this function
-/// exists to protect.
-///
-/// Both drains are bounded, because an unbounded wait ends at systemd's
-/// `TimeoutStopSec` — with SIGKILL, losing the rows the wait was protecting.
-///
-/// The MQTT half guarantees **hand-off, not delivery**: `publish` returns once
-/// the request is in rumqttc's channel, so a tail can still be lost when the
-/// eventloop is dropped. The journal, not the broker, is the record that has to
-/// be right.
+/// Stops everything in the order that avoids losing rows or stalling — not the order it
+/// looks like it should be.
+/// The publisher drains first, while feeders still run, because the MQTT feeder owns
+/// the eventloop moving bytes to the broker; aborting it first would stall the drain
+/// for the full deadline. Skipped in brokerless mode.
+/// Then the journal, unconditionally: its writer stops only once every sender is gone,
+/// each feeder holds one so feeders must finish first, and since `abort` only schedules
+/// cancellation, awaiting it is what guarantees a captured clone is actually gone. Both
+/// drains are bounded — an unbounded wait would otherwise run to systemd's
+/// `TimeoutStopSec` and SIGKILL, losing the rows being protected.
+/// The MQTT half is hand-off, not delivery: `publish` returns once queued in rumqttc's
+/// channel, so a tail can still be lost when the eventloop drops — the journal, not the
+/// broker, is the record that has to be right.
 async fn shut_down(
     mqtt: Option<(&MqttPublisher, &mut PublisherTask)>,
     feeders: Vec<tokio::task::JoinHandle<()>>,
@@ -810,25 +766,15 @@ mod tests {
         assert_eq!(StopReason::Sigint.to_string(), "SIGINT");
     }
 
-    /// `shut_down` must finish, and must not take the journal down with it.
-    ///
-    /// A broker that is gone parks the delivery task on rumqttc's channel, so
-    /// the MQTT drain cannot complete and has to hit its deadline. Everything
-    /// after it in the sequence depends on that being bounded: an unbounded
-    /// await there hangs the process until systemd's `TimeoutStopSec` turns
-    /// into a SIGKILL, which loses exactly the rows the shutdown exists to
-    /// protect. Mutation-checked — replacing the timeout with a bare `await`
-    /// makes this fail, and the whole call is wrapped so it fails rather than
-    /// hangs.
-    ///
-    /// The subscriber holds an `Arc<Journal>` clone, as the real one does, so
-    /// this also covers the ordering that matters most: the writer ends only
-    /// when every sender is gone, and a task still holding one would stall the
-    /// journal drain.
-    ///
-    /// Honest limit: the journal drain's own deadline is belt-and-braces and
-    /// this test does not distinguish it — with the subscriber awaited, nothing
-    /// holds a sender and the writer ends either way.
+    /// `shut_down` must finish without taking the journal down with it. A dead broker
+    /// parks the
+    /// delivery task on rumqttc's channel, forcing the MQTT drain to hit its deadline —
+    /// mutation-
+    /// checked, since a bare `await` in place of the timeout makes this fail. The
+    /// subscriber holds
+    /// an `Arc<Journal>` clone like the real one, so this also covers the writer ending
+    /// only once every sender is gone (the journal drain's own deadline is
+    /// belt-and-braces and not distinguished here).
     #[tokio::test]
     async fn a_shutdown_finishes_when_the_broker_never_drains() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -882,12 +828,12 @@ mod tests {
         );
     }
 
-    /// Builds the `Config` the wiring tests below share: a virtual battery, a
-    /// null publisher (no `[mqtt]`) and a synthetic meter — no network, no
-    /// broker, no hardware. `capacity` is a parameter because the two callers
-    /// want different things from it: the wiring test wants it small enough
-    /// to see the SOC move, the round-trip test does not care and uses
-    /// whatever is convenient.
+    /// Builds the `Config` the wiring tests below share: a virtual battery, a null
+    /// publisher (no
+    /// `[mqtt]`) and a synthetic meter — no network, no broker, no hardware. `capacity`
+    /// is a
+    /// parameter because the wiring test wants it small enough to see the SOC move,
+    /// while the round-trip test doesn't care and uses whatever is convenient.
     fn virtual_config(dir: &tempfile::TempDir, capacity: WattHours) -> Config {
         Config {
             mqtt: None,
@@ -947,30 +893,27 @@ mod tests {
         (devices, battery)
     }
 
-    /// The end-to-end wiring test: the real `run()`, with a virtual battery, a
-    /// null publisher and a synthetic meter — no network, no broker, no
-    /// hardware. Asserted at the device, via this test's own
-    /// `Arc<VirtualBattery>` clone, rather than through the journal.
-    ///
-    /// `journal_path` points somewhere `Journal::open` cannot create, which
-    /// takes the disabled path deliberately — under `start_paused`, a single
-    /// outstanding `spawn_blocking` task is by itself enough to stop
-    /// `tokio::time::sleep` ever resolving, and the journal's writer is one.
-    /// `a_run_against_the_simulator_replays_byte_identically` keeps a real one.
-    ///
-    /// The expected capacity: discharge is capped at 800 W and a 2 kW load
-    /// keeps the objective pinned there, so at 95% efficiency the pack gives up
-    /// 842.1 Wh to deliver 800 Wh. Over 300 simulated seconds a 1,000 Wh pack
-    /// loses about 70.2 Wh — roughly 7 points of SOC from a 50% start.
+    /// The end-to-end wiring test: the real `run()` with a virtual battery, a null
+    /// publisher and a synthetic meter — no network, no broker, no hardware. Asserted
+    /// via this test's own `Arc<VirtualBattery>` clone rather than through the journal.
+    /// `journal_path` points somewhere `Journal::open` cannot create, disabling the
+    /// journal deliberately rather than as a workaround: under `start_paused`, a single
+    /// outstanding `spawn_blocking` task — and the journal's writer is one — is by
+    /// itself enough to stop `tokio::time::sleep` from ever resolving.
+    /// `a_run_against_the_simulator_replays_byte_identically` keeps a real journal.
+    /// Expected capacity: discharge is capped at 800W and a 2kW load keeps the
+    /// objective pinned there, so at 95% efficiency the pack gives up 842.1Wh to
+    /// deliver 800Wh; over 300 simulated seconds a 1,000Wh pack loses about 70.2Wh —
+    /// roughly 7 points of SOC from a 50% start.
     #[tokio::test(start_paused = true)]
     async fn run_drives_real_decisions_against_a_virtual_battery() {
         let dir = tempfile::TempDir::new().unwrap();
         let mut config = virtual_config(&dir, WattHours(1_000.0));
-        // Deliberately unopenable: `blocker` is a plain file, so
-        // `Journal::open`'s `create_dir_all(parent)` fails and it falls back
-        // to its documented disabled state — no channel, no writer thread, no
-        // SQLite. See this test's own doc comment for why that is the right
-        // choice here, not a workaround.
+        // Deliberately unopenable: `blocker` is a plain file, so `Journal::open`'s
+        // `create_dir_all(parent)` fails and it falls back to its documented disabled
+        // state (no
+        // channel, writer thread, or SQLite) — the right choice here per this test's
+        // own doc comment, not a workaround.
         let blocker = dir.path().join("blocker");
         std::fs::write(&blocker, b"unwritable as a directory").unwrap();
         config.journal_path = blocker.join("journal.db");
@@ -1020,16 +963,15 @@ mod tests {
         panic!("the dashboard never came up on port {port}");
     }
 
-    /// A browser tab left open must not hold shutdown to the drain deadline.
-    ///
-    /// Two independent faults show up as the same two seconds: a dashboard
-    /// waiting on a signal handler of its own never hears a stop that is not
-    /// a signal — like this test's own injected one — and a live
-    /// `WatchStream` keeps every SSE body, and with it
-    /// `with_graceful_shutdown`, open until the sender drops. Timed rather
-    /// than inspected, because the deadline is the only observable either
-    /// one has. Real time, not paused: the assertion is about a wall-clock
-    /// deadline that auto-advance would skip past for free.
+    /// A browser tab left open must not hold shutdown to the drain deadline. Two
+    /// independent
+    /// faults show up as the same two seconds: a dashboard's own signal handler never
+    /// hears a
+    /// non-signal stop like this test's, and a live `WatchStream` keeps every SSE body
+    /// (and
+    /// `with_graceful_shutdown`) open until the sender drops. Timed, not inspected,
+    /// since the deadline is the only observable either has; real time, not paused,
+    /// since auto-advance would skip past the wall-clock deadline being asserted.
     #[tokio::test]
     async fn an_open_dashboard_stream_does_not_hold_shutdown_to_the_deadline() {
         const RUN_FOR: Duration = Duration::from_millis(300);
@@ -1083,17 +1025,18 @@ mod tests {
         );
     }
 
-    /// A real `run()` loop populates the journal in a shape `from_recording`
-    /// can consume, and replaying it produces the same commands — meter to
-    /// channel to engine to journal to `read_range` to `replay::verify`, end to
-    /// end. `replay_tests.rs` uses a canned event vector, which proves the fold
-    /// is deterministic but takes on faith that a real loop's journal reads back.
-    ///
-    /// This one's subject *is* the journal, so it keeps a real one — which rules
-    /// out `start_paused`, since `Journal::open` spawns a `spawn_blocking` task
-    /// and any outstanding one stalls a paused clock's auto-advance. It runs on
-    /// real time, kept to two seconds: enough for a couple of decisions at the
-    /// synthetic meter's 1 Hz, short enough not to dominate the suite.
+    /// A real `run()` loop populates the journal in a shape `from_recording` can
+    /// consume, and
+    /// replaying it produces the same commands end to end (meter → channel → engine →
+    /// journal →
+    /// `read_range` → `replay::verify`) — `replay_tests.rs` only proves the fold
+    /// deterministic on a
+    /// canned event vector, taking on faith that a real loop's journal reads back. This
+    /// test's subject is the journal, so it keeps a real one, ruling out `start_paused`
+    /// (`Journal::open` spawns a `spawn_blocking` task, and an outstanding one stalls a
+    /// paused clock's auto-advance) — real time, capped at two seconds: enough for a
+    /// couple of decisions at the synthetic meter's 1Hz, short enough not to dominate
+    /// the suite.
     #[tokio::test]
     async fn a_run_against_the_simulator_replays_byte_identically() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -1108,11 +1051,12 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(2)).await;
             StopReason::Sigterm
         };
-        // From the epoch: this test only wants everything the session ever
-        // wrote, not a particular anchor, and `read_range` handles a `from`
-        // that opens before the first decision by falling back to the range's
-        // own start with a warning — which this test allows for below rather
-        // than asserting away.
+        // From the epoch: this test wants everything the session ever wrote, not a
+        // particular
+        // anchor. `read_range` handles a `from` before the first decision by falling
+        // back to the
+        // range's own start with a warning, which this test allows for rather than
+        // asserts away.
         let started_at = Timestamp::from_millis(0);
 
         run(config, devices, stop)

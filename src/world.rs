@@ -1,13 +1,9 @@
 //! What the controller knows right now, as a projection of the event log.
 //!
 //! Every decision is a function of a `World` and the controller's own state.
-//! Splitting the two is what makes replay sound: fold a recorded event stream
-//! into a `World` and you have exactly the inputs a past decision saw, with no
-//! configured knob or running timer smuggled in alongside them.
-//!
-//! Nothing here is a setting and nothing here is a timer — a threshold belongs
-//! to `Controller`, a cooldown belongs to whoever counts it down. This file is
-//! measurements only, which is what is journalled as `world_json`.
+//! Splitting them is what makes replay sound: fold a recorded event stream into
+//! a `World` and you have exactly the inputs a past decision saw, with no knob
+//! or timer smuggled in. Measurements only — journalled as `world_json`.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -17,13 +13,10 @@ use serde::{Deserialize, Serialize};
 use crate::battery::BatteryState;
 use crate::units::{BatteryPower, GridPower, SolarPower, Watts, forward_display};
 
-/// One meter observation: the signed net total plus each phase. `total` is the
+/// One meter observation: signed net total plus each phase. `total` is the
 /// meter's own `total_act_power`, never re-summed from the phases — every
-/// threshold was tuned against that number, and the device is not required to
-/// make them agree.
-///
-/// Per-phase is carried and journaled but never decided on. "One battery per
-/// phase" later reads `phases[i]`; the data is on record from today.
+/// threshold was tuned against that number. Per-phase is journalled but never
+/// decided on; a future "one battery per phase" reads `phases[i]`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct MeterReading {
     pub total: GridPower,
@@ -40,12 +33,10 @@ impl MeterReading {
         MeterReading { total, phases }
     }
 
-    /// A reading with no per-phase breakdown, built by `controller.rs`'s and
-    /// `engine.rs`'s test modules where a test only cares about the net total.
-    /// The live adapters all report three phases, so this has no production
-    /// caller — `#[cfg(test)]` rather than `#[allow(dead_code)]` makes that
-    /// enforced instead of merely claimed: a production caller would fail to
-    /// compile, and promoting it out of test-only is then a deliberate edit.
+    /// A reading with no per-phase breakdown, for tests that only care about the
+    /// net total. Live adapters always report three phases, so this has no
+    /// production caller — `#[cfg(test)]`, not `#[allow(dead_code)]`, makes a
+    /// production caller fail to compile rather than merely claiming there is none.
     #[cfg(test)]
     pub fn total_only(total: GridPower) -> Self {
         MeterReading {
@@ -65,13 +56,10 @@ impl Default for MeterReading {
     }
 }
 
-/// A device's stable identity — the Zendure's serial today, a charger's own
-/// later. `String` rather than `&'static str` because it comes from
-/// `ZENDURE_SN` at runtime; not an enum because that would make the device set
-/// a compile-time constant, which is exactly what "a second battery is config
-/// plus a device entry" has to avoid. It is also a journal key — the
-/// `decisions.device` column — so it must be human-readable and stable across
-/// restarts.
+/// A device's stable identity. `String`, not `&'static str`, since it comes
+/// from `ZENDURE_SN` at runtime; not an enum, since that would make the
+/// device set a compile-time constant. Also a journal key
+/// (`decisions.device`), so it must stay human-readable and stable across restarts.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct DeviceId(String);
@@ -84,13 +72,10 @@ impl DeviceId {
 
 forward_display!(DeviceId, str);
 
-/// What a device reports about itself. One variant per device class: a
-/// charger's measurement (CP state, plugged, session energy) has nothing in
-/// common with a battery's, and a flat struct of `Option`s would let the
-/// objective ask a battery whether a car is plugged in.
-///
-/// Internally tagged so a new class is additive on the wire and
-/// `world_json` stays readable: `{"class":"battery","soc":50,...}`.
+/// What a device reports about itself. One variant per device class — a flat
+/// struct of `Option`s would let the objective ask a battery whether a car is
+/// plugged in. Internally tagged so a new class is additive on the wire:
+/// `{"class":"battery","soc":50,...}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "class", rename_all = "snake_case")]
 pub enum Measurement {
@@ -105,18 +90,10 @@ pub enum Measurement {
 pub struct World {
     pub grid: MeterReading,
     pub solar: SolarPower,
-    /// Private, and the accessors below are the only way in, so the controller
-    /// never learns there is a map here at all.
-    ///
-    /// With one device a map makes "no battery" representable, which a bare
-    /// `BatteryState` field did not. That is the point rather than a cost:
-    /// `battery()` returns `Option`, and the controller turns `None` into the
-    /// *existing* "no decision this tick" path instead of a panic.
-    ///
-    /// `BTreeMap` rather than `Vec` because `Event::DeviceUpdate` addresses a
-    /// device by id, so the fold is one `insert` with no scan and no duplicate
-    /// entry to reconcile — and because sorted, stable key order is what makes
-    /// two recorded worlds diffable.
+    /// Private; the accessors below are the only way in. A map makes "no
+    /// battery" representable, so `battery()` returns `Option` and the
+    /// controller takes its "no decision this tick" path rather than panicking.
+    /// `BTreeMap` because sorted key order keeps two recorded worlds diffable.
     devices: BTreeMap<DeviceId, Measurement>,
 }
 
@@ -148,12 +125,10 @@ impl World {
         self.devices.insert(id, measurement);
     }
 
-    /// Every device that is a battery, in id order.
-    ///
-    /// The `match` is exhaustive today because every device is a battery, and
-    /// that is deliberately left as the tripwire: the day a charger variant is
-    /// added this stops compiling here, at the one place that would otherwise
-    /// have quietly handed the objective a car charger to discharge.
+    /// Every device that is a battery, in id order. The `match` is exhaustive
+    /// today deliberately, as a tripwire: the day a charger variant is added,
+    /// this stops compiling here — the one place that would otherwise quietly
+    /// hand the objective a car charger to discharge.
     pub fn batteries(&self) -> impl Iterator<Item = (&DeviceId, &BatteryState)> {
         self.devices
             .iter()
@@ -180,11 +155,9 @@ impl World {
         self.grid.total + self.battery_flow()
     }
 
-    /// What the house itself is drawing. Not a decision input.
-    ///
-    /// The meter nets both solar and the battery out of its total
-    /// (`grid.total = load - solar - battery_flow`), so the load is both of
-    /// them added back; [`underlying_grid`](Self::underlying_grid) is already
+    /// What the house itself is drawing, not a decision input. The meter nets
+    /// both solar and the battery out of its total (`grid.total = load - solar -
+    /// battery_flow`), so load is both added back; `underlying_grid` is already
     /// the battery half.
     pub fn home_usage(&self) -> Watts {
         self.underlying_grid().importing() + self.solar.into_watts()
@@ -197,12 +170,9 @@ mod tests {
     use crate::battery::BatteryState;
     use crate::units::{BatteryPower, PowerCap, Soc};
 
-    /// Every field distinct from its default and from every other field of
-    /// the same type, so a round-trip that silently dropped, swapped or
-    /// defaulted one would show up as an equality failure rather than hide
-    /// behind a coincidental match — three different phase readings, a phase
-    /// total that agrees with none of them, non-zero solar, and a battery
-    /// whose flags disagree with each other.
+    /// Every field distinct from its default and from every other field of the
+    /// same type, so a round-trip that silently dropped, swapped, or defaulted
+    /// one shows up as an equality failure rather than a coincidental match.
     fn sample_world() -> World {
         let mut world = World::new();
         world.observe_meter(
@@ -227,20 +197,11 @@ mod tests {
         world
     }
 
-    /// Pins the exact wire shape, the same way `command_tests.rs` pins
-    /// `Command`'s `Display` and `ControlDecision`'s JSON: `Measurement` is
-    /// internally tagged (`"class":"battery"`, not a wrapper object) and
-    /// `DeviceId` is a bare string key rather than `{"0":"SN123"}`. Both are
-    /// what keeps the journal's `world_json` readable. Do not "fix" this if it
-    /// starts failing — a diff here means the format actually moved, which is
-    /// exactly what this test exists to catch.
-    ///
-    /// `a_restored_engine_resumes_the_fold_exactly` proves a `World` survives a
-    /// round trip, which says nothing about what the bytes look like. The
-    /// journal is append-only, so the shape is a compatibility
-    /// contract with rows already written, and round-trip equality would hold
-    /// just as well after a rename that orphaned every one of them. Its
-    /// companion round-trip test genuinely was superseded, and is gone.
+    /// Pins the exact wire shape: `Measurement` internally tagged
+    /// (`"class":"battery"`), `DeviceId` a bare string key — what keeps
+    /// `world_json` readable. Do not "fix" this if it starts failing: the
+    /// journal is append-only, so this is a compatibility contract with rows already
+    /// written, not a round-trip test a renamed field would still pass.
     #[test]
     fn serializes_to_the_exact_pinned_shape() {
         let world = sample_world();
@@ -304,12 +265,9 @@ mod tests {
         assert_eq!(world.battery_flow(), BatteryPower(50));
     }
 
-    /// `underlying_grid` has to be the meter total plus *every* battery's
-    /// flow, not just the first one it happens to iterate. The first battery
-    /// by id ("SN1") is charging at -300 W; if `underlying_grid` used only
-    /// that battery it would read 1000 + (-300) = 700 W. The other two
-    /// batteries add another 350 W of net flow, so the right answer, 1050 W,
-    /// is one a first-battery-only implementation cannot produce.
+    /// `underlying_grid` must sum *every* battery's flow, not just the first
+    /// iterated. SN1 alone would give 1000 + (-300) = 700 W; the other two add
+    /// 350 W more net flow, so only summing all three produces the correct 1050 W.
     #[test]
     fn underlying_grid_sums_meter_and_every_batterys_flow() {
         let mut world = World::new();

@@ -1,22 +1,14 @@
 //! Re-running a recorded event stream through the decision engine, offline.
 //!
-//! This is **decision diff**, and the only replay mode here: feed the engine
-//! the events it was fed, from the state it was in, and compare the commands
-//! against the ones the daemon issued. It answers one question — *did this
-//! change alter behaviour?*
-//!
-//! It is **not** forward simulation. A recorded meter reading was caused in
-//! part by the old controller's own output, so replaying a *different*
-//! controller against those readings asks what it would have done in a world
-//! its own actions would have changed, and the answer is fiction. Simulating
-//! forward needs a battery model and the old controller de-convolved back out;
-//! `pre_battery_net_w` is stored so that stays possible, but nothing here does
-//! it, and the two modes must never be conflated.
-//!
-//! A fixture is therefore hermetic by construction: it carries the tuning
-//! (`SessionConfig`, the decision knobs and nothing that says how to reach a
-//! device), the snapshot to resume from, and the events. No environment, no
-//! network, no clock — `Engine::step` reads none of them.
+//! This is **decision diff**, not forward simulation: it feeds the engine the events it
+//! saw, from the state it was in, and compares commands against what the daemon issued.
+//! A recorded reading was partly caused by the old controller's own output, so
+//! replaying a *different* controller against it asks what it would have done in a
+//! world its own actions would have changed — fiction.
+//! `pre_battery_net_w` is stored so forward simulation stays possible later, but
+//! nothing here does it; the two modes must never be conflated.
+//! A fixture is hermetic: tuning, snapshot, and events — no environment, network, or
+//! clock; `Engine::step` reads none of them.
 
 use std::fmt::Display;
 use std::time::Duration;
@@ -32,23 +24,18 @@ use crate::journal::read::Recording;
 use crate::units::Timestamp;
 use crate::world::{DeviceId, World};
 
-/// The fixture format this build reads and writes.
-///
-/// Checked exactly, not as a floor: a fixture from a *newer* build may carry
-/// fields that change what its events mean, and one from an older build was
-/// written before some invariant this build relies on. Additive changes keep
-/// the number and arrive with `serde(default)`; anything that would make either
-/// side read the other wrong moves it.
+/// The fixture format this build reads and writes. Checked exactly, not as a
+/// floor: a newer build's fixture may carry fields that change what its
+/// events mean, an older one may predate an invariant this build relies on.
+/// Additive changes keep the number and arrive via `serde(default)`; anything that
+/// could make either side misread the other bumps it.
 const FORMAT: u32 = 1;
 
-/// Rendered in place of a command list when a step produced none. A blank would
-/// be indistinguishable from a missing line in a diff.
-///
-/// `pub(crate)` rather than private: `run.rs`'s round-trip test checks that a
-/// real run's `expected` list is not *entirely* this sentinel, which is the
-/// same anti-vacuity guard `replay_tests.rs` already applies to a canned
-/// fixture — reusing the constant keeps both checks tied to one literal
-/// instead of a second copy that could silently drift from `render`'s own.
+/// Rendered in place of a command list when a step produced none — a blank
+/// would be indistinguishable from a missing line in a diff. `pub(crate)`,
+/// not private, so `run.rs`'s round-trip test and `replay_tests.rs`'s anti-vacuity
+/// guard both check against this same literal instead of a copy that could drift from
+/// `render`'s own.
 pub(crate) const NOTHING: &str = "—";
 
 /// A self-contained replay: everything needed, nothing that reaches outside.
@@ -105,25 +92,19 @@ pub fn replay(engine: &mut Engine, events: &[Event]) -> Vec<Frame> {
         .collect()
 }
 
-/// One commanded device, as both a replay and a recording render it.
-///
-/// The only place this format exists. A replayed step holds a `Directive` and a
-/// recording holds two text columns, and if the two rendered differently by so
-/// much as a space, `--verify` would report a divergence on every frame that
-/// commanded anything — so it is one function rather than two `format!` calls
-/// that happen to agree today. `Directive` deliberately has no `Display` of its
-/// own: `Command`'s `Display` is the journal's wire format and a device serial
-/// has no business in it, which is exactly why the id rides on the `Directive`.
+/// One commanded device, as both a replay and a recording render it — the
+/// only place this format exists, so a divergent space wouldn't make
+/// `--verify` report a false diff on every frame. `Directive` has no
+/// `Display` of its own: `Command`'s `Display` is the journal's wire format, and a
+/// device serial has no business in it, so the id rides on `Directive` instead.
 fn addressed(device: &DeviceId, command: &dyn Display) -> String {
     format!("{device} {command}")
 }
 
 /// `<at_ms>ms: <device> <command>`, one line per frame, no trailing newline.
-///
-/// The device id is on every line even though there is one battery today. The
-/// allocator deliberately leaves extra devices uncommanded until a split policy
-/// exists (`allocate`), so a render that showed only commands would hide
-/// exactly the thing that fence was built to make loud.
+/// The device id appears even with one battery today: the allocator
+/// deliberately leaves extra devices uncommanded until a split policy exists
+/// (`allocate`), and a render showing only commands would hide exactly that.
 pub fn render(frames: &[Frame]) -> String {
     lines(frames).join("\n")
 }
@@ -153,11 +134,10 @@ fn line(at: Timestamp, body: impl Iterator<Item = String>) -> String {
     }
 }
 
-/// Turn a recorded run into a fixture.
-///
-/// Returns the reader's warnings along with its own for the caller to print.
-/// This module has no business deciding how loud to be, and a function that
-/// prints cannot be called from a test without making noise in the suite.
+/// Turn a recorded run into a fixture. Returns the reader's warnings along
+/// with its own for the caller to print — this module has no business
+/// deciding how loud to be, and a printing function can't be called from a test without
+/// making noise in the suite.
 pub fn from_recording(recording: Recording) -> Result<(Fixture, Vec<String>), String> {
     let Recording {
         version,
@@ -229,19 +209,12 @@ pub fn from_recording(recording: Recording) -> Result<(Fixture, Vec<String>), St
     ))
 }
 
-/// Replace one tuning knob by name.
-///
-/// Goes through `SessionConfig`'s own serialization rather than a match over
-/// field names, so there is one list of knobs and it is the one the journal
-/// already writes. A key that is not already present is an error: a typo that
-/// silently changed nothing would make a what-if quietly answer the original
-/// question.
-///
-/// A value still has to survive its knob's own constructor —
-/// `--set min_soc=1000` clamps to 100 rather than producing an SOC no battery
-/// can reach — because the clamping newtypes deserialize through it. That is
-/// not this function's doing, and it has to stay true: see
-/// `validating_deserialize` in `units.rs`.
+/// Replace one tuning knob by name, through `SessionConfig`'s own
+/// serialization rather than a field-name match, so there's one list of
+/// knobs. An unknown key is an error — a silent typo would make a what-if
+/// quietly answer the original question. A value still passes through its knob's own
+/// constructor (`--set min_soc=1000` clamps to 100), via `validating_deserialize` in
+/// `units.rs`.
 pub fn apply_overrides(
     config: &SessionConfig,
     overrides: &[(String, String)],
