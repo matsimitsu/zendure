@@ -202,7 +202,7 @@ pub enum StorageMode {
 }
 
 /// What the controller wants the battery to do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControlMode {
     Charge,
     Discharge,
@@ -231,7 +231,7 @@ pub struct CycleCounts {
 }
 
 /// Output of the controller, published to MQTT for HA graphing.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ControlDecision {
     /// Charge, Discharge, or Idle
     pub mode: ControlMode,
@@ -241,4 +241,28 @@ pub struct ControlDecision {
     pub reason: String,
     /// Net grid power at time of decision: positive = importing, negative = exporting
     pub grid_power: GridPower,
+}
+
+impl ControlDecision {
+    /// A decision with plausible values, for tests that need one but are not
+    /// about its contents.
+    ///
+    /// Shared rather than restated per module, the way `BatteryState::test_sample`
+    /// and `Controller::test_default` already are — three test modules were
+    /// writing the same four fields, and it was the one decision-path type
+    /// without such a constructor. Override what a test is actually about:
+    /// `ControlDecision { mode, ..ControlDecision::test_sample() }`.
+    ///
+    /// `grid_power` is deliberately fractional: the meter reports fractions and
+    /// the wire format rounds to whole watts, so a whole number here would let
+    /// a formatting regression through.
+    #[cfg(test)]
+    pub(crate) fn test_sample() -> Self {
+        ControlDecision {
+            mode: ControlMode::Discharge,
+            power_watts: Setpoint::new(145),
+            reason: "Grid demand".to_string(),
+            grid_power: GridPower(150.5),
+        }
+    }
 }

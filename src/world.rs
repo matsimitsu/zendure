@@ -218,28 +218,21 @@ mod tests {
         world
     }
 
-    /// Superseded in step 7 by: snapshot/restore equivalence
-    ///
-    /// `World` is the thing step 7 records as `world_json` and later replays
-    /// from, so it has to survive a JSON round-trip identically. This is the
-    /// writable half of that: it needs no `ControllerState` to restore
-    /// against, just `World`'s own `Deserialize`.
-    #[test]
-    fn round_trips_through_json_identically() {
-        let world = sample_world();
-        let json = serde_json::to_string(&world).unwrap();
-        assert_eq!(world, serde_json::from_str(&json).unwrap());
-    }
-
-    /// Superseded in step 7 by: snapshot/restore equivalence
-    ///
     /// Pins the exact wire shape, the same way `command_tests.rs` pins
     /// `Command`'s `Display` and `ControlDecision`'s JSON: `Measurement` is
     /// internally tagged (`"class":"battery"`, not a wrapper object) and
     /// `DeviceId` is a bare string key rather than `{"0":"SN123"}`. Both are
-    /// what keeps step 7's `world_json` readable. Do not "fix" this if it
+    /// what keeps the journal's `world_json` readable. Do not "fix" this if it
     /// starts failing — a diff here means the format actually moved, which is
     /// exactly what this test exists to catch.
+    ///
+    /// This one carried a "superseded in step 7" note and is **not**
+    /// superseded: `a_restored_engine_resumes_the_fold_exactly` proves a
+    /// `World` survives a round trip, which says nothing about what the bytes
+    /// look like. The journal is append-only, so the shape is a compatibility
+    /// contract with rows already written, and round-trip equality would hold
+    /// just as well after a rename that orphaned every one of them. Its
+    /// companion round-trip test genuinely was superseded, and is gone.
     #[test]
     fn serializes_to_the_exact_pinned_shape() {
         let world = sample_world();

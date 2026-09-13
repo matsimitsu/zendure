@@ -1,28 +1,51 @@
 use std::time::Duration;
 
 use chrono::Weekday;
+use serde::{Deserialize, Serialize};
 
 use crate::battery::BatteryState;
 use crate::clock::Clock;
-use crate::config::Config;
+use crate::config::{Config, SessionConfig};
 use crate::models::{ControlDecision, ControlMode, CycleCounts};
 use crate::units::{Elapsed, GridPower, PowerMargin, Setpoint, Soc, SolarPower, Timestamp};
 use crate::world::World;
 
 const RAMP_FACTOR: f64 = 0.75;
 
+/// The controller's mutable history, split out so a decision can be replayed.
+///
+/// `Controller`'s other fields are configuration — read once from [`Config`] and
+/// never written — so they belong to the session, not to the moment, and travel
+/// in the journal's `sessions` row instead of on every decision. What is left
+/// here is exactly the state that makes the same input produce a different
+/// output depending on what came before: the hysteresis and cooldown history,
+/// the idle timers, and the daily counters.
+///
+/// Restoring these into a controller built from the same config reproduces the
+/// decision. Dropping any one of them does not fail loudly — it replays *almost*
+/// right, which is worse, so the equivalence test in this module exists to make
+/// an omission fail.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ControllerState {
+    pub last_mode: ControlMode,
+    pub last_active_mode: Option<ControlMode>,
+    pub last_mode_change: Timestamp,
+    pub last_decision: Timestamp,
+    pub last_idle_start: Option<Timestamp>,
+    pub daily_transitions: u32,
+    pub daily_cooldown_suppressions: u32,
+    pub last_cycle_reset_day: u32,
+}
+
 /// Reactive self-consumption control. Deliberately free of clock reads: every
 /// decision takes a [`Clock`] captured at the edge, which is what makes the
 /// time-dependent branches (cooldown, standby, midnight reset, balance weekday)
 /// testable and a recorded event stream replayable.
 pub struct Controller {
-    last_mode: ControlMode,
-    /// Last active (non-idle) mode — Charge or Discharge
-    last_active_mode: Option<ControlMode>,
-    /// Instant of the last mode change; elapsed = `clock.now - this`.
-    last_mode_change: Timestamp,
-    last_decision: Timestamp,
-    last_idle_start: Option<Timestamp>,
+    /// Everything that changes as decisions are made. Held as one field rather
+    /// than spelled out again here: the list already exists on
+    /// [`ControllerState`], and a second copy is a second thing to keep in step.
+    state: ControllerState,
     min_mode_duration: Duration,
     min_decision_interval: Duration,
     charge_margin: PowerMargin,
@@ -31,10 +54,7 @@ pub struct Controller {
     discharge_start_threshold: GridPower,
     idle_timeout: Duration,
     min_idle_before_discharge: Duration,
-    daily_transitions: u32,
-    daily_cooldown_suppressions: u32,
     cycle_warn_threshold: u32,
-    last_cycle_reset_day: u32,
     min_soc: Soc,
     max_soc: Soc,
     balance_weekday: Option<Weekday>,
@@ -43,40 +63,74 @@ pub struct Controller {
 
 impl Controller {
     pub fn from_config(config: &Config, clock: &Clock) -> Self {
-        let min_mode_duration = config.min_mode_duration;
-        let min_decision_interval = config.min_decision_interval;
+        Self::from_session(&config.session(), clock)
+    }
+
+    /// Build from the tuning half alone — thirteen of `SessionConfig`'s
+    /// fourteen fields, taken from the shape the journal records and a fixture
+    /// carries. The fourteenth, `mqtt_timeout_secs`, belongs to `Engine` rather
+    /// than here.
+    ///
+    /// This is what makes "a fixture is hermetic" true rather than asserted: a
+    /// replay has no `Config` and must not need one, and a controller that can
+    /// be *constructed* from the fixture's own tuning cannot be secretly
+    /// reading a connection setting. It does not make the controller pure —
+    /// `decide` still reads a `World` and a `Clock`, both of which arrive with
+    /// the events. What keeps the knob list honest is `Config::session`'s
+    /// exhaustive destructure, which turns a new field into a compile error
+    /// there; routing `from_config` through here means there is one list rather
+    /// than two that have to agree.
+    pub fn from_session(session: &SessionConfig, clock: &Clock) -> Self {
+        let min_mode_duration = Duration::from_secs(session.min_mode_duration_secs);
+        let min_decision_interval = Duration::from_secs(session.min_decision_interval_secs);
         Self {
-            last_mode: ControlMode::Idle,
-            last_active_mode: None,
-            last_mode_change: clock.now - Elapsed::of(min_mode_duration),
-            last_decision: clock.now - Elapsed::of(min_decision_interval),
-            last_idle_start: Some(clock.now),
+            state: ControllerState {
+                last_mode: ControlMode::Idle,
+                last_active_mode: None,
+                last_mode_change: clock.now - Elapsed::of(min_mode_duration),
+                last_decision: clock.now - Elapsed::of(min_decision_interval),
+                last_idle_start: Some(clock.now),
+                daily_transitions: 0,
+                daily_cooldown_suppressions: 0,
+                last_cycle_reset_day: clock.day_ordinal,
+            },
             min_mode_duration,
             min_decision_interval,
-            charge_margin: config.charge_margin,
-            discharge_margin: config.discharge_margin,
-            charge_start_threshold: config.charge_start_threshold,
-            discharge_start_threshold: config.discharge_start_threshold,
-            idle_timeout: config.idle_timeout,
-            min_idle_before_discharge: config.min_idle_before_discharge,
-            daily_transitions: 0,
-            daily_cooldown_suppressions: 0,
-            cycle_warn_threshold: config.cycle_warn_threshold,
-            last_cycle_reset_day: clock.day_ordinal,
-            min_soc: config.min_soc,
-            max_soc: config.max_soc,
-            balance_weekday: config.balance_weekday,
-            solar_discharge_block_threshold: config.solar_discharge_block_threshold,
+            charge_margin: session.charge_margin,
+            discharge_margin: session.discharge_margin,
+            charge_start_threshold: session.charge_start_threshold,
+            discharge_start_threshold: session.discharge_start_threshold,
+            idle_timeout: Duration::from_secs(session.idle_timeout_secs),
+            min_idle_before_discharge: Duration::from_secs(session.min_idle_before_discharge_secs),
+            cycle_warn_threshold: session.cycle_warn_threshold,
+            min_soc: session.min_soc,
+            max_soc: session.max_soc,
+            balance_weekday: session.balance_weekday,
+            solar_discharge_block_threshold: session.solar_discharge_block_threshold,
         }
     }
 
     pub fn cycle_counts(&self) -> CycleCounts {
         CycleCounts {
-            daily_transitions: self.daily_transitions,
-            daily_cooldown_suppressions: self.daily_cooldown_suppressions,
+            daily_transitions: self.state.daily_transitions,
+            daily_cooldown_suppressions: self.state.daily_cooldown_suppressions,
         }
     }
 
+    /// Snapshot the mutable history. Recorded with every decision, so "the state
+    /// at time T" is the last decision row at or before T.
+    pub fn state(&self) -> ControllerState {
+        self.state.clone()
+    }
+
+    /// Put a snapshot back. The config half is whatever this controller was
+    /// built with — `restore` deliberately cannot change it, so a replay against
+    /// different tuning is a different `Controller`, constructed as such, rather
+    /// than a half-overwritten one.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn restore(&mut self, state: ControllerState) {
+        self.state = state;
+    }
     /// A controller with permissive defaults (no cooldown-relevant history,
     /// generous margins) for tests outside this module, e.g. `engine.rs`'s.
     /// This module's own tests build fixtures with more control via
@@ -84,35 +138,27 @@ impl Controller {
     #[cfg(test)]
     pub(crate) fn test_default(now_ms: i64, day_ordinal: u32) -> Self {
         let now = Timestamp::from_millis(now_ms);
-        Controller {
-            last_mode: ControlMode::Idle,
-            last_active_mode: None,
-            last_mode_change: now - Elapsed::of(Duration::from_secs(60)),
-            last_decision: now - Elapsed::of(Duration::from_secs(60)),
-            last_idle_start: None,
-            min_mode_duration: Duration::from_secs(10),
-            min_decision_interval: Duration::ZERO,
-            charge_margin: PowerMargin::new(50),
-            discharge_margin: PowerMargin::new(5),
-            charge_start_threshold: GridPower(-100.0),
-            discharge_start_threshold: GridPower(0.0),
-            idle_timeout: Duration::from_secs(5 * 60),
-            min_idle_before_discharge: Duration::from_secs(300),
-            daily_transitions: 0,
-            daily_cooldown_suppressions: 0,
-            cycle_warn_threshold: 200,
-            last_cycle_reset_day: day_ordinal,
-            min_soc: Soc::new(10),
-            max_soc: Soc::new(100),
-            balance_weekday: None,
-            solar_discharge_block_threshold: SolarPower::ZERO,
-        }
+        let clock = Clock {
+            day_ordinal,
+            ..Clock::test_at(now_ms)
+        };
+        // Through `from_session` so the knobs come from the one list a fixture
+        // would also carry. Only the history differs from a freshly started
+        // controller, and it differs deliberately: a minute of slack on both
+        // cooldowns — comfortably past `min_mode_duration` and
+        // `min_decision_interval` — and no idle start, so a test's first event
+        // is never suppressed by timing it did not ask about.
+        let mut controller = Self::from_session(&SessionConfig::test_default(), &clock);
+        controller.state.last_mode_change = now - Elapsed::of(Duration::from_secs(60));
+        controller.state.last_decision = now - Elapsed::of(Duration::from_secs(60));
+        controller.state.last_idle_start = None;
+        controller
     }
 
     /// Returns `None` if the minimum decision interval hasn't elapsed, or if there
     /// is no battery to control.
     pub fn decide(&mut self, world: &World, clock: &Clock) -> Option<ControlDecision> {
-        if clock.now - self.last_decision < self.min_decision_interval {
+        if clock.now - self.state.last_decision < self.min_decision_interval {
             return None;
         }
 
@@ -136,7 +182,7 @@ impl Controller {
         battery: &BatteryState,
         clock: &Clock,
     ) -> ControlDecision {
-        self.last_decision = clock.now;
+        self.state.last_decision = clock.now;
 
         let grid_power = world.grid.total;
 
@@ -181,10 +227,10 @@ impl Controller {
     /// Drop to idle without going through the guards — used by the overrides
     /// (calibration, fault) that bypass normal mode selection entirely.
     fn force_idle(&mut self, clock: &Clock) {
-        if self.last_mode != ControlMode::Idle {
-            self.last_mode = ControlMode::Idle;
-            self.last_mode_change = clock.now;
-            self.last_idle_start = Some(clock.now);
+        if self.state.last_mode != ControlMode::Idle {
+            self.state.last_mode = ControlMode::Idle;
+            self.state.last_mode_change = clock.now;
+            self.state.last_idle_start = Some(clock.now);
         }
     }
 
@@ -201,7 +247,7 @@ impl Controller {
 
         // Hysteresis: once charging, keep going as long as we're still exporting (< 0W).
         // Only require the full start threshold to *begin* charging.
-        let charge_threshold = if self.last_mode == ControlMode::Charge {
+        let charge_threshold = if self.state.last_mode == ControlMode::Charge {
             GridPower::ZERO
         } else {
             self.charge_start_threshold
@@ -215,7 +261,7 @@ impl Controller {
         }
 
         // Hysteresis: once discharging, keep going as long as we're still importing (> 0W).
-        let discharge_threshold = if self.last_mode == ControlMode::Discharge {
+        let discharge_threshold = if self.state.last_mode == ControlMode::Discharge {
             GridPower::ZERO
         } else {
             self.discharge_start_threshold
@@ -225,11 +271,12 @@ impl Controller {
         // last active mode was Charge. This prevents charge→idle→discharge
         // oscillation during variable solar, while allowing discharge to
         // resume quickly after a brief idle (e.g. demand dip).
-        let needs_idle_guard = self.last_active_mode == Some(ControlMode::Charge);
-        let idle_long_enough = if self.last_mode == ControlMode::Discharge {
+        let needs_idle_guard = self.state.last_active_mode == Some(ControlMode::Charge);
+        let idle_long_enough = if self.state.last_mode == ControlMode::Discharge {
             true
         } else if needs_idle_guard {
-            self.last_idle_start
+            self.state
+                .last_idle_start
                 .is_some_and(|t| clock.now - t >= self.min_idle_before_discharge)
         } else {
             true
@@ -302,40 +349,42 @@ impl Controller {
         clock: &Clock,
     ) -> ControlDecision {
         // Reset daily counters at midnight
-        if clock.day_ordinal != self.last_cycle_reset_day {
-            self.daily_transitions = 0;
-            self.daily_cooldown_suppressions = 0;
-            self.last_cycle_reset_day = clock.day_ordinal;
+        if clock.day_ordinal != self.state.last_cycle_reset_day {
+            self.state.daily_transitions = 0;
+            self.state.daily_cooldown_suppressions = 0;
+            self.state.last_cycle_reset_day = clock.day_ordinal;
         }
 
         // Cycle limit: force standby when daily transitions exceed threshold
-        if self.cycle_warn_threshold > 0 && self.daily_transitions >= self.cycle_warn_threshold {
-            if self.last_mode != ControlMode::Standby {
+        if self.cycle_warn_threshold > 0
+            && self.state.daily_transitions >= self.cycle_warn_threshold
+        {
+            if self.state.last_mode != ControlMode::Standby {
                 tracing::warn!(
                     "Daily cycle limit reached ({} transitions) — entering standby until midnight",
-                    self.daily_transitions,
+                    self.state.daily_transitions,
                 );
-                self.last_mode = ControlMode::Standby;
-                self.last_mode_change = clock.now;
-                self.last_idle_start = None;
+                self.state.last_mode = ControlMode::Standby;
+                self.state.last_mode_change = clock.now;
+                self.state.last_idle_start = None;
             }
             return ControlDecision {
                 mode: ControlMode::Standby,
                 power_watts: Setpoint::ZERO,
                 reason: format!(
                     "Cycle limit: {} transitions today (max {}), standby until midnight",
-                    self.daily_transitions, self.cycle_warn_threshold,
+                    self.state.daily_transitions, self.cycle_warn_threshold,
                 ),
                 grid_power,
             };
         }
 
         // Cooldown: suppress charge↔discharge toggles that happen too fast
-        let in_mode = clock.now - self.last_mode_change;
-        if is_opposing_switch(self.last_mode, mode) && in_mode < self.min_mode_duration {
-            self.daily_cooldown_suppressions += 1;
-            if self.last_mode != ControlMode::Idle {
-                self.last_idle_start = Some(clock.now);
+        let in_mode = clock.now - self.state.last_mode_change;
+        if is_opposing_switch(self.state.last_mode, mode) && in_mode < self.min_mode_duration {
+            self.state.daily_cooldown_suppressions += 1;
+            if self.state.last_mode != ControlMode::Idle {
+                self.state.last_idle_start = Some(clock.now);
             }
             return ControlDecision {
                 mode: ControlMode::Idle,
@@ -343,7 +392,7 @@ impl Controller {
                 reason: format!(
                     "Cooldown: suppressed {} (was {} for {:.0}s, min {}s)",
                     mode,
-                    self.last_mode,
+                    self.state.last_mode,
                     in_mode.as_secs_f64(),
                     self.min_mode_duration.as_secs(),
                 ),
@@ -352,14 +401,14 @@ impl Controller {
         }
 
         // Track mode changes and apply ramp
-        let (final_power, ramped) = if mode != self.last_mode {
-            self.daily_transitions += 1;
+        let (final_power, ramped) = if mode != self.state.last_mode {
+            self.state.daily_transitions += 1;
             if matches!(mode, ControlMode::Charge | ControlMode::Discharge) {
-                self.last_active_mode = Some(mode);
+                self.state.last_active_mode = Some(mode);
             }
-            self.last_mode = mode;
-            self.last_mode_change = clock.now;
-            self.last_idle_start = if mode == ControlMode::Idle {
+            self.state.last_mode = mode;
+            self.state.last_mode_change = clock.now;
+            self.state.last_idle_start = if mode == ControlMode::Idle {
                 Some(clock.now)
             } else {
                 None
@@ -376,7 +425,7 @@ impl Controller {
 
         // Idle timeout → standby
         if mode == ControlMode::Idle
-            && let Some(idle_start) = self.last_idle_start
+            && let Some(idle_start) = self.state.last_idle_start
             && clock.now - idle_start >= self.idle_timeout
         {
             return ControlDecision {
@@ -442,6 +491,65 @@ mod tests {
     use super::*;
     use crate::units::{BatteryPower, PowerCap};
     use crate::world::{DeviceId, Measurement, MeterReading};
+
+    /// A snapshot whose every field differs from a freshly built controller's,
+    /// so that dropping any one of them from `state`/`restore` is visible.
+    /// The values are arbitrary and deliberately all distinct.
+    fn distinctive_state() -> ControllerState {
+        ControllerState {
+            last_mode: ControlMode::Discharge,
+            last_active_mode: Some(ControlMode::Charge),
+            last_mode_change: Timestamp::from_millis(11),
+            last_decision: Timestamp::from_millis(22),
+            last_idle_start: Some(Timestamp::from_millis(33)),
+            daily_transitions: 44,
+            daily_cooldown_suppressions: 55,
+            last_cycle_reset_day: 66,
+        }
+    }
+
+    /// `state` and `restore` have to be exact inverses, field for field.
+    ///
+    /// Nearly tautological now, and deliberately kept. The controller holds its
+    /// history as one `ControllerState`, so `state` is a clone and `restore` an
+    /// assignment, and there is no longer a field list to drift — which is the
+    /// point: this test used to be the only thing standing between four
+    /// hand-written transcriptions of those eight names, and the copies were
+    /// deleted rather than the detector kept. What it guards now is a regression
+    /// to field-by-field copying.
+    ///
+    /// Still stated here rather than left to the behavioural test in
+    /// `engine.rs`, because behaviour cannot reach all of it: no single event
+    /// sequence moves every field away from its default at once — a midnight
+    /// reset zeroes the daily counters, and `last_idle_start` is only set while
+    /// `last_mode` is `Idle`, which is the default.
+    #[test]
+    fn state_and_restore_are_exact_inverses() {
+        let mut controller = Controller::test_default(NOW_MS, DAY);
+        assert_ne!(
+            controller.state(),
+            distinctive_state(),
+            "fixture must differ from a fresh controller or this proves nothing"
+        );
+
+        controller.restore(distinctive_state());
+        assert_eq!(controller.state(), distinctive_state());
+    }
+
+    /// The snapshot is JSON in the journal, so the trip through serde has to
+    /// close too — including `last_mode`, whose `Deserialize` exists only for
+    /// this, and the `Option` fields, where a `None`/absent mix-up would read
+    /// back as a controller that had never idled.
+    #[test]
+    fn controller_state_round_trips_through_json() {
+        let state = distinctive_state();
+        let json = serde_json::to_string(&state).unwrap();
+        assert_eq!(state, serde_json::from_str(&json).unwrap());
+
+        let fresh = Controller::test_default(NOW_MS, DAY).state();
+        let json = serde_json::to_string(&fresh).unwrap();
+        assert_eq!(fresh, serde_json::from_str(&json).unwrap());
+    }
 
     /// A one-battery world, the shape every test in this module decides against.
     /// `MeterReading::total_only` zeroes the phases, which is exact rather than
@@ -539,11 +647,15 @@ mod tests {
     /// Controller with no cooldown and no idle-before-discharge requirement
     /// (for tests that only care about mode/power logic).
     fn controller_no_cooldown() -> Controller {
+        let base = default_controller();
         Controller {
             min_mode_duration: Duration::ZERO,
             min_idle_before_discharge: Duration::ZERO,
-            last_idle_start: Some(Timestamp::from_millis(NOW_MS - MINUTE_MS)),
-            ..default_controller()
+            state: ControllerState {
+                last_idle_start: Some(Timestamp::from_millis(NOW_MS - MINUTE_MS)),
+                ..base.state
+            },
+            ..base
         }
     }
 
@@ -551,18 +663,22 @@ mod tests {
     /// `Duration` so the call sites read the same as they always have.
     fn controller_in_mode(mode: ControlMode, elapsed: Duration) -> Controller {
         let mode_change = Timestamp::from_millis(NOW_MS) - Elapsed::of(elapsed);
+        let base = default_controller();
         Controller {
-            last_mode: mode,
-            last_active_mode: match mode {
-                ControlMode::Charge | ControlMode::Discharge => Some(mode),
-                _ => None,
+            state: ControllerState {
+                last_mode: mode,
+                last_active_mode: match mode {
+                    ControlMode::Charge | ControlMode::Discharge => Some(mode),
+                    _ => None,
+                },
+                last_mode_change: mode_change,
+                last_idle_start: match mode {
+                    ControlMode::Idle | ControlMode::Standby => Some(mode_change),
+                    _ => None,
+                },
+                ..base.state
             },
-            last_mode_change: mode_change,
-            last_idle_start: match mode {
-                ControlMode::Idle | ControlMode::Standby => Some(mode_change),
-                _ => None,
-            },
-            ..default_controller()
+            ..base
         }
     }
 
@@ -690,8 +806,8 @@ mod tests {
     fn no_discharge_after_charge_before_idle_duration_met() {
         let mut ctrl = controller_no_cooldown();
         // Last active mode was Charge, recently went idle — guard applies
-        ctrl.last_active_mode = Some(ControlMode::Charge);
-        ctrl.last_idle_start = Some(Timestamp::from_millis(NOW_MS - 60_000));
+        ctrl.state.last_active_mode = Some(ControlMode::Charge);
+        ctrl.state.last_idle_start = Some(Timestamp::from_millis(NOW_MS - 60_000));
         ctrl.min_idle_before_discharge = Duration::from_secs(300);
         let decision = decide_at(
             &mut ctrl,
@@ -705,8 +821,8 @@ mod tests {
     fn discharge_allowed_after_charge_when_idle_duration_met() {
         let mut ctrl = controller_no_cooldown();
         // Last active mode was Charge, but idle long enough
-        ctrl.last_active_mode = Some(ControlMode::Charge);
-        ctrl.last_idle_start = Some(Timestamp::from_millis(NOW_MS - 600_000));
+        ctrl.state.last_active_mode = Some(ControlMode::Charge);
+        ctrl.state.last_idle_start = Some(Timestamp::from_millis(NOW_MS - 600_000));
         ctrl.min_idle_before_discharge = Duration::from_secs(300);
         let decision = decide_at(
             &mut ctrl,
@@ -720,7 +836,7 @@ mod tests {
     fn discharge_resumes_quickly_after_idle() {
         // Last active mode was Discharge, briefly went idle — no guard needed
         let mut ctrl = controller_in_mode(ControlMode::Idle, Duration::from_secs(5));
-        ctrl.last_active_mode = Some(ControlMode::Discharge);
+        ctrl.state.last_active_mode = Some(ControlMode::Discharge);
         ctrl.min_idle_before_discharge = Duration::from_secs(300);
         let decision = decide_at(
             &mut ctrl,
@@ -956,7 +1072,7 @@ mod tests {
     fn min_decision_interval_throttles() {
         let mut ctrl = default_controller();
         ctrl.min_decision_interval = Duration::from_secs(5);
-        ctrl.last_decision = Timestamp::from_millis(NOW_MS);
+        ctrl.state.last_decision = Timestamp::from_millis(NOW_MS);
 
         assert!(
             ctrl.decide(
@@ -971,7 +1087,7 @@ mod tests {
     fn decision_allowed_after_interval() {
         let mut ctrl = default_controller();
         ctrl.min_decision_interval = Duration::from_secs(5);
-        ctrl.last_decision = Timestamp::from_millis(NOW_MS - 6_000);
+        ctrl.state.last_decision = Timestamp::from_millis(NOW_MS - 6_000);
 
         assert!(
             ctrl.decide(
@@ -1138,7 +1254,7 @@ mod tests {
     #[test]
     fn transition_increments_daily_cycles() {
         let mut ctrl = controller_no_cooldown();
-        assert_eq!(ctrl.daily_transitions, 0);
+        assert_eq!(ctrl.state.daily_transitions, 0);
 
         // Idle → Charge
         decide_at(
@@ -1146,7 +1262,7 @@ mod tests {
             &world(GridPower(-200.0), SolarPower::new(0.0), &battery(50)),
             &clock(12),
         );
-        assert_eq!(ctrl.daily_transitions, 1);
+        assert_eq!(ctrl.state.daily_transitions, 1);
 
         // Charge → Idle (within deadband)
         decide_at(
@@ -1154,7 +1270,7 @@ mod tests {
             &world(GridPower(20.0), SolarPower::new(0.0), &battery(50)),
             &clock(12),
         );
-        assert_eq!(ctrl.daily_transitions, 2);
+        assert_eq!(ctrl.state.daily_transitions, 2);
     }
 
     #[test]
@@ -1165,23 +1281,23 @@ mod tests {
             &world(GridPower(-300.0), SolarPower::new(0.0), &battery(50)),
             &clock(12),
         );
-        assert_eq!(ctrl.daily_transitions, 0);
+        assert_eq!(ctrl.state.daily_transitions, 0);
     }
 
     #[test]
     fn cooldown_suppression_increments_counter() {
         // Discharge→Charge toggle within cooldown
         let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(5));
-        assert_eq!(ctrl.daily_cooldown_suppressions, 0);
+        assert_eq!(ctrl.state.daily_cooldown_suppressions, 0);
 
         decide_at(
             &mut ctrl,
             &world(GridPower(-200.0), SolarPower::new(0.0), &battery(50)),
             &clock(20),
         );
-        assert_eq!(ctrl.daily_cooldown_suppressions, 1);
+        assert_eq!(ctrl.state.daily_cooldown_suppressions, 1);
         // Suppression doesn't count as a transition
-        assert_eq!(ctrl.daily_transitions, 0);
+        assert_eq!(ctrl.state.daily_transitions, 0);
     }
 
     #[test]
@@ -1219,7 +1335,7 @@ mod tests {
             &world(GridPower(-200.0), SolarPower::new(0.0), &battery(50)),
             &clock(12),
         );
-        assert_eq!(ctrl.daily_transitions, 3);
+        assert_eq!(ctrl.state.daily_transitions, 3);
 
         // Next decision should be forced to Standby
         let decision = decide_at(
@@ -1242,7 +1358,7 @@ mod tests {
             &world(GridPower(-200.0), SolarPower::new(0.0), &battery(50)),
             &clock(12),
         );
-        assert_eq!(ctrl.daily_transitions, 1);
+        assert_eq!(ctrl.state.daily_transitions, 1);
 
         // All subsequent decisions stay in standby
         let d1 = decide_at(
@@ -1782,8 +1898,8 @@ mod tests {
     #[test]
     fn midnight_resets_daily_counters() {
         let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(60));
-        ctrl.daily_transitions = 5;
-        ctrl.daily_cooldown_suppressions = 3;
+        ctrl.state.daily_transitions = 5;
+        ctrl.state.daily_cooldown_suppressions = 3;
 
         // Same mode, so no new transition is counted — the counters show only
         // the effect of the reset.
@@ -1793,21 +1909,21 @@ mod tests {
             &clock_on_day(12, DAY + 1),
         );
         assert_eq!(decision.mode, ControlMode::Charge);
-        assert_eq!(ctrl.daily_transitions, 0);
-        assert_eq!(ctrl.daily_cooldown_suppressions, 0);
-        assert_eq!(ctrl.last_cycle_reset_day, DAY + 1);
+        assert_eq!(ctrl.state.daily_transitions, 0);
+        assert_eq!(ctrl.state.daily_cooldown_suppressions, 0);
+        assert_eq!(ctrl.state.last_cycle_reset_day, DAY + 1);
     }
 
     #[test]
     fn same_day_does_not_reset_counters() {
         let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(60));
-        ctrl.daily_transitions = 5;
+        ctrl.state.daily_transitions = 5;
         decide_at(
             &mut ctrl,
             &world(GridPower(-300.0), SolarPower::new(0.0), &battery(50)),
             &clock(23),
         );
-        assert_eq!(ctrl.daily_transitions, 5);
+        assert_eq!(ctrl.state.daily_transitions, 5);
     }
 
     #[test]
@@ -1843,7 +1959,7 @@ mod tests {
         );
         assert_eq!(decision.mode, ControlMode::Charge);
         assert_eq!(
-            ctrl.daily_transitions, 1,
+            ctrl.state.daily_transitions, 1,
             "counters reset, then this change"
         );
     }
@@ -1945,10 +2061,10 @@ mod tests {
     fn min_idle_before_discharge_boundary_is_inclusive() {
         // Guard only applies when the last active mode was Charge.
         let mut ctrl = controller_no_cooldown();
-        ctrl.last_active_mode = Some(ControlMode::Charge);
+        ctrl.state.last_active_mode = Some(ControlMode::Charge);
         ctrl.min_idle_before_discharge = Duration::from_secs(300);
 
-        ctrl.last_idle_start = Some(Timestamp::from_millis(NOW_MS - 299_999));
+        ctrl.state.last_idle_start = Some(Timestamp::from_millis(NOW_MS - 299_999));
         assert_eq!(
             decide_at(
                 &mut ctrl,
@@ -1959,7 +2075,7 @@ mod tests {
             ControlMode::Idle
         );
 
-        ctrl.last_idle_start = Some(Timestamp::from_millis(NOW_MS - 300_000));
+        ctrl.state.last_idle_start = Some(Timestamp::from_millis(NOW_MS - 300_000));
         assert_eq!(
             decide_at(
                 &mut ctrl,
@@ -1976,7 +2092,7 @@ mod tests {
         let mut ctrl = default_controller();
         ctrl.min_decision_interval = Duration::from_secs(5);
 
-        ctrl.last_decision = Timestamp::from_millis(NOW_MS - 4_999);
+        ctrl.state.last_decision = Timestamp::from_millis(NOW_MS - 4_999);
         assert!(
             ctrl.decide(
                 &world(GridPower(-300.0), SolarPower::new(0.0), &battery(50)),
@@ -1985,7 +2101,7 @@ mod tests {
             .is_none()
         );
 
-        ctrl.last_decision = Timestamp::from_millis(NOW_MS - 5_000);
+        ctrl.state.last_decision = Timestamp::from_millis(NOW_MS - 5_000);
         assert!(
             ctrl.decide(
                 &world(GridPower(-300.0), SolarPower::new(0.0), &battery(50)),

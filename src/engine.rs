@@ -1,9 +1,11 @@
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 use crate::allocate::{Directive, allocate};
 use crate::battery::BatteryState;
 use crate::clock::Clock;
-use crate::controller::Controller;
+use crate::controller::{Controller, ControllerState};
 use crate::event::Event;
 use crate::models::{ControlDecision, ControlMode, CycleCounts};
 use crate::units::{GridPower, Setpoint, SolarPower};
@@ -33,6 +35,25 @@ pub struct Step {
     pub status: Option<&'static str>,
 }
 
+/// Everything needed to resume the fold from a point in time: the world the
+/// next decision reads, the controller's history, and the failsafe latch.
+///
+/// These are the three pieces that make `step` a fold rather than a function —
+/// feed the same event to two engines holding the same `EngineState` and they
+/// produce the same `Step`. That is the property the journal exists to preserve
+/// across a process restart, and the shape step 8's fixture `seed` is built from.
+///
+/// `mqtt_timed_out` looks like an implementation detail and is not: it decides
+/// whether a timeout tick reports a status transition and whether a resuming
+/// meter reading announces `"operational"`. Two engines differing only in this
+/// flag produce different steps.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EngineState {
+    pub world: World,
+    pub controller: ControllerState,
+    pub mqtt_timed_out: bool,
+}
+
 impl Engine {
     pub fn new(controller: Controller, world: World, mqtt_timeout: Duration) -> Self {
         Self {
@@ -52,15 +73,33 @@ impl Engine {
         self.world.battery()
     }
 
-    /// The whole projection, for the caller that wants to record it: the raw
-    /// log writes it alongside every decision, so a journal line carries the
-    /// inputs the decision was made from and not just its conclusion.
-    pub fn world(&self) -> &World {
-        &self.world
-    }
-
     pub fn cycle_counts(&self) -> CycleCounts {
         self.controller.cycle_counts()
+    }
+
+    /// Snapshot the fold. Recorded with every decision so the journal can seed a
+    /// replay from any decision row.
+    pub fn state(&self) -> EngineState {
+        EngineState {
+            world: self.world.clone(),
+            controller: self.controller.state(),
+            mqtt_timed_out: self.mqtt_timed_out,
+        }
+    }
+
+    /// Resume from a snapshot. The controller's *configuration* comes from
+    /// whatever this engine was constructed with, not from the snapshot — see
+    /// [`Controller::restore`].
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn restore(&mut self, state: EngineState) {
+        let EngineState {
+            world,
+            controller,
+            mqtt_timed_out,
+        } = state;
+        self.world = world;
+        self.controller.restore(controller);
+        self.mqtt_timed_out = mqtt_timed_out;
     }
 
     pub fn step(&mut self, event: &Event) -> Step {
@@ -146,33 +185,20 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::command::Command;
-    use crate::units::{BatteryPower, GridPower, PowerCap, Soc, SolarPower, Timestamp};
+    use crate::fixtures::journey::{self, BATTERY_ID, DAY, NOW_MS};
+    use crate::units::{GridPower, Soc, SolarPower};
     use crate::world::{DeviceId, Measurement};
-    use chrono::Weekday;
 
-    const NOW_MS: i64 = 1_000_000_000;
-    const DAY: u32 = 100;
-    const BATTERY_ID: &str = "test-battery";
-
+    /// The journey's own starting instant. Shared rather than rebuilt here: the
+    /// day ordinal has to match what `Controller::test_default(NOW_MS, DAY)` is
+    /// given, or the midnight reset fires on the first step — and two copies
+    /// that must agree is exactly what moving the fixture out was for.
     fn clock() -> Clock {
-        Clock {
-            now: Timestamp::from_millis(NOW_MS),
-            hour: 12,
-            day_ordinal: DAY,
-            weekday: Weekday::Wed,
-        }
+        journey::clock_at(0)
     }
 
     fn battery() -> BatteryState {
-        BatteryState {
-            soc: Soc::new(50),
-            max_discharge_power: PowerCap::new(800),
-            max_charge_power: PowerCap::new(2400),
-            current_power: BatteryPower(0),
-            soc_calibrating: false,
-            soc_limit_reached: false,
-            fault: false,
-        }
+        BatteryState::test_sample()
     }
 
     fn world() -> World {
@@ -304,13 +330,16 @@ mod tests {
     /// run to completion before the other starts, must produce identical
     /// steps at every position. `step` takes `&mut self` and a borrowed event
     /// and nothing else — no `Clock::now` call, no `static mut`, no
-    /// thread-local — so running the two runs back to back rather than
-    /// interleaved gives real wall-clock time to elapse between them; an
-    /// engine secretly reading ambient time would see a different clock on
-    /// its second run and diverge from its first. Interleaving the two loops
-    /// microseconds apart would not exercise this: `step` never reads a
-    /// clock itself, so there is nothing that stepping two engines together
-    /// would catch that stepping them apart does not.
+    /// thread-local — so the only thing that can vary between the runs is state
+    /// the engine is carrying that it should not be.
+    ///
+    /// It does **not** catch an engine that secretly reads ambient time, and an
+    /// earlier version of this comment claimed it did. The two runs are five
+    /// `step` calls apart — microseconds — while `Clock` has millisecond
+    /// resolution, so a hidden `Utc::now()` would very likely read the same
+    /// value twice and pass. Making that true would need a deliberate sleep,
+    /// which is not worth a second of test time; what rules it out is that
+    /// `step`'s signature gives it nothing to read.
     ///
     /// Comparing whole `Step`s (via `Step`'s and `ControlDecision`'s derived
     /// `PartialEq`) rather than picking out individual fields means a field
@@ -352,6 +381,71 @@ mod tests {
         let steps_b: Vec<Step> = events().iter().map(|event| engine_b.step(event)).collect();
 
         assert_eq!(steps_a, steps_b);
+    }
+
+    /// Split after the timeout, so the second half opens with the engine
+    /// latched into the failsafe and the first meter reading after the boundary
+    /// has to produce the `"operational"` transition.
+    const SPLIT: usize = 5;
+
+    /// **The property the journal exists for.** A decision is a fold over
+    /// everything that came before it, so a controller restarted mid-stream
+    /// either resumes the fold exactly or silently becomes a different
+    /// controller that happens to share a config file.
+    ///
+    /// Engine A runs the whole journey in one process. Engine C is a *fresh*
+    /// engine — built from the same config but with none of the history — that
+    /// is handed A's snapshot at the split point and runs the rest. Every step
+    /// after the boundary has to match, including the status transitions, which
+    /// is what proves `mqtt_timed_out` came across with everything else.
+    #[test]
+    fn a_restored_engine_resumes_the_fold_exactly() {
+        let events = crate::fixtures::journey::events();
+
+        let mut continuous = engine();
+        let expected: Vec<Step> = events.iter().map(|e| continuous.step(e)).collect();
+
+        let mut recorded = engine();
+        let snapshot = events[..SPLIT]
+            .iter()
+            .map(|e| recorded.step(e))
+            .last()
+            .map(|_| recorded.state())
+            .expect("split is inside the journey");
+
+        // The snapshot goes through JSON, because that is how it reaches the
+        // journal — an `EngineState` that only survives in memory is not a
+        // recovery story.
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let restored: EngineState = serde_json::from_str(&json).unwrap();
+
+        let mut resumed = engine();
+        resumed.restore(restored);
+
+        let actual: Vec<Step> = events[SPLIT..].iter().map(|e| resumed.step(e)).collect();
+        assert_eq!(actual, expected[SPLIT..]);
+
+        // Equal steps are necessary and not sufficient — the two engines also
+        // have to arrive at the same place, or the next event diverges. Field
+        // coverage of the snapshot itself is not this test's job and it cannot
+        // do it: see `state_and_restore_are_exact_inverses` in `controller.rs`.
+        assert_eq!(resumed.state(), continuous.state());
+    }
+
+    /// Guards the test above against passing for the wrong reason. If a fresh
+    /// engine produced the same steps anyway, the journey would not be
+    /// exercising any state and the equivalence would be vacuous.
+    #[test]
+    fn the_same_journey_diverges_without_the_snapshot() {
+        let events = crate::fixtures::journey::events();
+
+        let mut continuous = engine();
+        let expected: Vec<Step> = events.iter().map(|e| continuous.step(e)).collect();
+
+        let mut cold = engine();
+        let actual: Vec<Step> = events[SPLIT..].iter().map(|e| cold.step(e)).collect();
+
+        assert_ne!(actual, expected[SPLIT..]);
     }
 
     #[test]

@@ -16,6 +16,7 @@
 //! honest map for whoever adds a P1 meter next, not a promise that it is free.
 
 pub mod shelly;
+pub mod synthetic;
 
 use crate::units::SolarPower;
 use crate::world::MeterReading;

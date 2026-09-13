@@ -36,7 +36,8 @@ crossed a boundary without anyone saying what the conversion meant.
 
 ## Project structure
 
-- `src/main.rs` — Entry point, coordinator loop
+- `src/main.rs` — Entry point: arguments, logging, config
+- `src/run.rs` — The coordinator loop and shutdown
 - `src/config.rs` — Environment variable configuration
 - `src/models.rs` — Wire types (MQTT, Zendure API) and control decisions
 - `src/clock.rs` — Time context captured at the edge; the controller never reads a clock
@@ -45,9 +46,12 @@ crossed a boundary without anyone saying what the conversion meant.
 - `src/controller.rs` — Control logic (charge/discharge/idle decisions)
 - `src/command.rs` — What gets sent to the device, split from the decision
 - `src/battery.rs` — Battery state derived from device properties
-- `src/mqtt.rs` — MQTT subscriber, HA discovery, publishing
+- `src/publish.rs` — The sink the decision path publishes through
+- `src/announce.rs` — What Home Assistant has been told, on this connection
+- `src/mqtt/` — The broker: `publisher` (queue + task), `discovery` (wire
+  format), `subscriber` (eventloop + meter feed)
 - `src/zendure.rs` — Zendure REST API client
-- `src/rawlog.rs` — Append-only NDJSON capture of inputs and decisions
+- `src/journal/` — Append-only SQLite record of events, decisions and outcomes
 - `src/rte.rs` — Round-trip efficiency tracking
 
 ## Documentation

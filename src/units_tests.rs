@@ -136,6 +136,14 @@ fn battery_flow_is_signed_and_splits_by_direction() {
 }
 
 #[test]
+fn battery_power_converts_to_the_plain_signed_watts_it_wraps() {
+    // `simulation.rs` integrates this with `WattHours::integrate`, which has
+    // no notion of charging or discharging — only a signed rate.
+    assert_eq!(BatteryPower(-800).into_watts(), Watts(-800));
+    assert_eq!(BatteryPower(600).into_watts(), Watts(600));
+}
+
+#[test]
 fn underlying_grid_adds_back_the_batterys_own_effect() {
     // Discharging 400 W while the meter reads 0 means the house is drawing 400.
     assert_eq!(GridPower::ZERO + BatteryPower(400), GridPower(400.0));
@@ -218,6 +226,33 @@ fn fraction_above_saturates_below_the_floor() {
     assert_eq!(Soc::new(5).fraction_above(Soc::new(10)), 0.0);
 }
 
+#[test]
+fn soc_from_fraction_rounds_to_the_nearest_whole_percent() {
+    assert_eq!(Soc::from_fraction(0.5), Soc::new(50));
+    // Rounds, rather than truncating: 0.505 is closer to 51% of the pack than
+    // to 50%.
+    assert_eq!(Soc::from_fraction(0.505), Soc::new(51));
+    assert_eq!(Soc::from_fraction(0.0), Soc::ZERO);
+    assert_eq!(Soc::from_fraction(1.0), Soc::FULL);
+}
+
+#[test]
+fn soc_from_fraction_clamps_out_of_range_values_through_new() {
+    // A rounding blip past full, or stored energy that has drifted a hair
+    // below zero from floating-point error, must land in range rather than
+    // wrap or panic.
+    assert_eq!(Soc::from_fraction(1.2), Soc::FULL);
+    assert_eq!(Soc::from_fraction(-0.05), Soc::ZERO);
+}
+
+#[test]
+fn soc_from_fraction_maps_nan_to_zero() {
+    // A zero-capacity pack computes `0.0 / 0.0`. `NaN as u32` is a defined but
+    // meaningless 0 in Rust; this asserts the type states that explicitly
+    // rather than depending on the cast's incidental behavior.
+    assert_eq!(Soc::from_fraction(f64::NAN), Soc::ZERO);
+}
+
 // --- Energy ---------------------------------------------------------------
 
 #[test]
@@ -241,6 +276,45 @@ fn watt_hours_sum_and_convert_to_kwh() {
 #[test]
 fn percent_converts_to_a_fraction() {
     assert_eq!(Percent(85.0).fraction(), 0.85);
+}
+
+#[test]
+fn watt_hours_over_recovers_the_average_power() {
+    // The inverse of `integrate`: 500 Wh spread over an hour is 500 W.
+    assert_eq!(WattHours(500.0).over(Duration::from_secs(3600)), Watts(500));
+    // Half an hour: the same energy is twice the rate.
+    assert_eq!(
+        WattHours(500.0).over(Duration::from_secs(1800)),
+        Watts(1000)
+    );
+}
+
+#[test]
+fn watt_hours_over_a_zero_interval_mints_nothing() {
+    // Dividing by zero seconds would otherwise produce an infinite wattage.
+    assert_eq!(WattHours(500.0).over(Duration::ZERO), Watts::ZERO);
+}
+
+// --- Efficiency: clamped so discharge can never divide by zero ------------
+
+#[test]
+fn efficiency_clamps_to_one_through_a_hundred_percent() {
+    assert_eq!(Efficiency::new(150.0).get(), 100.0);
+    // Not zero: discharge divides by this, and a zero would mint infinite
+    // energy out of a battery that gave up nothing.
+    assert_eq!(Efficiency::new(0.0).get(), 1.0);
+    assert_eq!(Efficiency::new(-10.0).get(), 1.0);
+    assert_eq!(Efficiency::new(95.0).get(), 95.0);
+}
+
+#[test]
+fn efficiency_maps_nan_to_the_worst_defined_value_rather_than_propagating() {
+    assert_eq!(Efficiency::new(f64::NAN).get(), 1.0);
+}
+
+#[test]
+fn efficiency_converts_to_a_fraction() {
+    assert_eq!(Efficiency::new(95.0).fraction(), 0.95);
 }
 
 // --- Watts arithmetic saturates rather than panicking ---------------------
@@ -296,4 +370,153 @@ fn battery_power_sums_over_a_fleet() {
         .into_iter()
         .sum();
     assert_eq!(extreme, BatteryPower(i32::MAX));
+}
+
+/// Zero and negative are rejected, not clamped.
+///
+/// This is the bug the type exists for. `prune` deletes rows older than
+/// `now - days`; with a negative count that cutoff is in the *future*, so the
+/// "prune" deletes the entire journal and logs it as a success. Observed before
+/// the fix: a second start with `-5` reported `pruned 13 rows beyond -5 days`.
+#[test]
+fn retention_rejects_windows_that_would_delete_the_present() {
+    for bad in [0, -1, -5, i64::MIN] {
+        assert!(
+            RetentionDays::new(bad).is_err(),
+            "{bad} days must not be accepted"
+        );
+    }
+    assert_eq!(RetentionDays::new(1).unwrap().days(), 1);
+    assert_eq!(RetentionDays::new(90).unwrap().days(), 90);
+}
+
+/// An absurd value is clamped rather than rejected — the intent is
+/// unambiguous — and clamping is what keeps `cutoff` away from the range where
+/// `chrono::Duration::days` panics. That panic happened on the writer thread,
+/// whose `JoinHandle` was dropped, so it was swallowed entirely.
+#[test]
+fn retention_clamps_absurd_windows_instead_of_panicking() {
+    assert_eq!(
+        RetentionDays::new(i64::MAX).unwrap().days(),
+        RetentionDays::MAX_DAYS
+    );
+    // The point of the clamp: this must not panic.
+    let now = chrono::Utc::now();
+    let cutoff = RetentionDays::new(i64::MAX).unwrap().cutoff(now);
+    assert!(cutoff < Timestamp::from_millis(now.timestamp_millis()));
+}
+
+/// The cutoff is in the past by exactly the window, which is what makes
+/// "older than N days" mean N days.
+#[test]
+fn retention_cutoff_is_the_window_behind_now() {
+    let now = chrono::Utc::now();
+    let cutoff = RetentionDays::new(30).unwrap().cutoff(now);
+    let expected = now - chrono::Duration::days(30);
+    assert_eq!(cutoff, Timestamp::from_millis(expected.timestamp_millis()));
+}
+
+/// Reading a value back has to enforce the same invariant constructing it does.
+///
+/// `#[serde(transparent)]` derives both halves and the derived `Deserialize`
+/// writes the field directly, so every clamp here was bypassed on the way in.
+/// Harmless while the journal only ever read its own writes; not harmless once
+/// `replay --set` and hand-edited fixtures exist, where the number comes from a
+/// person. `min_soc=1000` — the shape the device reports SOC setpoints in —
+/// used to yield `Soc(1000)`, against which `soc > min_soc` is never true.
+#[test]
+fn clamping_newtypes_clamp_on_the_way_in_too() {
+    assert_eq!(serde_json::from_str::<Soc>("1000").unwrap(), Soc::new(1000));
+    assert_eq!(serde_json::from_str::<Soc>("1000").unwrap(), Soc::FULL);
+
+    // The one that inverts a guard rather than merely saturating: the README
+    // documents a negative `SOLAR_DISCHARGE_BLOCK_THRESHOLD` as "disables the
+    // guard", which is only true because the clamp turns it into the `0`
+    // sentinel. Unclamped, it wires the guard permanently on.
+    let off = serde_json::from_str::<SolarPower>("-500").unwrap();
+    assert_eq!(off, SolarPower::ZERO);
+    assert_eq!(off, SolarPower::new(-500.0));
+
+    assert_eq!(
+        serde_json::from_str::<Setpoint>("-42").unwrap(),
+        Setpoint::ZERO
+    );
+}
+
+/// And a valid value still round-trips byte-for-byte, so the journal, MQTT and
+/// every fixture already written read back unchanged.
+#[test]
+fn validating_deserialize_leaves_the_wire_format_alone() {
+    for json in ["0", "55", "100"] {
+        let soc: Soc = serde_json::from_str(json).unwrap();
+        assert_eq!(serde_json::to_string(&soc).unwrap(), json);
+    }
+    let solar: SolarPower = serde_json::from_str("212.5").unwrap();
+    assert_eq!(serde_json::to_string(&solar).unwrap(), "212.5");
+    let setpoint: Setpoint = serde_json::from_str("145").unwrap();
+    assert_eq!(serde_json::to_string(&setpoint).unwrap(), "145");
+}
+
+/// The hole a configuration file would have fallen into.
+///
+/// `RetentionDays` derived `Deserialize` transparently, which builds the field
+/// directly and skips `new` — so a `0` read off a wire produced the value whose
+/// own doc comment says it is impossible to express, and `prune` would have
+/// deleted the whole journal at every startup and every midnight.
+#[test]
+fn retention_days_refuses_through_serde_what_its_constructor_refuses() {
+    for bad in ["0", "-5"] {
+        let err = serde_json::from_str::<RetentionDays>(bad)
+            .expect_err("a retention that deletes everything is not a retention");
+        assert!(
+            err.to_string()
+                .contains("must be a positive number of days"),
+            "the constructor's own message should reach the caller, got: {err}",
+        );
+    }
+
+    assert_eq!(
+        serde_json::from_str::<RetentionDays>("30").unwrap(),
+        RetentionDays::new(30).unwrap(),
+    );
+    // An absurd upper value is still clamped rather than refused: the intent
+    // there is unambiguous.
+    assert_eq!(
+        serde_json::from_str::<RetentionDays>("99999")
+            .unwrap()
+            .days(),
+        RetentionDays::MAX_DAYS,
+    );
+}
+
+/// Serialization is untouched, so the journal's own round trip still works.
+#[test]
+fn retention_days_still_serializes_as_a_bare_number() {
+    assert_eq!(
+        serde_json::to_string(&RetentionDays::new(90).unwrap()).unwrap(),
+        "90",
+    );
+}
+
+/// The vendor encoding every Zendure temperature arrives in, and the unit
+/// anyone actually reads. These were a bare `u32` and a bare `f64` with a cast
+/// between them — the one place CLAUDE.md's rule was not applied.
+#[test]
+fn deci_kelvin_converts_to_celsius_at_one_decimal() {
+    // The values the wire format is pinned on.
+    assert_eq!(format!("{:.1}", DeciKelvin(3001).to_celsius()), "27.0");
+    assert_eq!(format!("{:.1}", DeciKelvin(2981).to_celsius()), "25.0");
+    assert_eq!(format!("{:.1}", DeciKelvin(2995).to_celsius()), "26.4");
+    // Just below freezing. Renders as "-0.0", which is what the f64 rounds to
+    // and what the old bare-`f64` code published — pinned so a future switch to
+    // a decimal type is a visible change rather than a silent one.
+    assert_eq!(format!("{:.1}", DeciKelvin(2731).to_celsius()), "-0.0");
+}
+
+/// `Display` forwards the formatter rather than rendering through `{}`, so a
+/// precision at the call site is not silently dropped.
+#[test]
+fn celsius_keeps_the_precision_it_is_given() {
+    assert_eq!(format!("{:.1}", Celsius(1.2345)), "1.2");
+    assert_eq!(format!("{}", Celsius(1.2345)), "1.2345");
 }

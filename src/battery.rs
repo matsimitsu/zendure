@@ -33,6 +33,25 @@ pub struct BatteryState {
 }
 
 impl BatteryState {
+    /// A healthy mid-charge battery, for tests. Variants are struct updates:
+    /// `BatteryState { soc: Soc::new(80), ..BatteryState::test_sample() }`.
+    ///
+    /// Shared rather than restated per module — five test modules were writing
+    /// the same seven fields, and the caps in particular were arbitrary
+    /// non-zero headroom in every one of them.
+    #[cfg(test)]
+    pub(crate) fn test_sample() -> Self {
+        Self {
+            soc: Soc::new(50),
+            max_discharge_power: PowerCap::new(800),
+            max_charge_power: PowerCap::new(2400),
+            current_power: BatteryPower::ZERO,
+            soc_calibrating: false,
+            soc_limit_reached: false,
+            fault: false,
+        }
+    }
+
     pub fn from_properties(props: &ZendureProperties, spec: &BatterySpec) -> Self {
         let discharge = Watts::from_device(props.pack_input_power.unwrap_or(0));
         let charge = Watts::from_device(props.output_pack_power.unwrap_or(0));

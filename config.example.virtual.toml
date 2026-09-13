@@ -1,0 +1,98 @@
+# zendure — config.example.virtual.toml
+#
+# Runs the whole controller with no battery hardware and no MQTT broker: a
+# `VirtualBattery` (`src/simulation.rs`) stands in for the Zendure and models
+# real energy flow — a setpoint that would overcharge the pack really does
+# hit a ceiling, a battery that is empty really does stop discharging — and a
+# synthetic house (`src/source/synthetic.rs`) feeds it a plausible grid
+# reading instead of a real Shelly Pro 3EM, closing the loop by folding the
+# battery's own flow back into what it reports. See README.md's section on
+# running against the simulator.
+#
+# Every path below is relative to a fresh checkout, so this runs with no
+# setup beyond `git clone`:
+#
+#   cargo run -- --config config.example.virtual.toml
+#
+# `./local/` does not need to exist ahead of time. `[journal] path` and
+# `[rte] state_path` both point under it, and both create their own parent
+# directory on first write (see `Journal::open` and `RteTracker::new`); if
+# that ever failed, each degrades on its own to "disabled" rather than
+# refusing to start, so nothing here adds a manual `mkdir`.
+#
+# [mqtt] is absent on purpose: with no broker, `run.rs` publishes through a
+# `NullPublisher` instead of a real queued sink, so nothing is lost by not
+# having one — Home Assistant discovery and telemetry simply have nowhere to
+# go. [shelly] is absent for the matching reason on the read side: the meter
+# below is synthetic, so there is no Shelly topic to subscribe to.
+
+[[device]]
+kind = "virtual"
+# The battery's identity in the world and the journal — the role a Zendure's
+# serial plays, chosen freely since there is no real device to name.
+id = "virtual-1"
+# Pack capacities in Wh. One 10 kWh pack here; a heterogeneous fleet (a
+# smaller expansion pack alongside the base unit) is a second array entry.
+packs = [10000.0]
+# Starting state of charge, whole percent.
+soc = 50
+# Round-trip charge/discharge efficiency, in percent, each way. A full
+# charge-then-discharge cycle returns roughly 0.95 * 0.95 ≈ 90% of what went
+# in — see `simulation.rs`'s own tests for the exact arithmetic.
+charge_efficiency = 95.0
+discharge_efficiency = 95.0
+
+[meter]
+kind = "synthetic"
+# A synthetic house: a constant base load and a solar array with a rated
+# peak (both watts), neither of which knows the battery exists —
+# `source/synthetic.rs` folds the battery's own flow back in before this
+# becomes a grid reading, which is what makes the feedback loop the
+# controller reacts to real, rather than a fixed number that never moves no
+# matter what the battery does.
+base_load = 500
+solar_peak = 3000
+
+[homeassistant]
+# Unused while [mqtt] is absent; left at its default rather than omitted, so
+# there is something here to change if this file later gains a broker.
+publish_prefix = "zendure"
+
+[clock]
+timezone = "Europe/Amsterdam"
+
+[journal]
+path = "./local/journal.db"
+retention_days = 7
+
+[rte]
+state_path = "./local/rte_state.json"
+
+[logging]
+filter = "zendure=info"
+
+# --- [tuning] is SessionConfig, verbatim -------------------------------------
+#
+# Every key here has a sensible default (see `config.example.toml`'s own
+# [tuning] table for what each one means) and the whole section is optional —
+# it is spelled out here anyway so a run against the simulator is easy to
+# retune without cross-referencing the production file.
+[tuning]
+charge_margin = 50
+discharge_margin = 5
+charge_start_threshold = -100.0
+discharge_start_threshold = 0.0
+min_mode_duration_secs = 10
+min_decision_interval_secs = 5
+idle_timeout_secs = 300
+min_idle_before_discharge_secs = 300
+cycle_warn_threshold = 200
+min_soc = 10
+max_soc = 100
+balance_weekday = "none"
+solar_discharge_block_threshold = 0.0
+# The failsafe window: how long without a meter reading before the engine
+# forces idle. The synthetic meter feeds a reading every second, same as a
+# real Shelly, so this keeps being re-armed and the failsafe stays quiet on a
+# healthy run — if it fires instead, the synthetic meter's task has died.
+mqtt_timeout_secs = 60

@@ -1,6 +1,6 @@
 [package]
 name = "zendure"
-version = "0.2.25"
+version = "0.2.27"
 edition = "2024"
 
 [dependencies]
@@ -11,8 +11,22 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-chrono = "0.4"
+# `serde` is needed for `Weekday`, which rides inside every journaled `Clock`.
+chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
+# `bundled` compiles the SQLite amalgamation into the binary. The release ships a
+# static musl build to a box with no libsqlite3.so, so linking the system library
+# is not an option.
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+# Parsing only — we never emit TOML, and warnings name a value's type through
+# `Value::type_str` rather than rendering it. Pure Rust with no build script, so
+# it adds nothing the static musl cross-build can trip over.
+toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
 
 [dev-dependencies]
 tempfile = "3"
+# `full` (above) does not include `test-util` — it is deliberately excluded
+# from the "give me everything" bundle since it changes runtime behaviour
+# (`start_paused`) rather than adding a feature, and resolver 2+ keeps this
+# dev-only addition out of the release binary.
+tokio = { version = "1", features = ["test-util"] }

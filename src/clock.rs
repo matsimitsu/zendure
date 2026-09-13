@@ -1,5 +1,6 @@
 use chrono::{Datelike, Timelike, Utc, Weekday};
 use chrono_tz::Tz;
+use serde::{Deserialize, Serialize};
 
 use crate::units::Timestamp;
 
@@ -12,7 +13,7 @@ use crate::units::Timestamp;
 /// process-relative counter can't do. The cost is NTP sensitivity: a backwards
 /// step makes an elapsed comparison read as "not yet elapsed", delaying a mode
 /// change until time catches up. A forward step permits one slightly early.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Clock {
     /// Wall-clock instant.
     pub now: Timestamp,
@@ -27,13 +28,31 @@ pub struct Clock {
 }
 
 impl Clock {
+    /// A clock fixed at `now_ms`, for tests.
+    ///
+    /// `pub(crate)` and living next to the type for the same reason
+    /// `Controller::test_default` does: four test modules were each writing this
+    /// literal out, and two of them byte-identically. Tests that care about a
+    /// particular hour or weekday say so with struct update syntax —
+    /// `Clock { hour: 19, ..Clock::test_at(ms) }` — which also makes it obvious
+    /// which field a given test is actually about.
+    #[cfg(test)]
+    pub(crate) fn test_at(now_ms: i64) -> Self {
+        Self {
+            now: Timestamp::from_millis(now_ms),
+            hour: 12,
+            day_ordinal: 100,
+            weekday: chrono::Weekday::Wed,
+        }
+    }
+
     /// Read the real clock. Called only at the edges — the MQTT handler and the
     /// failsafe timeout — never below them.
     pub fn now(tz: Tz) -> Self {
         let utc = Utc::now();
         let local = utc.with_timezone(&tz);
         Self {
-            now: Timestamp::from_millis(utc.timestamp_millis()),
+            now: utc.into(),
             hour: local.hour(),
             day_ordinal: local.ordinal(),
             weekday: local.weekday(),

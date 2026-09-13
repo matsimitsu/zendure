@@ -7,21 +7,21 @@
 //! vendor entirely) is a new `BatterySpec` rather than another pair of consts
 //! to keep in sync.
 //!
-//! The other half is the capability trait a device adapter implements and the
-//! loop that drives it. `main.rs` used to reach straight for `ZendureClient`
-//! and apply `commands.first()`, silently dropping the rest — harmless with one
-//! device, wrong the moment a step means "stop charging the car, start charging
-//! the battery". `actuate` takes the whole list and reports on every element,
-//! so there is no longer a place for a caller to decide on its own how many
-//! devices there are.
+//! The other half is the capability trait a device adapter implements.
+//! `main.rs` used to reach straight for `ZendureClient` and apply
+//! `commands.first()`, silently dropping the rest — harmless with one device,
+//! wrong the moment a step means "stop charging the car, start charging the
+//! battery". The loop that drives every adapter from a list, `actuate`, lives
+//! in [`crate::registry`] alongside the map it dispatches through — this
+//! module only names the capability, not how many boxes implement it.
 
 use std::future::Future;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use crate::allocate::Directive;
+use crate::battery::BatteryState;
 use crate::command::Command;
-use crate::units::PowerCap;
+use crate::units::{DeciKelvin, PackTemperature, PowerCap, Soc, WattHours, Watts};
 use crate::world::DeviceId;
 
 /// A battery model's rated limits. What the hardware can do, as distinct from
@@ -61,13 +61,131 @@ pub const AC2400_PLUS: BatterySpec = BatterySpec {
 pub trait BatteryController {
     type Error: std::fmt::Display;
 
-    /// Which device this adapter writes to. `actuate` matches a directive's
-    /// address against it rather than assuming the only adapter it holds is
-    /// the right one — an `Outcome` that names a device must mean the write
-    /// actually went there.
+    /// Which device this adapter writes to. `Devices::new` keys the registry
+    /// by it, so a directive's address reaches this adapter by a real map
+    /// lookup rather than by trusting whoever constructed the registry to
+    /// have put it in the right slot — an `Outcome` that names a device must
+    /// mean the write actually went there.
     fn id(&self) -> &DeviceId;
 
     fn apply(&self, command: &Command) -> impl Future<Output = Result<(), Self::Error>> + Send;
+}
+
+/// Bytes exactly as they arrived, before anything parsed them.
+///
+/// Carried *out* of the adapter rather than journalled from inside it. An
+/// adapter that wrote to the journal itself would have to know the journal
+/// exists — a dependency this module has never had — and the caller already
+/// owns the rule that matters: capture before parse, so a payload that fails
+/// to decode is still on record. `run.rs` had that ordering right where the
+/// HTTP call was; handing the bytes back preserves it rather than making
+/// `zendure.rs` re-derive it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawCapture {
+    pub kind: &'static str,
+    pub body: String,
+}
+
+/// Everything a poll produces that no decision reads.
+///
+/// Round-trip efficiency, pack temperatures, the enclosure and pack
+/// temperatures and the device's own minimum SOC are all derived from these
+/// and published for graphing; the engine never consults them. Naming the
+/// group is what lets a caller take one `BatteryReading` instead of a
+/// vendor-shaped report and reaching into its fields itself.
+#[derive(Debug)]
+pub struct BatteryTelemetry {
+    pub charge: Watts,
+    pub discharge: Watts,
+    /// `None` when this report carried none — the caller keeps its last known
+    /// set rather than publishing a capacity of zero.
+    pub pack_capacities: Option<Vec<WattHours>>,
+    pub pack_temps: Vec<PackTemperature>,
+    pub enclosure_temp: Option<DeciKelvin>,
+    pub min_soc: Option<Soc>,
+}
+
+/// One reading: what the controller decides on, plus everything else a poll
+/// or the startup handshake produced.
+#[derive(Debug)]
+pub struct BatteryReading {
+    pub state: BatteryState,
+    pub telemetry: BatteryTelemetry,
+    pub raw: Option<RawCapture>,
+}
+
+/// A failure that still carries whatever bytes arrived.
+///
+/// `RawCapture` exists as its own type, rather than living only on the
+/// success path, for exactly this: a response the process failed to decode is
+/// the one most worth having on record, since it is the one a person will
+/// want to look at by hand. A failure with nothing to show for it — the
+/// request itself never came back — carries `None` instead.
+#[derive(Debug)]
+pub struct PollError {
+    pub raw: Option<RawCapture>,
+    pub error: String,
+}
+
+/// Reading a battery's state.
+///
+/// A separate trait from [`BatteryController`], not a second method bolted
+/// onto it, because the two call sites want different things from an
+/// adapter. `registry::actuate` drives every device through `apply` alone —
+/// a directive never asks a battery what it is doing before telling it what
+/// to do next — so a trait with only `apply` is all `actuate` and its tests
+/// need. And [`RecordingBattery`], the write-only double `actuate`'s tests
+/// share, would otherwise have had to invent a `prepare` and a `poll` it
+/// never calls, just to keep satisfying one merged trait — turning a double
+/// built to answer "did the command land" into one that also has to fake
+/// being readable. Two traits mean each call site implements only the one it
+/// uses.
+///
+/// Same shape as `BatteryController`'s, for the reasons argued there: `&self`,
+/// since `ZendureClient` keeps its mutable state behind a `Mutex` so the poll
+/// loop can hold it immutably inside `tokio::select!`; `-> impl Future<..> +
+/// Send` rather than `async fn`, so a generic caller sees the future's
+/// `Send`-ness spelled out instead of inferred, which matters the moment
+/// polling moves onto a spawned task the way actuation already anticipates.
+///
+/// No associated `Error` type, unlike `BatteryController`: every adapter
+/// reports a failure as [`PollError`], not its own error type, because the
+/// raw bytes a failure carries are exactly what the caller journals — an
+/// adapter-specific error type would have to be unwrapped back into that
+/// shape at the boundary anyway, so there is nothing an associated type would
+/// buy here that `BatteryController::Error` buys for `apply`.
+pub trait BatteryMonitor {
+    /// Which device this adapter reads from. Mirrors
+    /// [`BatteryController::id`] — the same identity answers for both halves
+    /// of one physical box.
+    fn id(&self) -> &DeviceId;
+
+    /// The rated limits of the box on the other end, for turning a raw report
+    /// into a `BatteryState`.
+    ///
+    /// Every current caller gets a `BatteryState` already built — `prepare`
+    /// and `poll` do that conversion themselves, with the adapter's own
+    /// `spec` — so nothing outside an adapter calls this yet, the same way
+    /// `Devices::batteries()` sat unused for one commit before `allocate`
+    /// existed. Part of the trait's surface regardless: a caller that only
+    /// has a reading and wants to know what the box is *rated* for, as
+    /// distinct from what it just reported, has nowhere else to ask.
+    #[allow(dead_code)]
+    fn spec(&self) -> &BatterySpec;
+
+    /// The startup handshake, then the first reading.
+    ///
+    /// Not merely "the first poll": a device like the Zendure has to be woken
+    /// into a writable mode and have its power caps (re)written before its
+    /// first report can be trusted, and that sequence runs once, at process
+    /// start, never again. Folding it into `poll` would either repeat the
+    /// wake-and-write handshake on every tick — exactly what "only at
+    /// startup" forbids — or push the caller back into knowing which call is
+    /// the special one, which is the coupling this split exists to remove.
+    fn prepare(&self) -> impl Future<Output = Result<BatteryReading, PollError>> + Send;
+
+    /// One reading, on the interval the coordinator polls at.
+    fn poll(&self) -> impl Future<Output = Result<BatteryReading, PollError>> + Send;
 }
 
 /// Whether a command landed. A two-state role, so it gets a type: as a
@@ -78,36 +196,86 @@ pub trait BatteryController {
 /// `snake_case` so it serializes as the `"ok"` / `"error"` the journal already
 /// carries — step 7's `decisions.outcome` column and the README example read
 /// the same bytes as before.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Applied {
     Ok,
     Error,
 }
 
-/// Which path is actuating, for the operator reading the log. A type rather
-/// than a `&str` for the same reason `Applied` is: two call sites, two values,
-/// and a typo in either is silent.
-#[derive(Debug, Clone, Copy)]
-pub enum Actuation {
-    Decision,
-    FailsafeIdle,
+impl Applied {
+    /// The journal's `outcome` column. A plain `&'static str`, like
+    /// `ControlPath`'s and `ControlMode`'s `Display`, rather than serializing to
+    /// JSON and stripping the quotes back off — which allocated, could fail
+    /// into a `None` that read as "commanded nothing", and would have silently
+    /// mangled any future variant whose rename contained a quote.
+    ///
+    /// `applied_str_matches_serde` pins these against the `rename_all` above,
+    /// since the two now have to agree.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Applied::Ok => "ok",
+            Applied::Error => "error",
+        }
+    }
+}
+
+/// Which path is driving the device: the objective's own decision, or the
+/// failsafe standing everything down.
+///
+/// One type for four values that have to move together — how the actuation is
+/// logged, the two MQTT status strings, and the journal's `kind` column. They
+/// used to be an `Actuation` and a separate `DecisionKind` passed fourteen
+/// lines apart in the same branch, plus two bare string literals at the call
+/// site, with nothing checking they agreed. The charger this anticipates adds one
+/// variant here instead of four coordinated edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlPath {
+    Objective,
+    Failsafe,
+}
+
+impl ControlPath {
+    /// The journal's `kind` column. Deliberately not `Display`: the log says
+    /// "failsafe idle" and the column says "failsafe", and both are pinned.
+    pub fn journal_kind(self) -> &'static str {
+        match self {
+            ControlPath::Objective => "decision",
+            ControlPath::Failsafe => "failsafe",
+        }
+    }
+
+    /// Published to HA when every device took its command.
+    pub fn ok_status(self) -> &'static str {
+        match self {
+            ControlPath::Objective => "operational",
+            ControlPath::Failsafe => "mqtt_timeout",
+        }
+    }
+
+    /// Published instead when any device refused it.
+    pub fn err_status(self) -> &'static str {
+        match self {
+            ControlPath::Objective => "zendure_api_error",
+            ControlPath::Failsafe => "mqtt_timeout_api_error",
+        }
+    }
 }
 
 /// Renders exactly the two literals the `tracing::error!` lines interpolated
 /// before, so an operator's existing grep over the logs still matches.
-impl std::fmt::Display for Actuation {
+impl std::fmt::Display for ControlPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Actuation::Decision => "decision",
-            Actuation::FailsafeIdle => "failsafe idle",
+            ControlPath::Objective => "decision",
+            ControlPath::Failsafe => "failsafe idle",
         })
     }
 }
 
 /// One command's fate, as recorded. `command` is the `Display` string, which is
 /// the format `command_tests.rs` pins and the raw log already quotes.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Outcome {
     pub device: DeviceId,
     pub command: String,
@@ -119,220 +287,90 @@ pub struct Outcome {
     pub error: Option<String>,
 }
 
-/// Apply every directive, in order, reporting each.
+/// A battery that records what it was asked to do, and can be told to fail
+/// on the nth call.
 ///
-/// A failure does not stop the rest: with two devices, one unreachable box
-/// must not leave the other uncommanded. That is the whole reason taking only
-/// the first command was a bug and not a style point.
+/// At module scope and `pub(crate)` because the journal's tests need a device
+/// to actuate against: routing their recorded `command` column through
+/// `actuate` rather than hand-building `Outcome`s is what stops a
+/// replay-versus-recording comparison from being two expressions of one local
+/// variable.
 ///
-/// Sequential rather than concurrent on purpose. The commands in one step can
-/// depend on each other's order — "stop the car charger, then start charging
-/// the battery" must not overlap on a supply that cannot carry both — and the
-/// journal's list is worth reading as a sequence.
-///
-/// The `match` picks the controller for the class, so step 9 adds a `charger`
-/// parameter and one arm rather than reworking the loop.
-///
-/// Within a class the directive's address picks the adapter. One adapter per
-/// class today, so the match is `==` against its id rather than a lookup — but
-/// it is a match, because `Outcome.device` is journalled and a line reading
-/// `{"device":"battery-b","outcome":"ok"}` has to mean that box was written to.
-/// Handing `battery-b`'s setpoint to `battery-a`'s adapter and recording it as
-/// b's success is the failure mode this exists to make impossible.
-pub async fn actuate<B: BatteryController>(
-    battery: &B,
-    directives: &[Directive],
-    what: Actuation,
-) -> Vec<Outcome> {
-    let mut outcomes = Vec::with_capacity(directives.len());
+/// Three halves: the order the commands arrived in is the property under test,
+/// a failure has to be injectable at a position other than the last one to
+/// prove the loop keeps going, and it answers for one device id so a directive
+/// addressed elsewhere has somewhere to not go.
+#[cfg(test)]
+pub(crate) struct RecordingBattery {
+    id: DeviceId,
+    applied: std::sync::Mutex<Vec<Command>>,
+    fails_at: Option<usize>,
+}
 
-    for directive in directives {
-        // Stringified inside the arm that produced it, so `Outcome` stays one
-        // concrete type across adapters with unrelated error types — and each
-        // class logs the noun its operators would grep for.
-        let result = match directive {
-            Directive::Battery { device, command } if device == battery.id() => {
-                battery.apply(command).await.map_err(|e| {
-                    tracing::error!("Failed to apply {what} to battery {device}: {e}");
-                    e.to_string()
-                })
-            }
-            // Unroutable, not applied: an allocation named a device this
-            // process does not drive. Reported as a failed outcome — so the
-            // journal shows the command never landed and the caller's status
-            // goes degraded — rather than dropped silently or sent to whoever
-            // happens to be holding the adapter.
-            Directive::Battery { device, .. } => {
-                tracing::error!(
-                    "Cannot apply {what} to {device}: no adapter for that device (this process \
-                     drives battery {})",
-                    battery.id(),
-                );
-                Err(format!("no adapter registered for device {device}"))
-            }
-        };
-
-        outcomes.push(Outcome {
-            device: directive.device().clone(),
-            command: directive.describe(),
-            applied: if result.is_ok() {
-                Applied::Ok
-            } else {
-                Applied::Error
-            },
-            error: result.err(),
-        });
+#[cfg(test)]
+impl RecordingBattery {
+    pub(crate) fn new(id: &str) -> Self {
+        RecordingBattery {
+            id: DeviceId::new(id),
+            applied: std::sync::Mutex::new(Vec::new()),
+            fails_at: None,
+        }
     }
 
-    outcomes
+    pub(crate) fn failing_at(id: &str, index: usize) -> Self {
+        RecordingBattery {
+            id: DeviceId::new(id),
+            applied: std::sync::Mutex::new(Vec::new()),
+            fails_at: Some(index),
+        }
+    }
+
+    pub(crate) fn applied(&self) -> Vec<Command> {
+        self.applied.lock().unwrap().clone()
+    }
+}
+
+#[cfg(test)]
+impl BatteryController for RecordingBattery {
+    type Error = String;
+
+    fn id(&self) -> &DeviceId {
+        &self.id
+    }
+
+    async fn apply(&self, command: &Command) -> Result<(), String> {
+        // The guard is scoped and dropped before the function's implicit
+        // await point for the same reason `ZendureClient::apply_command`
+        // scopes its: a `MutexGuard` alive across an await would cost the
+        // future its `Send`, and the trait demands it.
+        let index = {
+            let mut applied = self.applied.lock().unwrap();
+            applied.push(*command);
+            applied.len() - 1
+        };
+
+        if self.fails_at == Some(index) {
+            return Err("device unreachable".to_string());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::units::Setpoint;
-    use std::sync::Mutex;
 
-    /// Records what it was asked to do, and can be told to fail on the nth
-    /// call. Three halves now: the order the commands arrived in is the
-    /// property under test, a failure has to be injectable at a position other
-    /// than the last one to prove the loop keeps going, and it answers for one
-    /// device id so a directive addressed elsewhere has somewhere to not go.
-    struct RecordingBattery {
-        id: DeviceId,
-        applied: Mutex<Vec<Command>>,
-        fails_at: Option<usize>,
-    }
-
-    impl RecordingBattery {
-        fn new(id: &str) -> Self {
-            RecordingBattery {
-                id: DeviceId::new(id),
-                applied: Mutex::new(Vec::new()),
-                fails_at: None,
-            }
+    /// `as_str` and the serde rename are two spellings of one string, and the
+    /// journal reaches for both — `as_str` fills the indexed `outcome` column,
+    /// `Serialize` is what the raw capture wrote before it. Same class of drift
+    /// as `event.rs`'s `the_serde_tag_agrees_with_kind`, same guard.
+    #[test]
+    fn applied_str_matches_serde() {
+        for applied in [Applied::Ok, Applied::Error] {
+            let serialized = serde_json::to_string(&applied).unwrap();
+            assert_eq!(serialized, format!(r#""{}""#, applied.as_str()));
         }
-
-        fn failing_at(id: &str, index: usize) -> Self {
-            RecordingBattery {
-                id: DeviceId::new(id),
-                applied: Mutex::new(Vec::new()),
-                fails_at: Some(index),
-            }
-        }
-
-        fn applied(&self) -> Vec<Command> {
-            self.applied.lock().unwrap().clone()
-        }
-    }
-
-    impl BatteryController for RecordingBattery {
-        type Error = String;
-
-        fn id(&self) -> &DeviceId {
-            &self.id
-        }
-
-        async fn apply(&self, command: &Command) -> Result<(), String> {
-            // The guard is scoped and dropped before the function's implicit
-            // await point for the same reason `ZendureClient::apply_command`
-            // scopes its: a `MutexGuard` alive across an await would cost the
-            // future its `Send`, and the trait demands it.
-            let index = {
-                let mut applied = self.applied.lock().unwrap();
-                applied.push(*command);
-                applied.len() - 1
-            };
-
-            if self.fails_at == Some(index) {
-                return Err("device unreachable".to_string());
-            }
-            Ok(())
-        }
-    }
-
-    fn directive(device: &str, command: Command) -> Directive {
-        Directive::Battery {
-            device: DeviceId::new(device),
-            command,
-        }
-    }
-
-    /// Every directive is applied, not just the first — the regression the old
-    /// `commands.first()` actuation shipped. A single adapter answers for a
-    /// single device, so the multi-directive list it can be handed is two
-    /// commands to the same box; the second device's half of the seam is the
-    /// routing test below, and step 9's second adapter.
-    #[tokio::test]
-    async fn applies_every_directive_in_order() {
-        let battery = RecordingBattery::new("battery-a");
-        let directives = [
-            directive("battery-a", Command::SetIdle),
-            directive("battery-a", Command::SetCharge(Setpoint::new(1200))),
-        ];
-
-        let outcomes = actuate(&battery, &directives, Actuation::Decision).await;
-
-        assert_eq!(
-            battery.applied(),
-            vec![Command::SetIdle, Command::SetCharge(Setpoint::new(1200))],
-        );
-        assert_eq!(outcomes.len(), 2);
-        assert_eq!(outcomes[0].device, DeviceId::new("battery-a"));
-        assert_eq!(outcomes[0].command, "set_idle");
-        assert_eq!(outcomes[0].applied, Applied::Ok);
-        assert_eq!(outcomes[1].device, DeviceId::new("battery-a"));
-        assert_eq!(outcomes[1].command, "set_charge(1200W)");
-        assert_eq!(outcomes[1].applied, Applied::Ok);
-    }
-
-    /// An unreachable box must not leave the rest uncommanded — the failure is
-    /// recorded and the loop carries on.
-    #[tokio::test]
-    async fn a_failure_does_not_stop_the_rest() {
-        let battery = RecordingBattery::failing_at("battery-a", 0);
-        let directives = [
-            directive("battery-a", Command::SetIdle),
-            directive("battery-a", Command::SetCharge(Setpoint::new(1200))),
-        ];
-
-        let outcomes = actuate(&battery, &directives, Actuation::Decision).await;
-
-        assert_eq!(
-            battery.applied(),
-            vec![Command::SetIdle, Command::SetCharge(Setpoint::new(1200))],
-        );
-        assert_eq!(outcomes[0].applied, Applied::Error);
-        assert_eq!(outcomes[0].error.as_deref(), Some("device unreachable"));
-        assert_eq!(outcomes[1].applied, Applied::Ok);
-        assert_eq!(outcomes[1].error, None);
-    }
-
-    /// The routing half, which the id assertions above cannot prove because
-    /// they pass by construction: a directive for a device this process does
-    /// not drive must reach no adapter and must be reported as a failure. The
-    /// alternative — the shape before this test existed — was writing
-    /// `battery-b`'s setpoint into `battery-a` and journalling it as b's
-    /// success. The owned directive behind it still lands, for the same reason
-    /// an unreachable box does not stop the rest.
-    #[tokio::test]
-    async fn a_directive_for_another_device_is_an_error_and_is_not_applied() {
-        let battery = RecordingBattery::new("battery-a");
-        let directives = [
-            directive("battery-b", Command::SetCharge(Setpoint::new(1200))),
-            directive("battery-a", Command::SetIdle),
-        ];
-
-        let outcomes = actuate(&battery, &directives, Actuation::Decision).await;
-
-        assert_eq!(battery.applied(), vec![Command::SetIdle]);
-        assert_eq!(outcomes[0].device, DeviceId::new("battery-b"));
-        assert_eq!(outcomes[0].applied, Applied::Error);
-        assert_eq!(
-            outcomes[0].error.as_deref(),
-            Some("no adapter registered for device battery-b"),
-        );
-        assert_eq!(outcomes[1].device, DeviceId::new("battery-a"));
-        assert_eq!(outcomes[1].applied, Applied::Ok);
+        assert_eq!(Applied::Ok.as_str(), "ok");
+        assert_eq!(Applied::Error.as_str(), "error");
     }
 }

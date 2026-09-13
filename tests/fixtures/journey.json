@@ -1,0 +1,173 @@
+{
+  "format": 1,
+  "session": {
+    "started_at": 1789231148918,
+    "version": "0.0.0-test",
+    "config": {
+      "charge_margin": 50,
+      "discharge_margin": 5,
+      "charge_start_threshold": -100.0,
+      "discharge_start_threshold": 0.0,
+      "min_mode_duration_secs": 10,
+      "min_decision_interval_secs": 0,
+      "idle_timeout_secs": 300,
+      "min_idle_before_discharge_secs": 300,
+      "cycle_warn_threshold": 200,
+      "min_soc": 10,
+      "max_soc": 100,
+      "balance_weekday": null,
+      "solar_discharge_block_threshold": 0.0,
+      "mqtt_timeout_secs": 120
+    }
+  },
+  "seed": {
+    "at": 1757000020000,
+    "state": {
+      "world": {
+        "grid": {
+          "total": -800.0,
+          "phases": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "solar": 0.0,
+        "devices": {
+          "test-battery": {
+            "class": "battery",
+            "soc": 50,
+            "max_discharge_power": 800,
+            "max_charge_power": 2400,
+            "current_power": 0,
+            "soc_calibrating": false,
+            "soc_limit_reached": false,
+            "fault": false
+          }
+        }
+      },
+      "controller": {
+        "last_mode": "Charge",
+        "last_active_mode": "Charge",
+        "last_mode_change": 1757000000000,
+        "last_decision": 1757000020000,
+        "last_idle_start": null,
+        "daily_transitions": 1,
+        "daily_cooldown_suppressions": 0,
+        "last_cycle_reset_day": 100
+      },
+      "mqtt_timed_out": false
+    }
+  },
+  "events": [
+    {
+      "kind": "meter",
+      "at": {
+        "now": 1757000040000,
+        "hour": 12,
+        "day_ordinal": 100,
+        "weekday": "Wed"
+      },
+      "grid": {
+        "total": 300.0,
+        "phases": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "solar": 0.0
+    },
+    {
+      "kind": "device_update",
+      "at": {
+        "now": 1757000060000,
+        "hour": 12,
+        "day_ordinal": 100,
+        "weekday": "Wed"
+      },
+      "id": "test-battery",
+      "measurement": {
+        "class": "battery",
+        "soc": 81,
+        "max_discharge_power": 800,
+        "max_charge_power": 2400,
+        "current_power": 0,
+        "soc_calibrating": false,
+        "soc_limit_reached": false,
+        "fault": false
+      }
+    },
+    {
+      "kind": "mqtt_timeout",
+      "at": {
+        "now": 1757000080000,
+        "hour": 12,
+        "day_ordinal": 100,
+        "weekday": "Wed"
+      }
+    },
+    {
+      "kind": "meter",
+      "at": {
+        "now": 1757000100000,
+        "hour": 12,
+        "day_ordinal": 100,
+        "weekday": "Wed"
+      },
+      "grid": {
+        "total": 250.0,
+        "phases": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "solar": 0.0
+    },
+    {
+      "kind": "meter",
+      "at": {
+        "now": 1757000120000,
+        "hour": 12,
+        "day_ordinal": 100,
+        "weekday": "Wed"
+      },
+      "grid": {
+        "total": -600.0,
+        "phases": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "solar": 0.0
+    },
+    {
+      "kind": "meter",
+      "at": {
+        "now": 1757000140000,
+        "hour": 12,
+        "day_ordinal": 100,
+        "weekday": "Wed"
+      },
+      "grid": {
+        "total": 400.0,
+        "phases": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "solar": 0.0
+    }
+  ],
+  "expected": [
+    "1757000040000ms: test-battery set_idle",
+    "1757000060000ms: —",
+    "1757000080000ms: test-battery set_idle",
+    "1757000100000ms: test-battery set_idle",
+    "1757000120000ms: test-battery set_charge(412W)",
+    "1757000140000ms: test-battery set_idle"
+  ]
+}

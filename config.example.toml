@@ -1,0 +1,105 @@
+# zendure — /etc/zendure/config.toml
+#
+# Deployed by ansible (odroid-ansible, roles/zendure). The values here are the
+# ones production runs, so this file doubles as the record of what those are.
+#
+# Everything the daemon reads is here. The one exception is RUST_LOG, which
+# overrides [logging].filter when it is set — that is a tracing convention, not
+# configuration, and it is how an operator raises a log level from a
+# `systemctl edit` drop-in without touching this file.
+#
+# FAILURE POLICY, DELIBERATELY SPLIT
+#
+#   fatal  — not valid TOML; a table that is not a table; a missing or
+#            wrong-typed connection setting; anything about a device.
+#   warns  — a wrong-typed tuning knob, a bad journal or logging setting, an
+#            unknown key. The default is used and the daemon runs.
+#
+# The rule is one line: if getting it wrong means the controller talks to the
+# wrong thing or cannot talk at all, it is fatal; if it means the controller
+# decides slightly differently, it warns and defaults.
+#
+# That asymmetry is deliberate. systemd restarts this service on failure every
+# 30s, and a restart loop leaves the battery holding whatever command it last
+# received — so a typo in a *logging* knob must never be the thing that stops
+# the controller. Loud and running beats silent and stopped.
+#
+# `zendure --check --config <path>` is strict about both, and ansible runs it
+# before this file is ever moved into place. So a typo fails a deploy rather
+# than quietly degrading a running controller.
+
+[mqtt]
+host = "127.0.0.1"          # required
+port = 1883
+client_id = "odroid"
+# Both or neither. One alone is ignored by the client, so it is a warning here.
+# username = "…"
+# password = "…"
+
+# The batteries to control. One entry today; the array is the reason this file
+# exists, since a device list cannot be expressed in environment variables.
+[[device]]
+kind = "zendure"
+ip = "192.168.1.253"
+sn = "HEC4NENCN490270"
+poll_interval_secs = 10
+
+[shelly]
+topic = "shellypro3em-a4f00fcfcc18/status/em:0"   # required
+# Which meter phase the solar inverter (Huawei Sun2000) feeds into: A, B or C.
+# Solar production is read as the export on that single phase, because the
+# meter's total nets solar export against loads on the other phases.
+solar_phase = "A"
+
+[homeassistant]
+publish_prefix = "zendure"
+
+[clock]
+# IANA name. Cycle counting and the balance weekday are reckoned in it.
+timezone = "Europe/Amsterdam"
+
+[journal]
+path = "/var/lib/zendure/journal.db"
+# 1–3650. The only thing bounding the file's size.
+retention_days = 30
+
+[rte]
+# The rolling 24h round-trip-efficiency window. Must survive reboots: /tmp is
+# cleared, which rebuilt the window from scratch on every restart.
+state_path = "/var/lib/zendure/rte_state.json"
+
+[logging]
+filter = "zendure=info"
+
+# --- [tuning] is SessionConfig, verbatim -------------------------------------
+#
+# These fourteen names are one vocabulary in four places: this table, the
+# journal's sessions.config_json, a fixture's session.config, and the knob names
+# `zendure replay --set knob=value` accepts. A test asserts the key sets are
+# equal, so they cannot drift apart.
+#
+# mqtt_timeout_secs is here and not under [mqtt] on purpose: it is the failsafe
+# window the engine holds and the journal records, not a connection setting.
+[tuning]
+charge_margin = 50
+discharge_margin = 5
+charge_start_threshold = -100.0
+discharge_start_threshold = 0.0
+min_mode_duration_secs = 10
+min_decision_interval_secs = 5
+# Was IDLE_TIMEOUT_MINUTES, in minutes. The name carries the unit now, and it
+# is seconds — the same unit the journal has always recorded it in.
+idle_timeout_secs = 300
+min_idle_before_discharge_secs = 300
+cycle_warn_threshold = 200
+min_soc = 10
+# Capping below 100% reduces cell wear from sitting at full charge; safe here
+# since the battery never drains overnight.
+max_soc = 80
+# "none", "off" or "" disables the periodic cell-balancing full charge.
+balance_weekday = "Mon"
+# Solar export (W) on the solar phase at or above which discharge is skipped,
+# so large loads (e.g. EV charging) pull from grid+solar instead of draining the
+# home battery. 0 disables the guard.
+solar_discharge_block_threshold = 200.0
+mqtt_timeout_secs = 60

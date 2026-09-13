@@ -86,3 +86,24 @@ fn mode_serializes_capitalized_but_displays_lowercase() {
     assert_eq!(ControlMode::Charge.to_string(), "charge");
     assert_eq!(ControlMode::Standby.to_string(), "standby");
 }
+
+#[test]
+fn mode_deserializes_from_the_capitalized_form_already_on_disk() {
+    // `Deserialize` was added for the journal's `ControllerState`, which stores
+    // `last_mode`. The journal is append-only and there are already capitalized
+    // modes recorded, so the round trip has to close on *those* bytes — adding a
+    // `rename_all` here would read as a tidy-up and orphan every existing row.
+    for mode in [
+        ControlMode::Charge,
+        ControlMode::Discharge,
+        ControlMode::Idle,
+        ControlMode::Standby,
+    ] {
+        let json = serde_json::to_string(&mode).unwrap();
+        assert_eq!(mode, serde_json::from_str(&json).unwrap());
+    }
+    assert_eq!(
+        ControlMode::Standby,
+        serde_json::from_str::<ControlMode>(r#""Standby""#).unwrap()
+    );
+}

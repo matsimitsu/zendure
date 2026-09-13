@@ -22,96 +22,316 @@ Smart controller for the Zendure AC 2400+ home battery. Reads net grid power fro
 6. **Tracks round-trip efficiency** (RTE) — measures charge vs discharge energy, persisted to disk
 7. **Publishes to MQTT** — HomeAssistant auto-discovers all sensors
 
+## Running it
+
+With no arguments, `zendure` runs the controller — which is what the systemd
+unit does and what it has always meant. `--config <path>` points it at a TOML
+configuration file (default `/etc/zendure/config.toml`); `--check` parses that
+file, prints the effective configuration, and exits instead of starting
+anything:
+
+```
+zendure [--config <path>] [--check]
+```
+
+Two offline subcommands read the journal instead, and read **no configuration
+at all** — not even `--config`'s default path — so they work against a copied
+database on a machine with no broker and no battery:
+
+```
+zendure export --from <when> --to <when> [--db <path>] [--out <file>]
+zendure replay <fixture> [--verify] [--set <knob>=<value>]...
+```
+
+`<when>` is unix milliseconds or RFC 3339. `--db` defaults to
+`/var/lib/zendure/journal.db` and does **not** read `[journal] path` from a
+config file — these subcommands read no configuration at all, so a deployment
+that moves the journal has to say `--db` too. See [Replay](#replay) below.
+
 ## Configuration
 
-All configuration is via environment variables:
+Configuration is a TOML file — `/etc/zendure/config.toml` by default, or
+whatever `--config` points at. [`config.example.toml`](config.example.toml) is
+the authoritative reference: every key, its default, and the failure policy
+(what's fatal versus what warns and falls back) live there as comments,
+production runs it verbatim, and a test in `config_tests.rs` pins the file to
+that fact. The shape, briefly:
 
-### MQTT
+```toml
+[mqtt]
+host = "127.0.0.1"          # required
+port = 1883
+client_id = "odroid"
+# username = "…"
+# password = "…"
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `MQTT_HOST` | Yes | — | MQTT broker hostname |
-| `MQTT_PORT` | No | `1883` | MQTT broker port |
-| `MQTT_USERNAME` | No | — | MQTT username |
-| `MQTT_PASSWORD` | No | — | MQTT password |
-| `MQTT_CLIENT_ID` | No | `zendure-controller` | MQTT client ID |
+[[device]]
+kind = "zendure"
+ip = "192.168.1.253"        # required
+sn = "HEC4NENCN490270"      # required
+poll_interval_secs = 10
 
-### Zendure device
+[shelly]
+topic = "shellypro3em-XXXX/status/em:0"   # required
+solar_phase = "A"           # A, B or C — which phase the solar inverter feeds
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `ZENDURE_IP` | Yes | — | Zendure device IP address |
-| `ZENDURE_SN` | Yes | — | Zendure device serial number |
-| `ZENDURE_POLL_INTERVAL` | No | `10` | Seconds between battery state polls |
+[homeassistant]
+publish_prefix = "zendure"
 
-### MQTT topics
+[clock]
+timezone = "Europe/Amsterdam"   # IANA name
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `SHELLY_TOPIC` | Yes | — | MQTT topic for Shelly Pro 3EM readings (e.g. `shellypro3em-XXXX/status/em:0`) |
-| `HA_PUBLISH_PREFIX` | No | `zendure` | Prefix for MQTT topics published to HomeAssistant |
+[journal]
+path = "/var/lib/zendure/journal.db"
+retention_days = 30             # 1–3650
 
-### Control thresholds
+[rte]
+state_path = "/var/lib/zendure/rte_state.json"
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `CHARGE_START_THRESHOLD` | No | `-100.0` | Grid power (W) below which charging starts. Negative = exporting |
-| `DISCHARGE_START_THRESHOLD` | No | `0.0` | Grid power (W) above which discharging starts |
-| `CHARGE_MARGIN` | No | `50` | Safety margin (W) subtracted from charge power to avoid grid import. Must be zero or positive |
-| `DISCHARGE_MARGIN` | No | `5` | Safety margin (W) subtracted from discharge power. Must be zero or positive |
-| `MIN_SOC` | No | `10` | Minimum SOC (%) — discharge is blocked at or below this level. Clamped to 0–100 |
-| `MAX_SOC` | No | `100` | Maximum SOC (%) — charging is blocked at or above this level. Clamped to 0–100 |
-| `BALANCE_WEEKDAY` | No | `mon` | Weekday (`Mon`–`Sun`) on which `MAX_SOC` is raised to 100% so the pack gets a periodic full charge for cell balancing. `none` disables the override |
-| `SOLAR_PHASE` | No | `A` | Which Shelly phase (`A`, `B`, or `C`) the solar inverter feeds into |
-| `SOLAR_DISCHARGE_BLOCK_THRESHOLD` | No | `0` | Solar export (W) on `SOLAR_PHASE` at or above which discharge is skipped, so large loads (e.g. EV charging) pull from grid+solar instead of draining the battery. `0` disables the guard, as does any negative value |
+[logging]
+filter = "zendure=info"
 
-### Timing and safety
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `MIN_IDLE_BEFORE_DISCHARGE` | No | `300` | Minimum seconds of idle before discharge is allowed (prevents charge→discharge oscillation) |
-| `MIN_MODE_DURATION` | No | `10` | Minimum seconds before a charge/discharge toggle is allowed |
-| `MIN_DECISION_INTERVAL` | No | `5` | Minimum seconds between any two decisions (API protection) |
-| `IDLE_TIMEOUT_MINUTES` | No | `5` | Minutes of continuous idle before entering standby |
-| `CYCLE_WARN_THRESHOLD` | No | `200` | Daily mode transitions before forcing standby until midnight (0 = disabled) |
-| `MQTT_TIMEOUT` | No | `60` | Seconds without MQTT updates before forcing idle as a safety failsafe. Idle is re-asserted every interval until updates resume, so a failed write is retried rather than disabling the failsafe |
-
-### Other
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `TIMEZONE` | No | `UTC` | IANA timezone for cycle counting (e.g. `Europe/Amsterdam`) |
-| `RTE_STATE_PATH` | No | `/var/lib/zendure/rte_state.json` | File path for persisting round-trip efficiency state across restarts. Must survive reboots — `/tmp` is cleared, which loses the rolling 24h window |
-| `RUST_LOG` | No | — | Log level filter (e.g. `zendure=debug` for verbose output) |
-| `JOURNAL_RAW_PATH` | No | `/var/lib/zendure/raw` | Directory for the raw capture log (see below). If it can't be created, capture is disabled and the controller starts normally |
-| `JOURNAL_RETENTION_DAYS` | No | `90` | Days of raw capture to keep; older files are deleted at startup and at each daily rollover |
-
-## Raw capture
-
-Every Shelly reading, every Zendure poll response, and every decision (with the
-world it was decided from and the outcome of the command sent to each device)
-is appended to a daily NDJSON file under `JOURNAL_RAW_PATH`:
-
-```
-{"ts_ms":1757620800123,"kind":"shelly","payload":{"total_act_power":150.5,...}}
-{"ts_ms":1757620800456,"kind":"zendure_poll","payload":{"electricLevel":64,...}}
-{"ts_ms":1757620801789,"kind":"decision","payload":{"commands":[{"device":"HEC4NENCN490270","command":"set_discharge(145W)","outcome":"ok","error":null}],"decision":{"mode":"Discharge","power_watts":145,"reason":"...","grid_power":150.5},"world":{"grid":{"total":150.5,"phases":[10.0,20.0,120.5]},"solar":0.0,"devices":{"HEC4NENCN490270":{"class":"battery","soc":64,...}}}}}
+[tuning]
+charge_margin = 50
+discharge_margin = 5
+charge_start_threshold = -100.0
+discharge_start_threshold = 0.0
+min_mode_duration_secs = 10
+min_decision_interval_secs = 5
+idle_timeout_secs = 300
+min_idle_before_discharge_secs = 300
+cycle_warn_threshold = 200
+min_soc = 10
+max_soc = 100
+balance_weekday = "Mon"     # or "none"/"off" to disable the full-charge day
+solar_discharge_block_threshold = 0.0
+mqtt_timeout_secs = 60
 ```
 
-`commands` has one entry per device actuated that step — one today, more once
-a second battery or a charger joins the world. The failsafe path (an MQTT
-timeout forcing every battery idle) logs the same shape under `kind: "failsafe"`.
+**`mqtt.*`, `[[device]]` and `shelly.topic` are fatal if missing or the wrong
+type** — getting one of those wrong means the controller talks to the wrong
+thing or cannot talk at all. **Everything in `[tuning]`, plus the journal,
+rte and logging settings, warns and falls back to its default** — getting one
+of those wrong means the controller decides slightly differently, and a typo
+there must never be the reason systemd restart-loops a controller that is
+holding a battery command. `RUST_LOG`, when set and non-empty, overrides
+`[logging].filter` outright — that's a `tracing` convention applied at the
+point the subscriber is built, not something the config file itself reads.
 
-Payloads are stored exactly as received rather than re-serialized from parsed
-types, so undocumented device fields are kept. This exists so that when
-something looks wrong in a graph, the inputs that produced it still exist —
-recorded data cannot be backfilled. Logging failures never affect control.
+`zendure --check --config <path>` runs the same parse, but strictly: a parse
+error is fatal exactly as it is for the daemon, and **any warning is promoted
+to a failure too**. Ansible runs it as a `validate:` hook before a rendered
+config is moved into place, so a typo fails the deploy instead of quietly
+degrading a running controller.
+
+### Migrating from environment variables
+
+Configuration was replaced by a TOML file in version 0.3.0. If you had
+environment variables set, this table maps each one to its new location:
+
+| Old env var | New TOML location | Notes |
+|-------------|-------------------|-------|
+| `MQTT_HOST` | `[mqtt] host` | |
+| `MQTT_PORT` | `[mqtt] port` | |
+| `MQTT_USERNAME` | `[mqtt] username` | |
+| `MQTT_PASSWORD` | `[mqtt] password` | |
+| `MQTT_CLIENT_ID` | `[mqtt] client_id` | |
+| `ZENDURE_IP` | `[[device]] ip` | Now in array; see below |
+| `ZENDURE_SN` | `[[device]] sn` | Now in array; see below |
+| `ZENDURE_POLL_INTERVAL` | `[[device]] poll_interval_secs` | Now in array; unit is already seconds |
+| `SHELLY_TOPIC` | `[shelly] topic` | |
+| `SOLAR_PHASE` | `[shelly] solar_phase` | |
+| `HA_PUBLISH_PREFIX` | `[homeassistant] publish_prefix` | |
+| `TIMEZONE` | `[clock] timezone` | |
+| `CHARGE_START_THRESHOLD` | `[tuning] charge_start_threshold` | |
+| `DISCHARGE_START_THRESHOLD` | `[tuning] discharge_start_threshold` | |
+| `CHARGE_MARGIN` | `[tuning] charge_margin` | |
+| `DISCHARGE_MARGIN` | `[tuning] discharge_margin` | |
+| `MIN_SOC` | `[tuning] min_soc` | |
+| `MAX_SOC` | `[tuning] max_soc` | |
+| `BALANCE_WEEKDAY` | `[tuning] balance_weekday` | |
+| `SOLAR_DISCHARGE_BLOCK_THRESHOLD` | `[tuning] solar_discharge_block_threshold` | |
+| `MIN_IDLE_BEFORE_DISCHARGE` | `[tuning] min_idle_before_discharge_secs` | Unit is seconds; name clarified |
+| `MIN_MODE_DURATION` | `[tuning] min_mode_duration_secs` | Unit is seconds; name clarified |
+| `MIN_DECISION_INTERVAL` | `[tuning] min_decision_interval_secs` | Unit is seconds; name clarified |
+| `IDLE_TIMEOUT_MINUTES` | `[tuning] idle_timeout_secs` | **Unit change: multiply by 60.** Was minutes, now seconds. `IDLE_TIMEOUT_MINUTES=10` becomes `idle_timeout_secs = 600` |
+| `CYCLE_WARN_THRESHOLD` | `[tuning] cycle_warn_threshold` | |
+| `MQTT_TIMEOUT` | `[tuning] mqtt_timeout_secs` | Unit is seconds; name clarified |
+| `JOURNAL_PATH` | `[journal] path` | |
+| `JOURNAL_RETENTION_DAYS` | `[journal] retention_days` | |
+| `RTE_STATE_PATH` | `[rte] state_path` | |
+| `RUST_LOG` | Environment variable | Still works; overrides `[logging] filter` when set |
+| `JOURNAL_RAW_PATH` | — | Removed; this variable is gone and does nothing |
+
+**Why `[[device]]` is an array:** The TOML format exists precisely so a device
+list can be expressed — one entry today, more when a second battery or charger
+joins the system. Configuration as environment variables could not represent
+that, which is why this migration exists.
+
+**Deploying a new config:** The config file and systemd unit must move
+together. A systemd unit built for the old binary (`MQTT_HOST=…` in
+`EnvironmentFile=`) will fail when the new binary runs with `--config`, because
+the binary does not recognise those environment variables and the unit does not
+pass `--config`. That mismatch causes the binary to exit with an unknown-argument
+error, and systemd will restart-loop it. Make sure both arrive in the same
+deployment.
+
+`zendure --check --config <path>` validates a new config file before it is
+deployed. It exits non-zero on anything that would be fatal at runtime, and
+also on anything that would only warn — so a typo fails early, during testing,
+not after the file is already in place. Run it as part of your deployment
+validation:
+
+```bash
+zendure --check --config /etc/zendure/config.toml
+```
+
+## Journal
+
+Every Shelly reading, every Zendure poll response, every event the engine folds
+in, and every decision (with the world and controller state it was decided
+from, and the outcome of the command sent to each device) is recorded to a
+SQLite database at `[journal] path`.
+
+```sql
+sessions  (id, started_ms, version, config_json)
+events    (id, session_id, seq, ts_ms, kind, payload_json)
+decisions (id, session_id, seq, ts_ms, device, kind, payload_json, state_json,
+           command, outcome, error, pre_battery_net_w)
+```
+
+`state_json` is the engine's whole snapshot — world, controller history and the
+failsafe latch — so a single decision row is enough to seed a replay. Every row
+carries the `session_id` of the process that wrote it, which is what joins it to
+the `config_json` that governed it.
+
+`seq` orders the whole file, and `export` is the reason it exists. The two row tables have independent `id`
+sequences, so `seq` is the only way to ask "what happened after this row?"
+across both — which is what seeding a replay from a decision and then feeding it
+the events that followed requires. It is assigned by the single writer thread in
+the order records were handed to it, continues across restarts rather than
+restarting per session, and leaves gaps where a write failed or a prune deleted.
+
+`events.kind` is one of `shelly` and `zendure_poll` (payloads captured verbatim,
+*before* parsing) or `meter`, `device_update` and `mqtt_timeout` (the engine's
+own events, replayable). The first *foldable* event of every session is a
+`device_update` carrying the startup poll, so the world a replay rebuilds from
+events is the same world the controller decided against from its first reading.
+It is not necessarily the first row: the MQTT subscriber starts a moment earlier
+and writes its raw `shelly` captures from its own task, so one of those often
+lands first. Those are not fold inputs, which is why it does not matter.
+
+`decisions.kind` is `decision` or `failsafe`, with one
+row per device actuated — one today, more once a second battery or a charger
+joins the world. A decision that commanded nothing still gets a row, with a null
+`device`.
+
+```
+sqlite3 /var/lib/zendure/journal.db \
+  "SELECT datetime(ts_ms/1000,'unixepoch'), device, command, outcome, pre_battery_net_w
+     FROM decisions ORDER BY ts_ms DESC LIMIT 20;"
+```
+
+Raw payloads are stored exactly as received rather than re-serialized from
+parsed types, so undocumented device fields are kept and a response we failed to
+decode is still on record.
+
+This replaced an NDJSON capture under `JOURNAL_RAW_PATH`. That variable is gone
+and is now ignored if set; **the files it wrote are not cleaned up**, and nothing
+prunes them any more, so an existing `/var/lib/zendure/raw` should be removed by
+hand once you no longer want it. This exists so that when something looks wrong in a
+graph, the inputs that produced it still exist — recorded data cannot be
+backfilled.
+
+The control loop never touches SQLite: records go to a bounded queue and a
+writer thread owns the connection. If that queue ever fills, records are dropped
+and counted rather than making the decision path wait. Journal failures never
+affect control — including a bad `[journal] retention_days`, which warns and
+keeps the default rather than stopping the controller.
+
+Dropped records and failed writes are both counted and warned about (on the
+first and then at powers of two, so a wedged writer cannot flood the log), and
+summarised on shutdown. `RUST_LOG` overrides the default `zendure=info` filter
+outright, so `RUST_LOG=zendure=debug` shows the per-record detail.
+
+## Replay
+
+A journal is only worth keeping if you can ask it questions. `export` turns a
+stretch of it into a self-contained fixture, and `replay` runs that fixture's
+events back through the decision engine.
+
+```
+zendure export --from 2026-09-12T19:50:00Z --to 2026-09-12T20:10:00Z \
+  --db ./journal.db --out incident.json
+zendure replay incident.json --verify
+```
+
+`--verify` compares the commands the engine produces now against the ones the
+daemon actually issued, and exits non-zero if they differ, naming the first frame
+that diverged. That is the question a refactor raises — *did this change
+behaviour?* — and the answer is a diff of decisions, not of some aggregate
+metric. Without `--verify` it just prints the run:
+
+```
+1789228429227ms: —
+1789228429229ms: TESTSN set_idle
+```
+
+One line per event, with an em dash where the event decided nothing, and the
+device named on every command so a fleet that was only partly commanded cannot
+look like one that was commanded fully.
+
+`--set <knob>=<value>` changes one tuning knob before replaying, for asking what
+a different setting would have done — `zendure replay incident.json --set
+min_soc=40`. The knobs are the ones in `sessions.config_json`; an unknown name is
+an error rather than a silent no-op, and a value outside a knob's range is
+clamped by the same constructor the daemon uses rather than waved through.
+It cannot be combined with `--verify`, which would compare two differently tuned
+controllers and report a divergence by construction.
+
+**A fixture is hermetic.** It carries the tuning it was decided under, the engine
+snapshot to resume from, and the events — and nothing about how to reach a broker
+or a battery, because none of those are decision inputs. Both subcommands read
+no configuration at all, so a fixture can be copied off the box and replayed
+anywhere.
+
+**The range is anchored to a decision, not to `--from`.** A replay has to resume
+from a recorded snapshot, and those live on decision rows, so the fixture starts
+at the last decision at or before `--from` and can therefore begin a little
+earlier than asked.
+
+**This is decision diff, not simulation.** The recorded meter readings were
+caused in part by the controller's own output, so replaying *different* logic
+against them answers a question about a world that logic would have changed.
+Simulating forward needs a battery model and the old controller removed from the
+recording; `pre_battery_net_w` is stored so that stays possible, but nothing here
+does it.
 
 ## Running
 
 ```bash
-MQTT_HOST=192.168.1.100 ZENDURE_IP=192.168.1.253 ZENDURE_SN=HEC4NENCN490270 SHELLY_TOPIC=shellypro3em-XXXX/status/em:0 cargo run
+cargo run -- --config ./config.example.toml
 ```
+
+### Running against the simulator
+
+No Zendure, no Shelly, no MQTT broker — `config.example.virtual.toml` runs
+the whole controller against a `VirtualBattery` (a real integrating energy
+model, not a stub that agrees with whatever it's told) fed by a synthetic
+house meter that folds the battery's own flow back into its readings. It
+works from a fresh clone with no setup:
+
+```bash
+cargo run -- --config config.example.virtual.toml
+```
+
+See that file for what each table means (and why `[mqtt]` and `[shelly]` are
+both absent from it); briefly, `[[device]] kind = "virtual"` picks the
+simulated battery and `[meter] kind = "synthetic"` picks the simulated house,
+in place of `kind = "zendure"` and a real Shelly subscription. With no
+`[mqtt]`, `run.rs` publishes through a `NullPublisher` instead of a real
+queued sink — decisions and telemetry are made exactly as they would be
+against real hardware, they just have nowhere to go over MQTT.
 
 ## HomeAssistant
 

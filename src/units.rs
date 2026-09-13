@@ -54,6 +54,95 @@ macro_rules! forward_display {
 // behaviour by naming it rather than by remembering to reproduce it.
 pub(crate) use forward_display;
 
+/// `Deserialize` for a newtype whose constructor enforces an invariant, routing
+/// the wire value through that constructor instead of writing the field
+/// directly.
+///
+/// `#[serde(transparent)]` derives *both* halves, and the derived `Deserialize`
+/// builds the struct field-by-field — so every clamp in this module was
+/// bypassed by anything that read a value back. That did not matter while the
+/// only reader was the journal reading its own writes, because everything
+/// written had already been through a constructor. It started mattering the
+/// moment a person could hand us a number: `replay --set min_soc=1000` produced
+/// `Soc(1000)`, and a hand-edited fixture could put any SOC in the world.
+/// CLAUDE.md's rule is that validation lives in the constructor and no call
+/// site re-checks; a derived `Deserialize` is a call site that skips it.
+///
+/// Serialization stays `transparent`, so the wire format — MQTT, HA discovery,
+/// the journal, a fixture — is unchanged in both directions for any value that
+/// was valid to begin with.
+macro_rules! validating_deserialize {
+    ($t:ty, $inner:ty, $ctor:expr) => {
+        impl<'de> Deserialize<'de> for $t {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                <$inner as Deserialize<'de>>::deserialize(d).map($ctor)
+            }
+        }
+    };
+}
+
+/// The same, for a constructor that *rejects* rather than clamps.
+///
+/// A sibling rather than a generalisation of the macro above: those
+/// constructors are infallible by design — a SOC of 200 is a number someone
+/// meant as a percentage and clamping it is the kind reading — while this one
+/// has values it must refuse outright, and the refusal has to reach the
+/// deserializer as an error rather than become a silent default.
+macro_rules! validating_deserialize_result {
+    ($t:ty, $inner:ty, $ctor:expr) => {
+        impl<'de> Deserialize<'de> for $t {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                <$inner as Deserialize<'de>>::deserialize(d)
+                    .and_then(|v| $ctor(v).map_err(serde::de::Error::custom))
+            }
+        }
+    };
+}
+
+pub(crate) use validating_deserialize_result;
+
+// --- temperature -----------------------------------------------------------
+
+/// Tenths of a Kelvin, which is how the Zendure reports every temperature.
+///
+/// A vendor encoding rather than a unit anyone thinks in, and it existed only
+/// as a bare `u32` travelling next to a `f64` Celsius with a cast between them
+/// — the one place in the crate where CLAUDE.md's rule was not applied. Naming
+/// it puts the conversion in one function and makes the pair unmixable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DeciKelvin(pub u32);
+
+impl DeciKelvin {
+    pub fn to_celsius(self) -> Celsius {
+        // `from`, not `as`: `u32` to `f64` is lossless and saying so keeps the
+        // decision-path rule about casts honest here too.
+        Celsius(f64::from(self.0) / 10.0 - 273.15)
+    }
+}
+
+/// Degrees Celsius. What a person and Home Assistant both read.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Celsius(pub f64);
+
+forward_display!(Celsius, f64);
+
+/// One pack's temperature reading. A named pair rather than `(usize, u32)`,
+/// which said neither what the index was counting nor what unit the number
+/// was in.
+///
+/// A device reading, not a wire-format concern — it used to live in
+/// `mqtt/discovery.rs`, which meant a `device.rs` adapter producing one would
+/// have had to depend on `mqtt` to name its own return type. It belongs here,
+/// beside the `DeciKelvin` it wraps: the adapter constructs it, and
+/// `discovery.rs` only ever borrows what it's handed to publish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackTemperature {
+    pub index: usize,
+    pub temp: DeciKelvin,
+}
+
 // --- Watts: the integer-watt arithmetic unit -------------------------------
 
 /// Integer watts. The unit the device speaks and the controller computes in —
@@ -158,9 +247,11 @@ impl Add<BatteryPower> for GridPower {
 
 /// Solar inverter production on the configured meter phase, in watts. Never
 /// negative — production, not a net flow.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct SolarPower(f64);
+
+validating_deserialize!(SolarPower, f64, SolarPower::new);
 
 forward_display!(SolarPower, f64);
 
@@ -211,6 +302,14 @@ impl BatteryPower {
 
     pub fn as_f64(self) -> f64 {
         f64::from(self.0)
+    }
+
+    /// The flow as a plain signed [`Watts`], for a caller that wants the
+    /// whole number back rather than split by direction — `simulation.rs`
+    /// integrating it with [`WattHours::integrate`], which has no notion of
+    /// "charging" or "discharging", only a signed rate.
+    pub fn into_watts(self) -> Watts {
+        Watts(self.0)
     }
 }
 
@@ -267,9 +366,11 @@ impl PowerCap {
 
 /// A commanded power setpoint, in watts. Never negative — the direction comes
 /// from [`ControlMode`](crate::models::ControlMode), not from the sign.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct Setpoint(i32);
+
+validating_deserialize!(Setpoint, i32, Setpoint::new);
 
 forward_display!(Setpoint, i32);
 
@@ -325,9 +426,11 @@ impl PowerMargin {
 
 /// State of charge, as whole percent. Clamped to 0–100 on construction, so no
 /// call site re-checks the range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct Soc(u32);
+
+validating_deserialize!(Soc, u32, Soc::new);
 
 forward_display!(Soc, u32);
 
@@ -350,6 +453,30 @@ impl Soc {
     /// an SOC below the floor reads as nothing usable rather than underflowing.
     pub fn fraction_above(self, floor: Soc) -> f64 {
         f64::from(self.0.saturating_sub(floor.0)) / 100.0
+    }
+
+    /// A state of charge from `stored / capacity`, for `simulation.rs` reading
+    /// its integrated energy back out as a percentage. `Soc` has no
+    /// fractional representation, so this rounds to the nearest whole percent
+    /// and routes through [`Soc::new`] — the same clamp every other
+    /// constructor here goes through, which is what makes a capacity rounding
+    /// error or a stored value that has drifted a hair below zero land at 0 or
+    /// 100 instead of panicking or wrapping.
+    ///
+    /// NaN — a zero-capacity pack computing `0.0 / 0.0` — maps to
+    /// [`Soc::ZERO`] rather than being handed to the rounding and the cast
+    /// below: `NaN as u32` is a defined-but-meaningless `0` in Rust today, and
+    /// this says that explicitly instead of leaning on it.
+    pub fn from_fraction(fraction: f64) -> Self {
+        if fraction.is_nan() {
+            return Soc::ZERO;
+        }
+        // The cast saturates rather than wraps (Rust's `as` has done so for
+        // float-to-int since the 2018 edition), so a negative fraction (stored
+        // dipping a hair below zero from floating-point error) or one above 1
+        // (a rounding blip past full) lands at 0 or `u32::MAX` and `Soc::new`
+        // clamps it the rest of the way to the valid range.
+        Soc::new((fraction * 100.0).round() as u32)
     }
 
     pub fn get(self) -> u32 {
@@ -375,6 +502,47 @@ impl Percent {
     }
 }
 
+/// A round-trip conversion efficiency, in percent, clamped to 1–100.
+///
+/// Not a bare [`Percent`]: `simulation.rs` divides by this to turn a
+/// discharge's stored-energy loss back into the meter-side power that
+/// produced it, and a `0` would mint infinite energy out of a battery that
+/// gave up nothing. Clamping the low end at 1 rather than rejecting keeps it
+/// a peer of `Soc` — a config or fixture with a nonsensical value degrades to
+/// "almost total loss" instead of refusing to build a simulated battery over
+/// it. The high end at 100 is the ordinary ceiling: nothing converts energy
+/// at better than perfect.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct Efficiency(f64);
+
+validating_deserialize!(Efficiency, f64, Efficiency::new);
+
+forward_display!(Efficiency, f64);
+
+impl Efficiency {
+    /// Clamps to 1–100. NaN clamps to neither bound under `f64::clamp` (it
+    /// compares false against both, so an unguarded clamp would return the
+    /// NaN unchanged) and is mapped to 1 instead — the worst-but-defined
+    /// efficiency, rather than a value that turns every energy computation
+    /// downstream into NaN.
+    pub fn new(percent: f64) -> Self {
+        if percent.is_nan() {
+            return Efficiency(1.0);
+        }
+        Efficiency(percent.clamp(1.0, 100.0))
+    }
+
+    /// As a 0.0–1.0 factor, for multiplying a charge or dividing a discharge.
+    pub fn fraction(self) -> f64 {
+        self.0 / 100.0
+    }
+
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
 // --- Energy ---------------------------------------------------------------
 
 /// Energy in watt-hours.
@@ -396,6 +564,28 @@ impl WattHours {
 
     pub fn to_kwh(self) -> KiloWattHours {
         KiloWattHours(self.0 / 1000.0)
+    }
+
+    /// Energy back to the average power over an interval — the inverse of
+    /// [`WattHours::integrate`] for a span `simulation.rs` already knows was
+    /// at constant power, which is exactly the shape of `advance_to`'s
+    /// clamped stored-energy delta over the interval it was clamped within.
+    ///
+    /// Guards `dt == 0`: dividing by zero seconds would produce an infinite
+    /// or NaN wattage rather than "no time passed, so nothing flowed."
+    ///
+    /// Rounds rather than truncating: `simulation.rs` gets here by inverting
+    /// an efficiency division and multiplication it just applied, and that
+    /// round trip leaves the odd `999.9999999998`-style float behind even
+    /// when every input was a whole watt. Truncating would turn that into a
+    /// silent, systematic 1 W undercount; rounding recovers the whole number
+    /// the computation actually meant.
+    pub fn over(self, dt: Duration) -> Watts {
+        if dt.is_zero() {
+            return Watts::ZERO;
+        }
+        let hours = dt.as_secs_f64() / 3600.0;
+        Watts((self.0 / hours).round() as i32)
     }
 
     pub fn get(self) -> f64 {
@@ -450,6 +640,19 @@ impl Timestamp {
 
     pub fn as_millis(self) -> i64 {
         self.0
+    }
+}
+
+/// The one place a `chrono` instant becomes ours.
+///
+/// It was open-coded as `Timestamp::from_millis(dt.timestamp_millis())` at four
+/// sites — the clock, the journal's raw capture, retention's cutoff, and the
+/// CLI's argument parser. CLAUDE.md's rule is that a quantity crossing a
+/// boundary is one named call, not a conversion spelled out wherever it is
+/// needed.
+impl<Tz: chrono::TimeZone> From<chrono::DateTime<Tz>> for Timestamp {
+    fn from(dt: chrono::DateTime<Tz>) -> Self {
+        Timestamp(dt.timestamp_millis())
     }
 }
 
@@ -510,6 +713,67 @@ impl PartialEq<Duration> for Elapsed {
 impl PartialOrd<Duration> for Elapsed {
     fn partial_cmp(&self, other: &Duration) -> Option<std::cmp::Ordering> {
         self.0.partial_cmp(&Elapsed::of(*other).0)
+    }
+}
+
+/// A journal retention window, in whole days.
+///
+/// A newtype because the alternative bit: retention was a bare `i64` threaded
+/// through four signatures, and `prune` computes `now - days`. A negative value
+/// therefore puts the cutoff in the *future*, and "delete everything older than
+/// the cutoff" deletes the entire journal — at every startup and every midnight,
+/// reporting it as a successful prune. A value near `i64::MAX` panicked
+/// `chrono::Duration::days` on the writer thread, where the panic was swallowed.
+///
+/// Both are impossible to express now: the constructor is the only way in, it
+/// clamps once, and `cutoff` owns the arithmetic so no call site repeats it.
+///
+/// `Deserialize` is routed through that constructor rather than derived, for
+/// the reason [`validating_deserialize`] gives — and this type is the sharpest
+/// case of it. A transparent derive builds the field directly, so
+/// `retention_days = 0` read off a wire would produce `RetentionDays(0)`, put
+/// `cutoff` at *now*, and delete the entire journal at startup and every
+/// midnight: the exact failure the paragraph above says is impossible to
+/// express. Nothing deserialized one while the only source was the environment,
+/// which is why it went unnoticed; a configuration file is a wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub struct RetentionDays(i64);
+
+validating_deserialize_result!(RetentionDays, i64, RetentionDays::new);
+
+impl RetentionDays {
+    /// Longest window we will honour. Far past any useful retention, and far
+    /// below the point where day-to-millisecond arithmetic can overflow.
+    pub const MAX_DAYS: i64 = 3_650;
+
+    /// Rejects the values that destroy data rather than clamping them: zero and
+    /// negative are almost certainly a typo, and silently reading them as "keep
+    /// one day" would be its own surprise. An absurd upper value *is* clamped,
+    /// since the intent there is unambiguous.
+    pub fn new(days: i64) -> Result<Self, String> {
+        if days <= 0 {
+            return Err(format!("must be a positive number of days, got {days}"));
+        }
+        Ok(RetentionDays(days.min(Self::MAX_DAYS)))
+    }
+
+    pub fn days(self) -> i64 {
+        self.0
+    }
+
+    /// The oldest timestamp worth keeping. Rows strictly before this go.
+    ///
+    /// Takes `now` rather than reading the clock, so the boundary is testable
+    /// without waiting a day — the same reason the controller takes a `Clock`.
+    pub fn cutoff(self, now: chrono::DateTime<chrono::Utc>) -> Timestamp {
+        (now - chrono::Duration::days(self.0)).into()
+    }
+}
+
+impl fmt::Display for RetentionDays {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        i64::fmt(&self.0, f)
     }
 }
 
