@@ -388,6 +388,15 @@ pub struct ShellyConfig {
     pub solar_phase: SolarPhase,
 }
 
+/// `[web]`, present or not. Presence selects whether the live dashboard
+/// server runs at all, the same rule [`MqttConfig`] follows — a deployment
+/// that never adds `[web]` gets no HTTP listener.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WebConfig {
+    pub bind_address: std::net::IpAddr,
+    pub port: u16,
+}
+
 /// Which meter feeds the engine its grid readings.
 ///
 /// Defaults to `Shelly` — today's only real meter, and the one every
@@ -583,6 +592,8 @@ pub struct Config {
     /// Which meter feeds the engine. Defaults to `Shelly` when `[meter]` is
     /// absent, matching every config written before this field existed.
     pub meter: MeterConfig,
+    /// `None` when `[web]` is absent — no live dashboard server runs.
+    pub web: Option<WebConfig>,
     pub ha_publish_prefix: String,
     /// Safety margin subtracted from charge power to avoid grid import
     pub charge_margin: PowerMargin,
@@ -642,6 +653,7 @@ impl std::fmt::Debug for Config {
             .field("device", &self.device)
             .field("shelly", &self.shelly)
             .field("meter", &self.meter)
+            .field("web", &self.web)
             .field("ha_publish_prefix", &self.ha_publish_prefix)
             .field("charge_margin", &self.charge_margin)
             .field("discharge_margin", &self.discharge_margin)
@@ -753,6 +765,7 @@ impl Config {
             device: _,
             shelly: _,
             meter: _,
+            web: _,
             ha_publish_prefix: _,
             journal_path: _,
             journal_retention_days: _,
@@ -903,6 +916,25 @@ impl Config {
             );
         }
 
+        // Presence, not a field inside it, selects whether the dashboard
+        // server runs at all — the same rule `[mqtt]` follows.
+        // `bind_address`/`port` are connection settings, read via `optional`:
+        // present-and-wrong-type is fatal, absent takes the default.
+        let web = if taker.has_table("web")? {
+            let bind_address = match taker.optional::<String>("web.bind_address")? {
+                Some(s) => s
+                    .parse::<std::net::IpAddr>()
+                    .map_err(|e| format!("web.bind_address: {e}"))?,
+                None => std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            };
+            Some(WebConfig {
+                bind_address,
+                port: taker.optional::<u16>("web.port")?.unwrap_or(8080),
+            })
+        } else {
+            None
+        };
+
         let ha_publish_prefix =
             taker.lenient::<String>("homeassistant.publish_prefix", "zendure".to_string())?;
 
@@ -966,6 +998,7 @@ impl Config {
                 device,
                 shelly,
                 meter,
+                web,
                 ha_publish_prefix,
                 charge_margin,
                 discharge_margin,

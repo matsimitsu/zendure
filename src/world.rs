@@ -16,7 +16,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::battery::BatteryState;
-use crate::units::{BatteryPower, GridPower, SolarPower, forward_display};
+use crate::units::{BatteryPower, GridPower, SolarPower, Watts, forward_display};
 
 /// One meter observation: the signed net total plus each phase. `total` is the
 /// meter's own `total_act_power`, never re-summed from the phases — every
@@ -180,6 +180,14 @@ impl World {
     pub fn underlying_grid(&self) -> GridPower {
         self.grid.total + self.battery_flow()
     }
+
+    /// What the house itself is drawing: solar production plus grid import
+    /// minus whatever the battery is contributing. For the dashboard's "Home
+    /// usage" stat card, not a decision input.
+    pub fn home_usage(&self) -> Watts {
+        let underlying = self.grid.total.get() + self.solar.get();
+        Watts(underlying.round() as i32) - self.battery_flow().into_watts()
+    }
 }
 
 #[cfg(test)]
@@ -323,6 +331,22 @@ mod tests {
         );
 
         assert_eq!(world.underlying_grid(), GridPower(1050.0));
+    }
+
+    /// 1000 W import + 200 W solar - 300 W discharging = 900 W actually drawn
+    /// by the house.
+    #[test]
+    fn home_usage_is_grid_plus_solar_minus_battery_flow() {
+        let mut world = World::new();
+        world.observe_meter(
+            MeterReading::total_only(GridPower(1000.0)),
+            SolarPower::new(200.0),
+        );
+        world.observe_device(
+            DeviceId::new("SN1"),
+            Measurement::Battery(battery_with_power(BatteryPower(300))),
+        );
+        assert_eq!(world.home_usage(), Watts(900));
     }
 
     #[test]

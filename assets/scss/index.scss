@@ -1,0 +1,42 @@
+@forward "tokens";
+
+@use "components/top_bar";
+@use "components/page_header";
+@use "components/stat_card";
+@use "components/mini_stat";
+@use "components/battery_panel";
+@use "components/decision_log";
+@use "components/forecast_panel";
+@use "components/callout";
+
+body {
+  margin: 0;
+  background: var(--color-bg-canvas);
+  color: var(--color-text-secondary);
+  font-family: var(--font-ui);
+}
+
+a {
+  color: var(--color-accent);
+}
+
+.page {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: var(--space-7) var(--space-6) 64px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.stat-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-4);
+}
+
+@media (max-width: 860px) {
+  .stat-row {
+    grid-template-columns: 1fr 1fr;
+  }
+}

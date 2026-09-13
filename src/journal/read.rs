@@ -22,6 +22,7 @@ use super::SCHEMA_VERSION;
 use crate::config::SessionConfig;
 use crate::engine::EngineState;
 use crate::event::Event;
+use crate::models::ControlDecision;
 use crate::units::Timestamp;
 use crate::world::DeviceId;
 
@@ -399,6 +400,44 @@ fn session_row(
     )
     .optional()?
     .ok_or_else(|| ReadError::Schema("this journal has no sessions recorded".to_string()))
+}
+
+/// One decision row, for the dashboard's decision log — not a replay fixture,
+/// so it carries none of `read_range`'s snapshot/pairing apparatus.
+#[derive(Debug)]
+pub struct DecisionRow {
+    pub at: Timestamp,
+    pub decision: ControlDecision,
+}
+
+/// The last `limit` decisions with a recorded payload, oldest first — what
+/// the dashboard's decision log renders on page load. Unlike [`read_range`],
+/// this does not anchor to a snapshot or pair events with decisions: it is
+/// one query against `decisions`, not a replay fixture.
+pub fn read_recent_decisions(path: &Path, limit: usize) -> Result<Vec<DecisionRow>> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+
+    let mut stmt = conn.prepare(
+        "SELECT ts_ms, payload_json FROM decisions
+         WHERE payload_json IS NOT NULL
+         ORDER BY seq DESC LIMIT ?1",
+    )?;
+    let rows: Vec<(i64, String)> = stmt
+        .query_map([limit as i64], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut decisions = rows
+        .into_iter()
+        .map(|(ts_ms, payload)| {
+            decode("a decision", &payload).map(|decision| DecisionRow {
+                at: Timestamp::from_millis(ts_ms),
+                decision,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    decisions.reverse();
+    Ok(decisions)
 }
 
 #[cfg(test)]

@@ -22,6 +22,12 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 # `Value::type_str` rather than rendering it. Pure Rust with no build script, so
 # it adds nothing the static musl cross-build can trip over.
 toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
+maud = { version = "0.27", features = ["axum"] }
+rust-embed = { version = "8", features = ["interpolate-folder-path"] }
+tokio-stream = { version = "0.1.19", features = ["sync"] }
+mime_guess = "2"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3"
@@ -30,3 +36,6 @@ tempfile = "3"
 # (`start_paused`) rather than adding a feature, and resolver 2+ keeps this
 # dev-only addition out of the release binary.
 tokio = { version = "1", features = ["test-util"] }
+
+[build-dependencies]
+grass = { version = "0.13", default-features = false }

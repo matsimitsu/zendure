@@ -53,6 +53,8 @@ crossed a boundary without anyone saying what the conversion meant.
 - `src/zendure.rs` — Zendure REST API client
 - `src/journal/` — Append-only SQLite record of events, decisions and outcomes
 - `src/rte.rs` — Round-trip efficiency tracking
+- `src/web/` — Live dashboard: Axum routes, SSE fan-out, live-state cell, Maud view-models
+- `assets/scss/` — Dashboard component stylesheets (Grass), compiled by `build.rs` and served via `rust-embed`
 
 ## Documentation
 

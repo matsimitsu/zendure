@@ -45,7 +45,8 @@ use crate::publish::{NullPublisher, Publisher};
 use crate::registry::{self, Battery, Devices};
 use crate::source;
 use crate::source::shelly::SolarPhase;
-use crate::units::{Soc, Timestamp, WattHours};
+use crate::units::{KiloWattHours, Percent, Soc, Timestamp, WattHours};
+use crate::web;
 use crate::world::{Measurement, World};
 use crate::{controller, rte};
 use tokio::sync::mpsc;
@@ -180,6 +181,37 @@ async fn apply_decision(
     mqtt::publish_cycle_counts(publisher, prefix, &engine.cycle_counts());
 }
 
+/// Fold one tick of the coordinator loop into the next dashboard snapshot
+/// and broadcast it. Called from all three `select!` arms — even the poll
+/// arm, which never decides, since it is the only place SOC/RTE/telemetry
+/// actually change and the battery panel would otherwise go stale between
+/// meter ticks.
+fn publish_dashboard_state(
+    tx: &web::DashboardStateSender,
+    engine: &Engine,
+    new_decision: Option<(&ControlDecision, Timestamp)>,
+    telemetry: Option<(Option<Percent>, KiloWattHours, KiloWattHours)>,
+    at: Timestamp,
+) {
+    let snapshot = engine.state();
+    let world = &snapshot.world;
+    let (grid, solar, home_usage) = (world.grid.total, world.solar, world.home_usage());
+    let next = {
+        let previous = tx.borrow();
+        web::DashboardState::next(
+            &previous,
+            &snapshot,
+            grid,
+            solar,
+            home_usage,
+            new_decision,
+            telemetry,
+            at,
+        )
+    };
+    let _ = tx.send(next);
+}
+
 /// Everything a poll advances and publishes that no decision ever reads.
 ///
 /// Round-trip efficiency, pack temperatures, SOC and battery power are all
@@ -219,6 +251,24 @@ impl PollTelemetry {
 
     fn pack_count(&self) -> usize {
         self.pack_capacities.len()
+    }
+
+    /// RTE%, usable energy and pack capacity, for the dashboard — the same
+    /// figures [`PollTelemetry::record_and_publish`] already computes for
+    /// MQTT, kept dashboard-local rather than added to `EngineState`: that
+    /// type is journaled and replayed byte-for-byte, and none of this is a
+    /// decision input.
+    fn dashboard_telemetry(&self, soc: Soc) -> (Option<Percent>, KiloWattHours, KiloWattHours) {
+        let capacity = self
+            .pack_capacities
+            .iter()
+            .copied()
+            .sum::<WattHours>()
+            .to_kwh();
+        let usable = self
+            .rte
+            .usable_kwh(soc, self.min_soc, &self.pack_capacities);
+        (self.rte.rte_percent(), usable, capacity)
     }
 
     /// Fold one poll in, then publish what it produced.
@@ -491,6 +541,36 @@ pub async fn run(
     journal.event(&startup);
     engine.step(&startup);
 
+    // The dashboard's live-state feed: a `watch` cell `run()` updates after
+    // every event it folds, independent of the MQTT publisher and the
+    // journal — see `web`'s module doc comment for why this is a new,
+    // separate sink rather than a shared bus with either of them.
+    let dashboard_history = web::seed_decision_log(&config.journal_path);
+    let (dashboard_tx, dashboard_rx) = tokio::sync::watch::channel(web::DashboardState::seed(
+        &engine.state(),
+        dashboard_history,
+        Clock::now(config.timezone).now,
+    ));
+
+    // Spawned separately from `feeders`: that list means "producer of
+    // `MqttEvent`s whose death should stop the loop", which an HTTP listener
+    // is not. A bind failure warns and runs without a dashboard, the same
+    // way a missing `[mqtt]` runs brokerless.
+    let mut web_task = None;
+    if let Some(web_cfg) = &config.web {
+        match shutdown_signal() {
+            Ok(web_stop) => {
+                web_task = web::spawn(web_cfg, dashboard_rx, config.timezone, async move {
+                    let _ = web_stop.await;
+                })
+                .await;
+            }
+            Err(e) => {
+                tracing::warn!("Dashboard disabled: cannot register a shutdown signal: {e}");
+            }
+        }
+    }
+
     let poll_interval = config.device.poll_interval();
     let mut poll_timer = tokio::time::interval(poll_interval);
     // Don't fire immediately — we just polled above
@@ -550,7 +630,7 @@ pub async fn run(
                             mqtt::publish_status(&*publisher, &ha_prefix, status);
                         }
 
-                        if let Some(decision) = step.decision {
+                        if let Some(decision) = &step.decision {
                             if let Some(battery) = engine.battery() {
                                 tracing::info!(
                                     "Decision: {} at {}W — {} (net_grid={:.0}W, battery: SOC={}%, max_charge={}W, max_discharge={}W, current={}W, soc_limit={})",
@@ -574,11 +654,19 @@ pub async fn run(
                                 &ha_prefix,
                                 ControlPath::Objective,
                                 clock.now,
-                                &decision,
+                                decision,
                                 &step.directives,
                             )
                             .await;
                         }
+
+                        publish_dashboard_state(
+                            &dashboard_tx,
+                            &engine,
+                            step.decision.as_ref().map(|d| (d, clock.now)),
+                            None,
+                            clock.now,
+                        );
                     }
                 }
             }
@@ -597,7 +685,7 @@ pub async fn run(
                     );
                 }
 
-                if let Some(decision) = step.decision {
+                if let Some(decision) = &step.decision {
                     // Every battery stands down, and one unreachable box does
                     // not leave the others running through the outage.
                     apply_decision(
@@ -608,11 +696,19 @@ pub async fn run(
                         &ha_prefix,
                         ControlPath::Failsafe,
                         clock.now,
-                        &decision,
+                        decision,
                         &step.directives,
                     )
                     .await;
                 }
+
+                publish_dashboard_state(
+                    &dashboard_tx,
+                    &engine,
+                    step.decision.as_ref().map(|d| (d, clock.now)),
+                    None,
+                    clock.now,
+                );
             }
             _ = poll_timer.tick() => {
                 // The raw capture happens inside `poll` itself, before
@@ -638,13 +734,23 @@ pub async fn run(
                             &reading,
                         );
 
+                        let soc = reading.state.soc;
+                        let clock = Clock::now(config.timezone);
                         let event = Event::DeviceUpdate {
-                            at: Clock::now(config.timezone),
+                            at: clock,
                             id: device_id.clone(),
                             measurement: Measurement::Battery(reading.state),
                         };
                         journal.event(&event);
                         engine.step(&event);
+
+                        publish_dashboard_state(
+                            &dashboard_tx,
+                            &engine,
+                            None,
+                            Some(telemetry.dashboard_telemetry(soc)),
+                            clock.now,
+                        );
                     }
                     Err(e) => {
                         if let Some(raw) = &e.raw {
@@ -666,6 +772,25 @@ pub async fn run(
         journal_writer,
     )
     .await;
+
+    // Holds no journal-writer sender and only ever reads the journal, so it
+    // has no bearing on `shut_down`'s ordering — awaited after, once its own
+    // shutdown signal has fired. Bounded like the MQTT drain above: an SSE
+    // response body is a stream that runs for as long as the dashboard
+    // channel does, so `with_graceful_shutdown` alone can wait forever for a
+    // connection that will never end on its own — the deadline is what
+    // actually ends it.
+    if let Some(mut handle) = web_task
+        && tokio::time::timeout(DRAIN_DEADLINE, &mut handle)
+            .await
+            .is_err()
+    {
+        handle.abort();
+        tracing::warn!(
+            "Dashboard did not stop within {}s — aborted",
+            DRAIN_DEADLINE.as_secs(),
+        );
+    }
 
     Ok(())
 }
@@ -872,6 +997,7 @@ mod tests {
                 base_load: Watts(2000),
                 solar_peak: Watts(0),
             },
+            web: None,
             ha_publish_prefix: "test".to_string(),
             charge_margin: PowerMargin::new(50),
             discharge_margin: PowerMargin::new(5),

@@ -78,6 +78,12 @@ solar_phase = "A"           # A, B or C — which phase the solar inverter feeds
 [homeassistant]
 publish_prefix = "zendure"
 
+# Presence, not a flag, turns the live dashboard on — absent runs no HTTP
+# listener at all. See "Dashboard" below.
+# [web]
+# bind_address = "127.0.0.1"   # default
+# port = 8080                  # default
+
 [clock]
 timezone = "Europe/Amsterdam"   # IANA name
 
@@ -108,9 +114,9 @@ solar_discharge_block_threshold = 0.0
 mqtt_timeout_secs = 60
 ```
 
-**`mqtt.*`, `[[device]]` and `shelly.topic` are fatal if missing or the wrong
-type** — getting one of those wrong means the controller talks to the wrong
-thing or cannot talk at all. **Everything in `[tuning]`, plus the journal,
+**`mqtt.*`, `[[device]]`, `shelly.topic` and `web.*` are fatal if missing or
+the wrong type** — getting one of those wrong means the controller talks to
+the wrong thing or cannot talk at all. **Everything in `[tuning]`, plus the journal,
 rte and logging settings, warns and falls back to its default** — getting one
 of those wrong means the controller decides slightly differently, and a typo
 there must never be the reason systemd restart-loops a controller that is
@@ -352,6 +358,21 @@ The controller publishes MQTT discovery config automatically. These sensors appe
 
 **Binary sensors:**
 - `Zendure Controller Battery SOC Calibrating` — ON when SOC calibration is in progress
+
+## Dashboard
+
+Add `[web]` to run a live browser dashboard (`src/web/`) — solar/home/grid
+stat cards, the battery panel (SOC, mode, RTE, usable energy, capacity), and
+a decision log, all real data, updating roughly once a second over
+server-sent events. Two routes: `GET /` (the full page) and `GET /events`
+(the SSE stream fragments it swaps in via htmx). No `[web]` table means no
+HTTP listener at all — the same brokerless-by-default rule `[mqtt]` follows —
+and a bind failure warns and runs without the dashboard rather than failing
+startup.
+
+The EV card and the 24-hour forecast panel are static placeholders: neither
+has a real data source in this controller yet, and they render fixed sample
+content rather than pretending to be live.
 
 ## Releasing
 

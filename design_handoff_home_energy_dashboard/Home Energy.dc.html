@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    body { margin: 0; background: oklch(0.16 0.015 250); }
+    a { color: oklch(0.75 0.15 75); }
+    a:hover { color: oklch(0.8 0.15 75); }
+    .stat-row { display:grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+    .fc-grid { display: grid; grid-template-columns: 60px repeat(24, 1fr); }
+    @media (max-width: 860px) {
+      .stat-row { grid-template-columns: 1fr 1fr !important; }
+      .fc-grid { grid-template-columns: 44px repeat(24, minmax(8px,1fr)); }
+    }
+  </style>
+</helmet>
+
+<div style="font-family: Inter, system-ui, sans-serif; min-height: 100vh; color: oklch(0.9 0.01 250);">
+
+  <div style="background: oklch(0.13 0.015 250); border-bottom: 1px solid oklch(1 0 0 / 0.08); padding: 16px 24px; display:flex; align-items:center; justify-content:space-between;">
+    <div style="display:flex; align-items:center; gap:10px;">
+      <div style="width:26px; height:26px; border-radius:6px; background: oklch(0.75 0.15 75); display:flex; align-items:center; justify-content:center; font-size:14px; color: oklch(0.16 0.02 250); font-weight:700;">⚡</div>
+      <div style="font-size:14px; font-weight:600; color: oklch(0.95 0.01 250);">Home energy system</div>
+    </div>
+    <div style="display:flex; align-items:center; gap:8px; font-size:12.5px; color: oklch(0.7 0.15 150);">
+      <span style="width:7px; height:7px; border-radius:50%; background: oklch(0.7 0.15 150); display:inline-block;"></span>
+      Operational
+    </div>
+  </div>
+
+  <div style="max-width: 1180px; margin: 0 auto; padding: 28px 24px 64px;">
+
+    <div style="margin-bottom: 22px;">
+      <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.06em; color: oklch(0.6 0.02 250); font-weight:600; margin-bottom:6px;">Overview</div>
+      <div style="font-size:22px; font-weight:600; color: oklch(0.96 0.01 250); margin-bottom:6px;">Live system state</div>
+      <div style="font-size:13.5px; color: oklch(0.62 0.02 250);">{{ headerDescription }}</div>
+    </div>
+
+    <div class="stat-row">
+      <dc-import name="StatCard" hint-size="100%,180px"
+        glyph="☀" icon-bg="oklch(0.3 0.06 75)" label="Solar production" value="{{ solar.value }}" unit="W"
+        detail="{{ solar.detail }}" sparkline="{{ solar.spark }}" spark-color="oklch(0.75 0.15 75)"></dc-import>
+
+      <dc-import name="StatCard" hint-size="100%,180px"
+        glyph="⌂" icon-bg="oklch(0.3 0.06 250)" label="Home usage" value="{{ home.value }}" unit="W"
+        detail="{{ home.detail }}" sparkline="{{ home.spark }}" spark-color="oklch(0.7 0.13 250)"></dc-import>
+
+      <dc-import name="StatCard" hint-size="100%,180px"
+        glyph="⇄" icon-bg="oklch(0.3 0.06 200)" label="Grid" value="{{ grid.value }}" unit="W"
+        detail="{{ grid.detail }}" sparkline="{{ grid.spark }}" spark-color="oklch(0.72 0.12 200)"></dc-import>
+
+      <dc-import name="StatCard" hint-size="100%,180px"
+        glyph="⛽" icon-bg="oklch(0.3 0.06 300)" label="EV (sample data)" value="{{ ev.value }}" unit="%"
+        detail="{{ ev.detail }}" sparkline="{{ ev.spark }}" spark-color="oklch(0.72 0.13 300)"></dc-import>
+    </div>
+
+    <!-- Battery detail card -->
+    <div style="margin-top: 20px; background: oklch(0.23 0.015 250); border: 1px solid oklch(1 0 0 / 0.08); border-radius: 10px; padding: 20px 24px; display:flex; flex-direction:column; gap:16px;">
+      <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px;">
+        <div style="display:flex; align-items:center; gap:12px;">
+          <div style="width:40px; height:40px; border-radius:8px; background: oklch(0.3 0.06 75); display:flex; align-items:center; justify-content:center; font-size:18px;">▮</div>
+          <div>
+            <div style="font-size:13px; color: oklch(0.65 0.02 250); font-weight:500;">Home battery</div>
+            <div style="font-family: 'JetBrains Mono', monospace; font-size:28px; font-weight:600; color: oklch(0.96 0.01 250); line-height:1.1;">{{ battery.soc }}%</div>
+          </div>
+        </div>
+        <div style="background: oklch(0.3 0.06 75); color: oklch(0.85 0.1 75); font-family: 'JetBrains Mono', monospace; font-size:12px; font-weight:600; padding: 5px 12px; border-radius: 5px;">{{ battery.modeLabel }}</div>
+      </div>
+      <div style="height:8px; border-radius:4px; background: oklch(1 0 0 / 0.08); overflow:hidden;">
+        <div style="height:100%; width: {{ battery.soc }}%; background: oklch(0.75 0.15 75); border-radius:4px;"></div>
+      </div>
+      <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap: 16px;">
+        <dc-import name="MiniStat" hint-size="100%,40px" label="Rate" value="{{ battery.rateLabel }}"></dc-import>
+        <dc-import name="MiniStat" hint-size="100%,40px" label="Usable energy" value="{{ battery.usable }}"></dc-import>
+        <dc-import name="MiniStat" hint-size="100%,40px" label="Capacity" value="{{ battery.capacity }}"></dc-import>
+        <dc-import name="MiniStat" hint-size="100%,40px" label="Round-trip eff." value="{{ battery.rte }}"></dc-import>
+      </div>
+    </div>
+
+    <!-- Decision log -->
+    <div style="margin-top: 24px; background: oklch(0.23 0.015 250); border: 1px solid oklch(1 0 0 / 0.08); border-radius: 10px;">
+      <div style="padding: 18px 24px 8px;">
+        <div style="font-size:14.5px; font-weight:600; color: oklch(0.92 0.01 250);">Decision log</div>
+        <div style="font-size:12.5px; color: oklch(0.6 0.02 250); margin-top:2px;">Why the controller did what it did</div>
+      </div>
+      <div style="padding: 4px 24px 18px; display:flex; flex-direction:column;">
+        <sc-for list="{{ decisions }}" as="d" hint-placeholder-count="4">
+          <div style="display:grid; grid-template-columns: 68px 92px 1fr 76px; gap: 16px; align-items:center; padding: 10px 0; border-top: 1px solid oklch(1 0 0 / 0.07); font-size: 13px;">
+            <span style="font-family: 'JetBrains Mono', monospace; color: oklch(0.6 0.02 250); font-size:12px;">{{ d.time }}</span>
+            <span style="font-family: 'JetBrains Mono', monospace; font-size:11px; font-weight:600; color: {{ d.textColor }}; background: {{ d.bg }}; padding: 3px 9px; border-radius: 4px; width: fit-content;">{{ d.mode }}</span>
+            <span style="color: oklch(0.8 0.01 250);">{{ d.reason }}</span>
+            <span style="font-family: 'JetBrains Mono', monospace; color: oklch(0.6 0.02 250); text-align:right; font-size:12.5px;">{{ d.power }}</span>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+
+    <!-- 24h forecast -->
+    <div style="margin-top: 24px; background: oklch(0.23 0.015 250); border: 1px solid oklch(1 0 0 / 0.08); border-radius: 10px;">
+      <div style="padding: 18px 24px 8px;">
+        <div style="font-size:14.5px; font-weight:600; color: oklch(0.92 0.01 250);">24-hour forecast</div>
+        <div style="font-size:12.5px; color: oklch(0.6 0.02 250); margin-top:2px;">Predicted solar yield and planned charge schedule</div>
+      </div>
+      <div style="padding: 8px 24px 24px;">
+
+        <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.04em; color: oklch(0.55 0.02 250); font-weight:600; margin-bottom:6px;">Predicted solar (kW)</div>
+        <svg viewBox="0 0 1000 110" preserveAspectRatio="none" style="width:100%; height:110px; display:block;">
+          <defs>
+            <linearGradient id="solarGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="oklch(0.75 0.15 75)" stop-opacity="0.3"></stop>
+              <stop offset="100%" stop-color="oklch(0.75 0.15 75)" stop-opacity="0"></stop>
+            </linearGradient>
+          </defs>
+          <path d="{{ forecast.areaPath }}" fill="url(#solarGrad)"></path>
+          <path d="{{ forecast.linePath }}" fill="none" stroke="oklch(0.75 0.15 75)" stroke-width="2" stroke-linejoin="round"></path>
+        </svg>
+
+        <div class="fc-grid" style="margin-top:4px;">
+          <div></div>
+          <sc-for list="{{ forecast.hourLabels }}" as="hl" hint-placeholder-count="24">
+            <div style="font-family: 'JetBrains Mono', monospace; font-size:10px; color: oklch(0.5 0.02 250); text-align:left;">{{ hl }}</div>
+          </sc-for>
+        </div>
+
+        <div style="margin-top:18px; display:flex; flex-direction:column; gap:10px;">
+          <div class="fc-grid" style="align-items:center;">
+            <div style="font-size:12px; color: oklch(0.75 0.01 250); font-weight:500;">Battery</div>
+            <sc-for list="{{ forecast.batterySlots }}" as="s" hint-placeholder-count="24">
+              <div style="height:18px; margin:0 1px; border-radius:2px; background:{{ s.color }};" title="{{ s.title }}"></div>
+            </sc-for>
+          </div>
+          <div class="fc-grid" style="align-items:center;">
+            <div style="font-size:12px; color: oklch(0.75 0.01 250); font-weight:500;">EV</div>
+            <sc-for list="{{ forecast.evSlots }}" as="s" hint-placeholder-count="24">
+              <div style="height:18px; margin:0 1px; border-radius:2px; background:{{ s.color }};" title="{{ s.title }}"></div>
+            </sc-for>
+          </div>
+        </div>
+
+        <div style="display:flex; gap:20px; flex-wrap:wrap; margin-top:18px;">
+          <sc-for list="{{ forecast.legend }}" as="l" hint-placeholder-count="3">
+            <div style="display:flex; align-items:center; gap:6px; font-size:12px; color: oklch(0.62 0.02 250);">
+              <span style="width:10px; height:10px; border-radius:2px; background:{{ l.color }}; display:inline-block;"></span>{{ l.label }}
+            </div>
+          </sc-for>
+        </div>
+
+      </div>
+    </div>
+
+    <div style="margin-top:24px; background: oklch(0.21 0.03 75 / 0.5); border: 1px solid oklch(0.5 0.08 75 / 0.4); border-radius: 10px; padding: 16px 20px; display:flex; gap:12px; align-items:flex-start;">
+      <span style="font-size:16px; color: oklch(0.75 0.15 75);">ⓘ</span>
+      <div>
+        <div style="font-size:13.5px; font-weight:600; color: oklch(0.9 0.05 75); margin-bottom:2px;">Goal-based scheduling is coming</div>
+        <div style="font-size:13px; color: oklch(0.72 0.03 75);">Set targets like "car at 80% by 07:00" and the planner will replot this schedule around them.</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+const AMBER = "oklch(0.75 0.15 75)", RED = "oklch(0.7 0.16 25)", GRAY = "oklch(0.35 0.01 250)";
+
+function sparkPath(values, w, h) {
+  const max = Math.max(...values), min = Math.min(...values);
+  const range = (max - min) || 1;
+  return values.map((v, i) => {
+    const x = (i / (values.length - 1)) * w;
+    const y = h - ((v - min) / range) * (h - 4) - 2;
+    return `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+}
+
+class Component extends DCLogic {
+  renderVals() {
+    const solarSeries = [0,0,0,0,0,0,80,320,780,1240,1680,1980,2130,2240,2100,1820,1400,900,420,90,0,0,0,0];
+    const nowHour = 13;
+
+    const battery = {
+      soc: 64,
+      modeLabel: "Charging",
+      rateLabel: "+1,200 W",
+      usable: "3.8 kWh",
+      capacity: "5.9 kWh",
+      rte: "91%",
+    };
+
+    const decisions = [
+      { time: "13:42", mode: "CHARGE", textColor: "oklch(0.9 0.1 75)", bg: "oklch(0.3 0.06 75)", power: "1,200 W", reason: "Exporting 1,350W to grid; charging with the excess after home load." },
+      { time: "13:31", mode: "IDLE", textColor: "oklch(0.75 0.01 250)", bg: "oklch(1 0 0 / 0.08)", power: "0 W", reason: "Grid near balanced (-40W); waiting for a clearer surplus or demand signal." },
+      { time: "12:58", mode: "DISCHARGE", textColor: "oklch(0.85 0.1 25)", bg: "oklch(0.3 0.07 25)", power: "410 W", reason: "Cloud cover cut solar; covering home demand to avoid a grid import." },
+      { time: "12:15", mode: "CHARGE", textColor: "oklch(0.9 0.1 75)", bg: "oklch(0.3 0.06 75)", power: "1,850 W", reason: "Midday solar peak well above home usage; charging at near-max rate." },
+    ];
+
+    const hourLabels = Array.from({ length: 24 }, (_, i) => (i % 3 === 0 ? String(i).padStart(2, "0") : ""));
+
+    const batteryPlan = ["idle","idle","idle","idle","idle","idle","idle","charge","charge","charge","charge","charge","charge","charge","charge","charge","discharge","discharge","discharge","discharge","idle","idle","idle","idle"];
+    const evPlan = ["charge","charge","charge","charge","charge","charge","charge","idle","idle","idle","idle","idle","charge","charge","idle","idle","idle","idle","idle","idle","idle","idle","idle","idle"];
+
+    const colorFor = (m) => m === "charge" ? AMBER : m === "discharge" ? RED : GRAY;
+    const titleFor = (m, h) => `${String(h).padStart(2,"0")}:00 — ${m}`;
+
+    const w = 1000, h = 110;
+    const linePath = sparkPath(solarSeries, w, h);
+    const areaPath = `${linePath} L${w},${h} L0,${h} Z`;
+
+    return {
+      headerDescription: "As of 13:42 · battery, solar and grid readings update every second.",
+
+      solar: { value: "2,130", detail: "Peak today: 2,240 W at 13:15", spark: sparkPath(solarSeries.slice(0, nowHour + 1), 96, 28) },
+      home: { value: "850", detail: "Daily average: 640 W", spark: sparkPath([600,580,610,700,820,900,850,870,860,840,850,830], 96, 28) },
+      grid: { value: "-80", detail: "Exporting to grid", spark: sparkPath([100,60,-20,-60,-40,-80,-80,-70,-90,-80], 96, 28) },
+      ev: { value: "42", detail: "Target: 80% by 07:00 tomorrow", spark: sparkPath([38,39,40,40,41,42,42], 96, 28) },
+
+      battery,
+      decisions,
+
+      forecast: {
+        areaPath,
+        linePath,
+        hourLabels,
+        legend: [
+          { color: AMBER, label: "Charging" },
+          { color: RED, label: "Discharging" },
+          { color: GRAY, label: "Idle" },
+        ],
+        batterySlots: batteryPlan.map((m, h) => ({ color: colorFor(m), title: titleFor(m, h) })),
+        evSlots: evPlan.map((m, h) => ({ color: colorFor(m), title: titleFor(m, h) })),
+      },
+    };
+  }
+}
+
+</script>
+</body>
+</html>

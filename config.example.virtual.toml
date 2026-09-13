@@ -53,6 +53,12 @@ kind = "synthetic"
 base_load = 500
 solar_peak = 3000
 
+[web]
+# The live dashboard: http://127.0.0.1:8080 once running. See README.md's
+# "Dashboard" section.
+bind_address = "127.0.0.1"
+port = 8080
+
 [homeassistant]
 # Unused while [mqtt] is absent; left at its default rather than omitted, so
 # there is something here to change if this file later gains a broker.
