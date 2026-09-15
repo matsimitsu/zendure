@@ -3,9 +3,9 @@
 //! strings, never a `Watts` or a `Soc`.
 
 use crate::models::ControlMode;
-use crate::units::{KiloWattHours, Percent, Timestamp, Watts};
+use crate::units::{Elapsed, KiloWattHours, Percent, SolarForecastPoint, Timestamp, Watts};
 
-use super::state::{DashboardState, Plottable, Sparkline};
+use super::state::{ActualSolarHistory, DashboardState, ForecastSnapshot, Plottable, Sparkline};
 
 pub struct StatCardView {
     /// BEM modifier selecting the semantic color: "solar" | "home" | "grid" | "ev".
@@ -35,6 +35,22 @@ pub struct BatteryPanelView {
     pub round_trip_efficiency: MiniStatView,
 }
 
+/// The forecast panel's contents: a shared-scale bar chart (predicted
+/// production, one bar per local hour of today) with the actual measured
+/// production drawn over it as a line, for whichever hours have already
+/// elapsed.
+pub struct ForecastPanelView {
+    pub has_data: bool,
+    pub as_of: String,
+    /// Pixel heights within the panel's `1000x110` viewBox, one per local
+    /// hour of today; `0.0` where no forecast sample fell in that hour.
+    pub bar_heights: [f64; 24],
+    /// The actual-production line's SVG path `d`, possibly several `M`/`L`
+    /// subpaths where an hour has no recorded sample.
+    pub line_path: String,
+    pub hour_labels: [String; 24],
+}
+
 pub struct DecisionLogRowView {
     pub time: String,
     pub mode_label: &'static str,
@@ -57,6 +73,7 @@ pub struct DashboardView {
     pub stat_cards: [StatCardView; 4],
     pub battery: Option<BatteryPanelView>,
     pub decision_log: Vec<DecisionLogRowView>,
+    pub forecast: ForecastPanelView,
 }
 
 /// How a formatted watt figure wears its sign.
@@ -236,6 +253,126 @@ fn format_log_time(at: Timestamp, now: Timestamp, timezone: chrono_tz::Tz) -> St
     }
 }
 
+// --- Forecast panel: a shared-scale bar+line chart --------------------------
+
+/// The panel's fixed `1000x110` viewBox geometry — kept as named constants
+/// rather than literals scattered through the functions below, since the bar
+/// and line builders both have to agree on it.
+const FORECAST_CHART_WIDTH: f64 = 1000.0;
+const FORECAST_CHART_BASELINE: f64 = 108.0;
+const FORECAST_CHART_TOP_MARGIN: f64 = 4.0;
+
+/// Buckets a forecast series into today's 24 local hours, averaging any
+/// samples landing in the same hour (Solcast's ~30-minute resolution puts
+/// two per hour). A forecast is always forward-looking from the last fetch,
+/// so an elapsed hour simply has no bar — nothing here needs to know that on
+/// purpose.
+fn hourly_forecast_watts(
+    points: &[SolarForecastPoint],
+    today_start: Timestamp,
+) -> [Option<f64>; 24] {
+    let mut sum = [0.0_f64; 24];
+    let mut count = [0u32; 24];
+    let day_end = today_start + Elapsed::of(std::time::Duration::from_secs(24 * 3600));
+
+    for point in points {
+        if point.at < today_start || point.at >= day_end {
+            continue;
+        }
+        let hour = ((point.at - today_start).as_millis() / 3_600_000) as usize;
+        if let (Some(s), Some(c)) = (sum.get_mut(hour), count.get_mut(hour)) {
+            *s += point.estimate.get();
+            *c += 1;
+        }
+    }
+
+    std::array::from_fn(|h| (count[h] > 0).then(|| sum[h] / f64::from(count[h])))
+}
+
+/// The actual-production line's `d` attribute: one or more `M`/`L` subpaths,
+/// starting a new subpath at every hour with no recorded sample rather than
+/// interpolating across the gap — a restart that lost an hour must read as a
+/// gap, not a smoothed-over guess.
+fn actual_line_path(hourly: &[Option<f64>; 24], scale: f64, plot_height: f64) -> String {
+    let bar_width = FORECAST_CHART_WIDTH / 24.0;
+    let mut path = String::new();
+    let mut drawing = false;
+
+    for (h, value) in hourly.iter().enumerate() {
+        let Some(watts) = value else {
+            drawing = false;
+            continue;
+        };
+        let x = (h as f64 + 0.5) * bar_width;
+        let y = FORECAST_CHART_BASELINE - (watts / scale) * plot_height;
+        if drawing {
+            path.push_str(&format!(" L{x:.1},{y:.1}"));
+        } else {
+            if !path.is_empty() {
+                path.push(' ');
+            }
+            path.push_str(&format!("M{x:.1},{y:.1}"));
+            drawing = true;
+        }
+    }
+    path
+}
+
+/// Every third hour labelled, the rest blank — the same sparse axis the
+/// panel always drew, just generated rather than a fixed placeholder array.
+fn forecast_hour_labels() -> [String; 24] {
+    std::array::from_fn(|h| {
+        if h % 3 == 0 {
+            format!("{h:02}")
+        } else {
+            String::new()
+        }
+    })
+}
+
+fn forecast_panel_view(
+    forecast: &ForecastSnapshot,
+    actual: &ActualSolarHistory,
+    now: Timestamp,
+    timezone: chrono_tz::Tz,
+) -> ForecastPanelView {
+    if forecast.points.is_empty() {
+        return ForecastPanelView {
+            has_data: false,
+            as_of: "No solar forecast configured — add [prediction] to config.toml".to_string(),
+            bar_heights: [0.0; 24],
+            line_path: String::new(),
+            hour_labels: forecast_hour_labels(),
+        };
+    }
+
+    let today_start = crate::clock::local_midnight(now, timezone);
+    let forecast_hourly = hourly_forecast_watts(&forecast.points, today_start);
+    let actual_hourly = actual.averages();
+
+    let scale = forecast_hourly
+        .iter()
+        .chain(actual_hourly.iter())
+        .filter_map(|v| *v)
+        .fold(0.0_f64, f64::max)
+        .max(1.0);
+    let plot_height = FORECAST_CHART_BASELINE - FORECAST_CHART_TOP_MARGIN;
+
+    let bar_heights = forecast_hourly.map(|v| v.map_or(0.0, |w| (w / scale) * plot_height));
+    let line_path = actual_line_path(&actual_hourly, scale, plot_height);
+
+    ForecastPanelView {
+        has_data: true,
+        as_of: forecast
+            .as_of
+            .map(|at| format!("Forecast last fetched {}", format_time(at, timezone)))
+            .unwrap_or_else(|| "Forecast fetch pending".to_string()),
+        bar_heights,
+        line_path,
+        hour_labels: forecast_hour_labels(),
+    }
+}
+
 /// Everything the full page and every SSE fragment render from.
 pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> DashboardView {
     let world = &state.engine.world;
@@ -333,6 +470,7 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
         stat_cards: [solar, home, grid, ev_stat_card_placeholder()],
         battery,
         decision_log,
+        forecast: forecast_panel_view(&state.forecast, &state.actual_solar, state.as_of, timezone),
     }
 }
 

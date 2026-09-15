@@ -26,12 +26,13 @@ pub(super) type Fragment = (&'static str, fn(&DashboardView) -> Markup);
 /// Every live section of the page: `layout::page` wraps each name in the
 /// `div` carrying it, and [`fragment_stream`] emits an event per entry.
 /// `page_is_live_everywhere_it_claims_to_be` checks the two agree.
-pub(super) const FRAGMENTS: [Fragment; 5] = [
+pub(super) const FRAGMENTS: [Fragment; 6] = [
     ("top-bar", layout::top_bar_inner),
     ("page-header", layout::page_header_inner),
     ("stat-cards", layout::stat_cards_inner),
     ("battery-panel", layout::battery_panel_inner),
     ("decision-log", layout::decision_log_inner),
+    ("forecast-panel", layout::forecast_panel_inner),
 ];
 
 /// `WatchStream` yields the current value immediately on subscribe, then one

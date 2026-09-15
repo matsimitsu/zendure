@@ -60,6 +60,21 @@ publish_prefix = "zendure"
 # bind_address = "127.0.0.1"   # default
 # port = 8080                  # default
 
+# Presence turns on the dashboard's solar-forecast panel — same rule [web]
+# follows. `kind = "solcast"` is the real backend: two Solcast rooftop_site
+# forecasts, summed (one physical array split east/west by orientation).
+# Solcast's free tier caps usage at 10 requests/day account-wide, so the
+# default poll_times spend exactly 5/site across daylight hours, skipping the
+# night when nothing changes. `kind = "simulated"` needs no api_key/site ids
+# and draws a synthetic curve instead, for local testing.
+# [prediction]
+# kind = "solcast"
+# api_key = "…"                                    # required
+# site_east = "5a28-19aa-f393-4bf5"                 # required, Solcast rooftop_site id
+# site_west = "4fd3-ab64-b5e5-2ab7"                 # required
+# state_path = "/var/lib/zendure/prediction_state.json"
+# poll_times = ["06:00", "09:30", "12:30", "15:30", "18:30"]
+
 [clock]
 # IANA name. Cycle counting and the balance weekday are reckoned in it.
 timezone = "Europe/Amsterdam"

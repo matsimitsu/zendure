@@ -22,6 +22,10 @@ fn at(secs: i64) -> Timestamp {
     Timestamp::from_millis(journey::NOW_MS + secs * 1000)
 }
 
+fn clock(secs: i64) -> crate::clock::Clock {
+    journey::clock_at(secs)
+}
+
 /// A world with one battery and a meter reading, which is what the battery
 /// panel and the stat cards need before they render anything at all.
 fn engine_state(battery_power: BatteryPower) -> EngineState {
@@ -47,7 +51,12 @@ fn engine_state(battery_power: BatteryPower) -> EngineState {
 }
 
 fn state(history: Vec<(Timestamp, ControlDecision)>) -> DashboardState {
-    DashboardState::seed(&engine_state(BatteryPower::ZERO), history, at(0))
+    DashboardState::seed(
+        &engine_state(BatteryPower::ZERO),
+        history,
+        crate::web::ActualSolarHistory::default(),
+        at(0),
+    )
 }
 
 fn decision(mode: ControlMode, reason: &str) -> ControlDecision {
@@ -126,7 +135,7 @@ fn the_mode_badge_follows_the_first_real_decision() {
     charging.meter_tick(
         &engine_state(BatteryPower(-1200)),
         Some((&decision(ControlMode::Charge, "solar surplus"), at(1))),
-        at(1),
+        &clock(1),
     );
 
     let battery = dashboard_view(&charging, tz())
@@ -328,12 +337,98 @@ fn a_sub_watt_grid_reading_reads_as_zero_without_a_sign() {
     assert_eq!(dashboard_view(&drifting, tz()).stat_cards[2].value, "0");
 }
 
+// --- Forecast panel ----------------------------------------------------------
+
+fn forecast_point(hours_after_midnight: i64, minutes: i64, watts: f64) -> SolarForecastPoint {
+    SolarForecastPoint {
+        at: Timestamp::from_millis(hours_after_midnight * 3_600_000 + minutes * 60_000),
+        estimate: SolarPower::new(watts),
+    }
+}
+
+#[test]
+fn hourly_forecast_watts_averages_two_samples_in_the_same_hour() {
+    let points = vec![forecast_point(6, 0, 1000.0), forecast_point(6, 30, 2000.0)];
+    let hourly = hourly_forecast_watts(&points, Timestamp::from_millis(0));
+
+    assert_eq!(hourly[6], Some(1500.0));
+    assert_eq!(hourly[7], None);
+}
+
+#[test]
+fn hourly_forecast_watts_excludes_points_outside_the_24h_window() {
+    let today_start = Timestamp::from_millis(0);
+    // One hour before today, and exactly at tomorrow's start.
+    let points = vec![
+        SolarForecastPoint {
+            at: today_start - Elapsed::of(std::time::Duration::from_secs(3600)),
+            estimate: SolarPower::new(500.0),
+        },
+        SolarForecastPoint {
+            at: today_start + Elapsed::of(std::time::Duration::from_secs(24 * 3600)),
+            estimate: SolarPower::new(500.0),
+        },
+    ];
+
+    let hourly = hourly_forecast_watts(&points, today_start);
+    assert!(hourly.iter().all(Option::is_none));
+}
+
+#[test]
+fn hourly_forecast_watts_of_an_empty_series_is_all_none() {
+    let hourly = hourly_forecast_watts(&[], Timestamp::from_millis(0));
+    assert!(hourly.iter().all(Option::is_none));
+}
+
+#[test]
+fn forecast_panel_view_of_an_empty_snapshot_has_no_data() {
+    let view = forecast_panel_view(
+        &ForecastSnapshot::default(),
+        &ActualSolarHistory::default(),
+        at(0),
+        tz(),
+    );
+
+    assert!(!view.has_data);
+    assert!(view.bar_heights.iter().all(|&h| h == 0.0));
+    assert!(view.line_path.is_empty());
+}
+
+/// A gap (an hour with no recorded actual sample) must start a new `M`
+/// subpath rather than drawing a line straight across it.
+#[test]
+fn actual_line_path_starts_a_new_subpath_across_a_gap() {
+    let mut hourly: [Option<f64>; 24] = [None; 24];
+    hourly[6] = Some(1000.0);
+    hourly[7] = Some(1200.0);
+    // hour 8 is a gap
+    hourly[9] = Some(900.0);
+
+    let path = actual_line_path(&hourly, 2000.0, 100.0);
+
+    let subpaths: Vec<&str> = path.split('M').filter(|s| !s.is_empty()).collect();
+    assert_eq!(subpaths.len(), 2, "expected two subpaths, got: {path}");
+    assert!(
+        subpaths[0].contains('L'),
+        "the first subpath joins hours 6 and 7: {path}"
+    );
+    assert!(
+        !subpaths[1].contains('L'),
+        "a single-hour subpath has nothing to join: {path}"
+    );
+}
+
 /// Home usage is the one stat card carrying real arithmetic rather than a
 /// straight meter reading — 400 W still imported, 750 W of solar and 600 W out
 /// of the pack is a house drawing 1750 W.
 #[test]
 fn the_home_card_reports_the_houses_own_draw() {
-    let discharging = DashboardState::seed(&engine_state(BatteryPower(600)), vec![], at(0));
+    let discharging = DashboardState::seed(
+        &engine_state(BatteryPower(600)),
+        vec![],
+        ActualSolarHistory::default(),
+        at(0),
+    );
     let view = dashboard_view(&discharging, tz());
 
     assert_eq!(view.stat_cards[1].label, "Home usage");

@@ -10,4 +10,7 @@ mod templates;
 mod view;
 
 pub use server::spawn;
-pub use state::{DashboardState, DashboardStateSender, DashboardTelemetry, seed_decision_log};
+pub use state::{
+    ActualSolarHistory, DashboardState, DashboardStateSender, DashboardTelemetry, ForecastSnapshot,
+    seed_decision_log,
+};

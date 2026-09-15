@@ -47,7 +47,9 @@ pub fn page(view: &DashboardView) -> Markup {
                     div id="decision-log" sse-swap="decision-log" {
                         (decision_log_inner(view))
                     }
-                    (forecast_panel::render())
+                    div id="forecast-panel" sse-swap="forecast-panel" {
+                        (forecast_panel_inner(view))
+                    }
                     (callout::render())
                 }
             }
@@ -93,4 +95,10 @@ pub fn battery_panel_inner(view: &DashboardView) -> Markup {
 /// twenty short rows.
 pub fn decision_log_inner(view: &DashboardView) -> Markup {
     decision_log::render(&view.decision_log)
+}
+
+/// The forecast panel's contents — what the `forecast-panel` SSE event's
+/// payload must match.
+pub fn forecast_panel_inner(view: &DashboardView) -> Markup {
+    forecast_panel::render(&view.forecast)
 }

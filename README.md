@@ -383,9 +383,25 @@ seeded and reads `Awaiting decision` until this process makes its first
 decision, since a journalled row describes what the battery *was* doing, not
 what it is doing now.
 
-The EV card and the 24-hour forecast panel are static placeholders: neither
-has a real data source in this controller yet, and they render fixed sample
-content rather than pretending to be live.
+The EV card is a static placeholder: it has no real data source in this
+controller yet, and renders fixed sample content rather than pretending to
+be live.
+
+The 24-hour forecast panel shows real solar predictions when `[prediction]`
+is configured — bars for the forecast, a line for today's actual measured
+production drawn over the same hours, so the two are directly comparable as
+the day unfolds. `kind = "solcast"` fetches two Solcast rooftop forecasts
+(east/west-facing panels on one array) and sums them; Solcast's free tier
+caps usage at 10 requests/day account-wide, so by default the poller spends
+exactly 5 requests/site at five fixed times spread across daylight hours
+(06:00, 09:30, 12:30, 15:30, 18:30 local — configurable via
+`prediction.poll_times`), skipping the night hours nothing changes in. A
+failed fetch simply forfeits that slot's update; the next anchor's fetch
+supersedes it. `kind = "simulated"` draws a synthetic clear-sky curve
+instead, with no network call and no daily quota, for local testing. No
+`[prediction]` table means no poller runs at all — the same rule `[mqtt]`/
+`[web]` follow — and the panel renders an empty state. The poller only ever
+feeds the dashboard: nothing here reaches `src/controller.rs`.
 
 ## Releasing
 

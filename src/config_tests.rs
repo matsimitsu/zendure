@@ -30,6 +30,7 @@ fn config() -> Config {
         }),
         meter: MeterConfig::Shelly,
         web: None,
+        prediction: None,
         ha_publish_prefix: "SECRET-PREFIX".to_string(),
         charge_margin: PowerMargin::new(50),
         discharge_margin: PowerMargin::new(5),
@@ -469,6 +470,7 @@ fn the_example_config_is_what_production_runs() {
         }),
         meter: MeterConfig::Shelly,
         web: None,
+        prediction: None,
         ha_publish_prefix: "zendure".to_string(),
         charge_margin: PowerMargin::new(50),
         discharge_margin: PowerMargin::new(5),
@@ -684,4 +686,101 @@ fn web_never_leaks_into_session_config() {
     let (config, _) = Config::from_toml_str(&toml).unwrap();
     let json = serde_json::to_string(&config.session()).unwrap();
     assert!(!json.contains("9999"), "{json}");
+}
+
+// --- `[prediction]` ----------------------------------------------------------
+
+#[test]
+fn no_prediction_table_is_none_with_zero_warnings() {
+    let (config, warnings) = Config::from_toml_str(&minimal_toml()).unwrap();
+    assert_eq!(warnings, Vec::<String>::new(), "{warnings:?}");
+    assert!(config.prediction.is_none());
+}
+
+#[test]
+fn a_solcast_prediction_table_parses() {
+    let toml = format!(
+        "{}\n[prediction]\nkind = \"solcast\"\napi_key = \"KEY\"\nsite_east = \"east-id\"\nsite_west = \"west-id\"\n",
+        minimal_toml()
+    );
+    let (config, warnings) = Config::from_toml_str(&toml).unwrap();
+    assert_eq!(warnings, Vec::<String>::new(), "{warnings:?}");
+    match config.prediction {
+        Some(PredictionConfig::Solcast {
+            api_key,
+            site_east,
+            site_west,
+            poll_times,
+            ..
+        }) => {
+            assert_eq!(api_key, "KEY");
+            assert_eq!(site_east, "east-id");
+            assert_eq!(site_west, "west-id");
+            assert_eq!(poll_times, crate::prediction::default_poll_times().to_vec());
+        }
+        other => panic!("expected a solcast backend, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_simulated_prediction_table_needs_no_api_key() {
+    let toml = format!("{}\n[prediction]\nkind = \"simulated\"\n", minimal_toml());
+    let (config, warnings) = Config::from_toml_str(&toml).unwrap();
+    assert_eq!(warnings, Vec::<String>::new(), "{warnings:?}");
+    assert!(matches!(
+        config.prediction,
+        Some(PredictionConfig::Simulated { .. })
+    ));
+}
+
+#[test]
+fn an_unknown_prediction_kind_is_fatal() {
+    let toml = format!("{}\n[prediction]\nkind = \"astrology\"\n", minimal_toml());
+    let err = Config::from_toml_str(&toml).unwrap_err();
+    assert!(err.contains("prediction.kind"), "{err}");
+}
+
+#[test]
+fn a_solcast_prediction_table_missing_the_api_key_is_fatal() {
+    let toml = format!(
+        "{}\n[prediction]\nkind = \"solcast\"\nsite_east = \"e\"\nsite_west = \"w\"\n",
+        minimal_toml()
+    );
+    let err = Config::from_toml_str(&toml).unwrap_err();
+    assert!(err.contains("prediction.api_key"), "{err}");
+}
+
+/// `poll_times` is a tuning-shaped knob, not a connection setting: a
+/// malformed value warns and falls back rather than failing startup.
+#[test]
+fn malformed_poll_times_warn_and_fall_back_to_the_default() {
+    let toml = format!(
+        "{}\n[prediction]\nkind = \"simulated\"\npoll_times = [\"25:99\"]\n",
+        minimal_toml()
+    );
+    let (config, warnings) = Config::from_toml_str(&toml).unwrap();
+    assert!(
+        warnings.iter().any(|w| w.contains("prediction.poll_times")),
+        "{warnings:?}"
+    );
+    match config.prediction {
+        Some(PredictionConfig::Simulated { poll_times, .. }) => {
+            assert_eq!(poll_times, crate::prediction::default_poll_times().to_vec());
+        }
+        other => panic!("expected a simulated backend, got {other:?}"),
+    }
+}
+
+/// A derived `Debug` would print the API key in plain text — `--check` exists
+/// precisely to print a `Config` on the terminal.
+#[test]
+fn the_api_key_never_appears_in_debug_output() {
+    let toml = format!(
+        "{}\n[prediction]\nkind = \"solcast\"\napi_key = \"TOP-SECRET-KEY\"\nsite_east = \"e\"\nsite_west = \"w\"\n",
+        minimal_toml()
+    );
+    let (config, _) = Config::from_toml_str(&toml).unwrap();
+    let debug = format!("{config:?}");
+    assert!(!debug.contains("TOP-SECRET-KEY"), "{debug}");
+    assert!(debug.contains("<redacted>"), "{debug}");
 }

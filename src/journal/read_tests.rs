@@ -10,7 +10,7 @@ use crate::journal::testing;
 use crate::journal::testing::{record, record_with};
 use crate::models::{ControlDecision, ControlMode};
 use crate::units::{GridPower, Setpoint};
-use crate::world::World;
+use crate::world::{MeterReading, World};
 
 fn config() -> SessionConfig {
     SessionConfig::test_default()
@@ -585,4 +585,61 @@ async fn recent_decisions_of_a_journal_with_none_is_empty() {
     testing::close(j, writer).await;
 
     assert!(read_recent_decisions(&path, 20).unwrap().is_empty());
+}
+
+// --- `read_meter_solar_since` (seeds the dashboard's actual-solar history) ----
+
+fn meter_event(at_ms: i64, solar: f64) -> Event {
+    Event::Meter {
+        at: journey::clock_at((at_ms - journey::NOW_MS) / 1000),
+        grid: MeterReading::total_only(GridPower(0.0)),
+        solar: SolarPower::new(solar),
+    }
+}
+
+#[tokio::test]
+async fn meter_solar_since_returns_only_rows_at_or_after_the_cutoff() {
+    let dir = tempfile::tempdir().unwrap();
+    let (j, writer, path) = testing::open(&dir, &config());
+
+    j.event(&meter_event(journey::NOW_MS, 100.0));
+    j.event(&meter_event(journey::NOW_MS + 1_000, 200.0));
+    j.event(&meter_event(journey::NOW_MS + 2_000, 300.0));
+    testing::close(j, writer).await;
+
+    let rows = read_meter_solar_since(&path, journey::NOW_MS + 1_000).unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (journey::NOW_MS + 1_000, SolarPower::new(200.0)),
+            (journey::NOW_MS + 2_000, SolarPower::new(300.0)),
+        ]
+    );
+}
+
+/// A non-`meter` event in the same window (a device update, a timeout) must
+/// not appear in the actual-solar history.
+#[tokio::test]
+async fn meter_solar_since_ignores_other_event_kinds() {
+    let dir = tempfile::tempdir().unwrap();
+    let (j, writer, path) = testing::open(&dir, &config());
+
+    j.event(&journey::startup()); // a device_update
+    j.event(&Event::MqttTimeout {
+        at: journey::clock_at(0),
+    });
+    j.event(&meter_event(journey::NOW_MS, 42.0));
+    testing::close(j, writer).await;
+
+    let rows = read_meter_solar_since(&path, journey::NOW_MS - 1).unwrap();
+    assert_eq!(rows, vec![(journey::NOW_MS, SolarPower::new(42.0))]);
+}
+
+#[tokio::test]
+async fn meter_solar_since_of_a_journal_with_none_is_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let (j, writer, path) = testing::open(&dir, &config());
+    testing::close(j, writer).await;
+
+    assert!(read_meter_solar_since(&path, 0).unwrap().is_empty());
 }

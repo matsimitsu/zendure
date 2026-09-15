@@ -5,10 +5,13 @@
 
 use std::collections::VecDeque;
 
+use crate::clock::Clock;
 use crate::engine::EngineState;
 use crate::journal::read::read_recent_decisions;
 use crate::models::ControlDecision;
-use crate::units::{GridPower, KiloWattHours, Percent, SolarPower, Timestamp, Watts};
+use crate::units::{
+    GridPower, KiloWattHours, Percent, SolarForecastPoint, SolarPower, Timestamp, Watts,
+};
 
 /// How many meter readings each sparkline keeps. Only a meter tick appends
 /// one, so at the meter's ~1/s cadence this is ~96 seconds of history —
@@ -106,6 +109,54 @@ pub struct DashboardTelemetry {
     pub capacity: KiloWattHours,
 }
 
+/// Today's *actual* measured solar production, bucketed into the same 24
+/// local-calendar-day hours the forecast panel's bars use, so the two share
+/// one x-axis. Reset at local midnight — `record`'s caller passes the
+/// `Clock`-resolved `hour`/`day_ordinal` a meter tick already carries, so
+/// this needs no clock of its own.
+#[derive(Debug, Clone, Default)]
+pub struct ActualSolarHistory {
+    day_ordinal: Option<u32>,
+    sum_by_hour: [f64; 24],
+    count_by_hour: [u32; 24],
+}
+
+impl ActualSolarHistory {
+    /// Folds one meter reading into its local hour's running average,
+    /// resetting every bucket first if `day_ordinal` has moved on from
+    /// whatever this last saw.
+    pub fn record(&mut self, hour: u32, day_ordinal: u32, solar: SolarPower) {
+        if self.day_ordinal != Some(day_ordinal) {
+            *self = ActualSolarHistory {
+                day_ordinal: Some(day_ordinal),
+                ..ActualSolarHistory::default()
+            };
+        }
+        let hour = hour as usize % 24;
+        self.sum_by_hour[hour] += solar.get();
+        self.count_by_hour[hour] += 1;
+    }
+
+    /// One average watts figure per local hour, `None` where nothing has
+    /// been recorded yet today (every hour from now on, and any hour lost to
+    /// downtime before this process's first meter tick or its startup seed).
+    pub fn averages(&self) -> [Option<f64>; 24] {
+        std::array::from_fn(|h| {
+            (self.count_by_hour[h] > 0)
+                .then(|| self.sum_by_hour[h] / f64::from(self.count_by_hour[h]))
+        })
+    }
+}
+
+/// The dashboard's view of the forecast poller's cached series — see
+/// `crate::prediction`. Empty and `as_of: None` until `[prediction]` is
+/// configured and its first fetch lands.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ForecastSnapshot {
+    pub points: Vec<SolarForecastPoint>,
+    pub as_of: Option<Timestamp>,
+}
+
 /// A snapshot of everything the dashboard renders, refreshed after every
 /// event `run()` folds and broadcast over a `watch` channel — each SSE
 /// connection gets its own `Receiver`, and a `GET /` gets the latest value
@@ -128,6 +179,12 @@ pub struct DashboardState {
     pub usable_energy: KiloWattHours,
     pub pack_capacity: KiloWattHours,
     pub sparklines: SparklineHistory,
+    /// Today's actual solar production, seeded from the journal at startup
+    /// and extended by every `meter_tick` thereafter.
+    pub actual_solar: ActualSolarHistory,
+    /// The forecast poller's latest cached series — see `crate::prediction`.
+    /// Updated only by `forecast_tick`, on that poller's own schedule.
+    pub forecast: ForecastSnapshot,
     pub as_of: Timestamp,
 }
 
@@ -137,10 +194,13 @@ impl DashboardState {
     ///
     /// `history` is journalled rows, bounded by neither session nor age, so
     /// it cannot speak for what the battery is doing now — `last_decision`
-    /// stays `None` until this process decides.
+    /// stays `None` until this process decides. `actual_solar` is likewise
+    /// seeded from the journal (see `crate::journal::read::read_meter_solar_since`)
+    /// so a restart doesn't blank today's actual-production line.
     pub fn seed(
         engine: &EngineState,
         history: Vec<(Timestamp, ControlDecision)>,
+        actual_solar: ActualSolarHistory,
         as_of: Timestamp,
     ) -> Self {
         DashboardState {
@@ -151,6 +211,8 @@ impl DashboardState {
             usable_energy: KiloWattHours::ZERO,
             pack_capacity: KiloWattHours::ZERO,
             sparklines: SparklineHistory::default(),
+            actual_solar,
+            forecast: ForecastSnapshot::default(),
             as_of,
         }
     }
@@ -163,17 +225,30 @@ impl DashboardState {
     }
 
     /// A meter reading: the only tick that extends the sparklines, which is
-    /// what keeps them on the meter's cadence.
+    /// what keeps them on the meter's cadence. Takes the whole `Clock`
+    /// (rather than a bare `Timestamp`, as the other ticks do) because
+    /// `actual_solar` needs the local hour and day ordinal it already
+    /// carries — nothing here reads a clock of its own.
     pub fn meter_tick(
         &mut self,
         engine: &EngineState,
         decision: Option<(&ControlDecision, Timestamp)>,
-        as_of: Timestamp,
+        clock: &Clock,
     ) {
         self.sparklines.solar.push(engine.world.solar);
         self.sparklines.grid.push(engine.world.grid.total);
         self.sparklines.home_usage.push(engine.world.home_usage());
-        self.refresh(engine, decision, as_of);
+        self.actual_solar
+            .record(clock.hour, clock.day_ordinal, engine.world.solar);
+        self.refresh(engine, decision, clock.now);
+    }
+
+    /// The forecast poller's own tick — not folded through `refresh` like the
+    /// other three, since it carries no engine snapshot or decision; it
+    /// updates on its own schedule (see `crate::prediction::run_forecast_poller`),
+    /// independent of every event the engine folds.
+    pub fn forecast_tick(&mut self, forecast: ForecastSnapshot) {
+        self.forecast = forecast;
     }
 
     /// A device poll: SOC, RTE and pack figures move here and nowhere else.

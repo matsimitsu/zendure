@@ -17,7 +17,7 @@ use crate::config::SessionConfig;
 use crate::engine::EngineState;
 use crate::event::Event;
 use crate::models::ControlDecision;
-use crate::units::Timestamp;
+use crate::units::{SolarPower, Timestamp};
 use crate::world::DeviceId;
 
 /// A recorded run, ready to become a replay fixture.
@@ -420,6 +420,36 @@ pub fn read_recent_decisions(path: &Path, limit: usize) -> Result<Vec<DecisionRo
     }
     decisions.reverse();
     Ok(decisions)
+}
+
+/// Every `meter`-kind event at or after `since_ms`, oldest first — what the
+/// dashboard's actual-solar-production history seeds from at startup, so a
+/// restart mid-day doesn't blank today's line. `kind` and `ts_ms` are both
+/// indexed columns (see the journal's schema), so this is a cheap scan even
+/// across a day's worth of once-a-second meter ticks.
+pub fn read_meter_solar_since(path: &Path, since_ms: i64) -> Result<Vec<(i64, SolarPower)>> {
+    let conn = open_for_reading(path)?;
+
+    let mut stmt = conn.prepare(
+        "SELECT ts_ms, payload_json FROM events WHERE kind = 'meter' AND ts_ms >= ?1 ORDER BY seq",
+    )?;
+    let rows: Vec<(i64, String)> = stmt
+        .query_map([since_ms], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut skipped = 0usize;
+    let mut readings = Vec::with_capacity(rows.len());
+    for (ts_ms, payload) in rows {
+        match decode::<Event>("a meter reading", &payload) {
+            Ok(Event::Meter { solar, .. }) => readings.push((ts_ms, solar)),
+            Ok(_) => {}
+            Err(_) => skipped += 1,
+        }
+    }
+    if skipped > 0 {
+        tracing::warn!(skipped, path = %path.display(), "skipped undecodable meter rows");
+    }
+    Ok(readings)
 }
 
 #[cfg(test)]

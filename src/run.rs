@@ -18,6 +18,7 @@ use crate::journal::Journal;
 use crate::journal::Writer;
 use crate::models::ControlDecision;
 use crate::mqtt::{self, MqttEvent, MqttPublisher, PublisherTask};
+use crate::prediction;
 use crate::publish::{NullPublisher, Publisher};
 use crate::registry::{self, Battery, Devices};
 use crate::source;
@@ -222,6 +223,32 @@ impl PollTelemetry {
 
         figures
     }
+}
+
+/// Seeds the dashboard's actual-solar history from the journal's `meter`
+/// events since local midnight, so a restart mid-day doesn't blank today's
+/// line. Degrades to an empty history on a read failure — a logging concern,
+/// never a startup failure, the same rule `web::seed_decision_log` follows.
+fn seed_actual_solar(
+    journal_path: &std::path::Path,
+    timezone: chrono_tz::Tz,
+) -> web::ActualSolarHistory {
+    use chrono::{Datelike, TimeZone, Timelike};
+
+    let midnight = crate::clock::local_midnight(Clock::now(timezone).now, timezone);
+
+    let mut history = web::ActualSolarHistory::default();
+    match crate::journal::read::read_meter_solar_since(journal_path, midnight.as_millis()) {
+        Ok(rows) => {
+            for (ts_ms, solar) in rows {
+                if let Some(local) = timezone.timestamp_millis_opt(ts_ms).single() {
+                    history.record(local.hour(), local.ordinal(), solar);
+                }
+            }
+        }
+        Err(e) => tracing::warn!("Dashboard: cannot seed actual-solar history from journal: {e}"),
+    }
+    history
 }
 
 /// Starts the journal and whichever combination of broker and meter source `config`
@@ -439,9 +466,14 @@ pub async fn run(
     let mut web_task = None;
     if let Some(web_cfg) = &config.web {
         let history = web::seed_decision_log(&config.journal_path);
-        let seed =
-            web::DashboardState::seed(&engine.state(), history, Clock::now(config.timezone).now)
-                .with_telemetry(telemetry.figures(startup_soc));
+        let actual_solar = seed_actual_solar(&config.journal_path, config.timezone);
+        let seed = web::DashboardState::seed(
+            &engine.state(),
+            history,
+            actual_solar,
+            Clock::now(config.timezone).now,
+        )
+        .with_telemetry(telemetry.figures(startup_soc));
         let (tx, rx) = tokio::sync::watch::channel(seed);
         web_task = web::spawn(web_cfg, rx, config.timezone, async move {
             let _ = web_stop_rx.await;
@@ -450,6 +482,32 @@ pub async fn run(
         if web_task.is_some() {
             dashboard_tx = Some(tx);
         }
+    }
+
+    // The forecast poller: independent of `Event`/`Engine::step` and the
+    // `feeders` vec — the dashboard is its only consumer, so it reaches the
+    // `watch` channel directly rather than through the main select loop.
+    // Spawned only when both a dashboard and a `[prediction]` backend are
+    // configured; absent either, no poller runs and no HTTP call is ever made.
+    let (forecast_stop_tx, forecast_stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut forecast_task: Option<tokio::task::JoinHandle<()>> = None;
+    if let (Some(tx), Some(prediction_cfg)) = (&dashboard_tx, &config.prediction) {
+        let forecaster = prediction::from_config(prediction_cfg);
+        let state_path = prediction_cfg.state_path().clone();
+        let poll_times = prediction_cfg.poll_times().to_vec();
+        let tx = tx.clone();
+        let timezone = config.timezone;
+        forecast_task = Some(tokio::spawn(async move {
+            prediction::run_forecast_poller(
+                forecaster,
+                timezone,
+                state_path,
+                poll_times,
+                tx,
+                forecast_stop_rx,
+            )
+            .await;
+        }));
     }
 
     let poll_interval = config.device.poll_interval();
@@ -546,7 +604,7 @@ pub async fn run(
                             let snapshot = engine.state();
                             let decision = step.decision.as_ref().map(|d| (d, clock.now));
                             tx.send_modify(|state| {
-                                state.meter_tick(&snapshot, decision, clock.now)
+                                state.meter_tick(&snapshot, decision, &clock)
                             });
                         }
                     }
@@ -646,6 +704,7 @@ pub async fn run(
     // until the channel closes, so a browser tab left open would otherwise
     // hold `with_graceful_shutdown` to the deadline below.
     let _ = web_stop_tx.send(());
+    let _ = forecast_stop_tx.send(());
     drop(dashboard_tx);
 
     shut_down(
@@ -673,6 +732,21 @@ pub async fn run(
         handle.abort();
         tracing::warn!(
             "Dashboard did not stop within {}s — aborted",
+            DRAIN_DEADLINE.as_secs(),
+        );
+    }
+
+    // No careful drain sequence needed, unlike the journal/MQTT halves above:
+    // `ForecastTracker` saves synchronously after every fetch, so there is
+    // nothing queued for this task to lose by being aborted.
+    if let Some(mut handle) = forecast_task
+        && tokio::time::timeout(DRAIN_DEADLINE, &mut handle)
+            .await
+            .is_err()
+    {
+        handle.abort();
+        tracing::warn!(
+            "Forecast poller did not stop within {}s — aborted",
             DRAIN_DEADLINE.as_secs(),
         );
     }
@@ -853,6 +927,7 @@ mod tests {
                 solar_peak: Watts(0),
             },
             web: None,
+            prediction: None,
             ha_publish_prefix: "test".to_string(),
             charge_margin: PowerMargin::new(50),
             discharge_margin: PowerMargin::new(5),

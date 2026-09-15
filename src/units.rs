@@ -241,6 +241,18 @@ impl SolarPower {
     }
 }
 
+/// One forecast sample: predicted solar production at a point in time. Named
+/// rather than a `(Timestamp, SolarPower)` tuple — same reasoning as
+/// `PackTemperature` above (RUST-2): a buffer of pairs cannot say which half
+/// is the clock and which is the reading, a buffer of these can't be
+/// confused with anything else. Belongs here, beside the `SolarPower` and
+/// `Timestamp` it wraps.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SolarForecastPoint {
+    pub at: Timestamp,
+    pub estimate: SolarPower,
+}
+
 /// Signed battery flow, in watts. Positive = discharging, negative = charging.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]

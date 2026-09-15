@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 // `SolarPhase` is the meter's own idea of how many wires it watches, so it
 // belongs to the adapter that reads them. Parsing `SOLAR_PHASE` is still this
 // file's job — reading the environment is what `Config` is for.
+use crate::prediction::TimeOfDay;
 use crate::source::shelly::SolarPhase;
 use crate::units::{
     Efficiency, GridPower, PowerMargin, RetentionDays, Soc, SolarPower, WattHours, Watts,
@@ -25,6 +26,11 @@ pub const DEFAULT_JOURNAL_PATH: &str = "/var/lib/zendure/journal.db";
 /// the window is 24 hours long and `/tmp` clears on boot, which would
 /// silently rebuild it from scratch every restart.
 pub const DEFAULT_RTE_STATE_PATH: &str = "/var/lib/zendure/rte_state.json";
+
+/// Where the forecast poller's daily budget and last cached series are
+/// persisted. Same reasoning as `DEFAULT_RTE_STATE_PATH`: not `/tmp`, so a
+/// restart mid-day does not forget which anchors already fired today.
+pub const DEFAULT_PREDICTION_STATE_PATH: &str = "/var/lib/zendure/prediction_state.json";
 
 /// Where `--config` reads from unless told otherwise.
 ///
@@ -335,6 +341,76 @@ pub struct WebConfig {
     pub port: u16,
 }
 
+/// `[prediction]`, present or not — same presence-gates-the-feature rule
+/// `[mqtt]`/`[web]`/`[shelly]` already follow: no table means no forecast
+/// poller runs at all. `kind` selects the backend the same way `meter.kind`
+/// selects [`MeterConfig::Shelly`] vs `::Synthetic`.
+#[derive(Clone, PartialEq)]
+pub enum PredictionConfig {
+    Solcast {
+        api_key: String,
+        site_east: String,
+        site_west: String,
+        state_path: PathBuf,
+        poll_times: Vec<TimeOfDay>,
+    },
+    Simulated {
+        state_path: PathBuf,
+        poll_times: Vec<TimeOfDay>,
+    },
+}
+
+/// Hand-written for the reason `Config`'s own `Debug` is: a derived one would
+/// print `api_key` in plain text, and `--check` exists precisely to print a
+/// `Config` on the terminal.
+impl std::fmt::Debug for PredictionConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PredictionConfig::Solcast {
+                site_east,
+                site_west,
+                state_path,
+                poll_times,
+                ..
+            } => f
+                .debug_struct("Solcast")
+                .field("api_key", &"<redacted>")
+                .field("site_east", site_east)
+                .field("site_west", site_west)
+                .field("state_path", state_path)
+                .field("poll_times", poll_times)
+                .finish(),
+            PredictionConfig::Simulated {
+                state_path,
+                poll_times,
+            } => f
+                .debug_struct("Simulated")
+                .field("state_path", state_path)
+                .field("poll_times", poll_times)
+                .finish(),
+        }
+    }
+}
+
+impl PredictionConfig {
+    /// Where the poller's daily budget and last cached series live —
+    /// `run.rs`'s only use of this without matching on the backend itself.
+    pub fn state_path(&self) -> &PathBuf {
+        match self {
+            PredictionConfig::Solcast { state_path, .. } => state_path,
+            PredictionConfig::Simulated { state_path, .. } => state_path,
+        }
+    }
+
+    /// The configured poll anchors, shared by every backend.
+    pub fn poll_times(&self) -> &[TimeOfDay] {
+        match self {
+            PredictionConfig::Solcast { poll_times, .. } => poll_times,
+            PredictionConfig::Simulated { poll_times, .. } => poll_times,
+        }
+    }
+}
+
 /// Which meter feeds the engine its grid readings. Defaults to `Shelly`,
 /// selected by leaving `[meter]` out. `Synthetic` lets a laptop with no
 /// broker feed the engine — see `source::synthetic` for why the battery's own flow must
@@ -519,6 +595,9 @@ pub struct Config {
     pub meter: MeterConfig,
     /// `None` when `[web]` is absent — no live dashboard server runs.
     pub web: Option<WebConfig>,
+    /// `None` when `[prediction]` is absent — no forecast poller runs, and
+    /// the dashboard's forecast panel renders its empty state.
+    pub prediction: Option<PredictionConfig>,
     pub ha_publish_prefix: String,
     /// Safety margin subtracted from charge power to avoid grid import
     pub charge_margin: PowerMargin,
@@ -580,6 +659,7 @@ impl std::fmt::Debug for Config {
             .field("shelly", &self.shelly)
             .field("meter", &self.meter)
             .field("web", &self.web)
+            .field("prediction", &self.prediction)
             .field("ha_publish_prefix", &self.ha_publish_prefix)
             .field("charge_margin", &self.charge_margin)
             .field("discharge_margin", &self.discharge_margin)
@@ -671,6 +751,7 @@ impl Config {
             shelly: _,
             meter: _,
             web: _,
+            prediction: _,
             ha_publish_prefix: _,
             journal_path: _,
             journal_retention_days: _,
@@ -823,6 +904,41 @@ impl Config {
             None
         };
 
+        // Presence, not a field inside it, selects whether the forecast
+        // poller runs at all — the same rule `[mqtt]`/`[web]` follow. `kind`
+        // then selects the backend, the same way `meter.kind` does.
+        let prediction = if taker.has_table("prediction")? {
+            let kind = taker.required::<String>("prediction.kind")?;
+            let poll_times = taker.lenient::<Vec<TimeOfDay>>(
+                "prediction.poll_times",
+                crate::prediction::default_poll_times().to_vec(),
+            )?;
+            let state_path = taker.lenient::<PathBuf>(
+                "prediction.state_path",
+                PathBuf::from(DEFAULT_PREDICTION_STATE_PATH),
+            )?;
+            Some(match kind.as_str() {
+                "solcast" => PredictionConfig::Solcast {
+                    api_key: taker.required::<String>("prediction.api_key")?,
+                    site_east: taker.required::<String>("prediction.site_east")?,
+                    site_west: taker.required::<String>("prediction.site_west")?,
+                    state_path,
+                    poll_times,
+                },
+                "simulated" => PredictionConfig::Simulated {
+                    state_path,
+                    poll_times,
+                },
+                other => {
+                    return Err(format!(
+                        "prediction.kind must be \"solcast\" or \"simulated\", found {other:?}"
+                    ));
+                }
+            })
+        } else {
+            None
+        };
+
         let ha_publish_prefix =
             taker.lenient::<String>("homeassistant.publish_prefix", "zendure".to_string())?;
 
@@ -886,6 +1002,7 @@ impl Config {
                 shelly,
                 meter,
                 web,
+                prediction,
                 ha_publish_prefix,
                 charge_margin,
                 discharge_margin,

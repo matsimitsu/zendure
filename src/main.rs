@@ -16,6 +16,7 @@ mod fixtures;
 mod journal;
 mod models;
 mod mqtt;
+mod prediction;
 mod publish;
 mod registry;
 mod replay;
