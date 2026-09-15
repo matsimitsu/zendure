@@ -314,10 +314,7 @@ fn reading_from_report(
     let charge = Watts::from_device(report.properties.output_pack_power.unwrap_or(0));
     let discharge = Watts::from_device(report.properties.pack_input_power.unwrap_or(0));
 
-    let pack_capacities = report
-        .pack_data
-        .is_some()
-        .then(|| pack_capacities(&report.pack_data));
+    let pack_capacities = complete_pack_capacities(&report.pack_data, report.properties.pack_num);
 
     let pack_temps = report
         .pack_data
@@ -353,8 +350,8 @@ fn reading_from_report(
 /// Map a Zendure `pack_type` to its nominal capacity in Wh.
 fn pack_type_capacity_wh(pack_type: u32) -> WattHours {
     match pack_type {
-        // AB1000 / AB1000S
-        500 => WattHours(960.0),
+        // AC2400 Plus's own built-in pack
+        500 => WattHours(2400.0),
         // AB2000 / AB2000S
         501 => WattHours(1920.0),
         // Unknown — assume AB2000 as conservative default
@@ -366,14 +363,38 @@ fn pack_type_capacity_wh(pack_type: u32) -> WattHours {
 }
 
 /// Extract per-pack capacities from a report's `pack_data`.
-fn pack_capacities(pack_data: &Option<Vec<PackData>>) -> Vec<WattHours> {
-    match pack_data {
-        Some(packs) => packs
-            .iter()
-            .map(|p| pack_type_capacity_wh(p.pack_type.unwrap_or(501)))
-            .collect(),
-        None => vec![],
+fn pack_capacities(packs: &[PackData]) -> Vec<WattHours> {
+    packs
+        .iter()
+        .map(|p| pack_type_capacity_wh(p.pack_type.unwrap_or(501)))
+        .collect()
+}
+
+/// Sum pack capacities, but only once `packData` looks complete. `pack_num`
+/// is the device's own count of registered packs; a `packData` shorter than
+/// that is a pack that hasn't reported in yet, not the true total, so it's
+/// treated like `None` (the caller keeps its last known capacity) rather
+/// than being published as a smaller-than-real figure. Absent `pack_num`
+/// means the device didn't say how many packs to expect, so `packData` is
+/// trusted as-is.
+fn complete_pack_capacities(
+    pack_data: &Option<Vec<PackData>>,
+    pack_num: Option<u32>,
+) -> Option<Vec<WattHours>> {
+    let packs = pack_data.as_ref()?;
+    if let Some(expected) = pack_num {
+        match u32::try_from(packs.len()) {
+            Ok(actual) if actual == expected => {}
+            Ok(actual) => {
+                tracing::warn!(
+                    "packData has {actual} packs but pack_num reports {expected}; treating as incomplete"
+                );
+                return None;
+            }
+            Err(_) => return None,
+        }
     }
+    Some(pack_capacities(packs))
 }
 
 #[cfg(test)]
@@ -382,8 +403,9 @@ mod tests {
 
     #[test]
     fn test_pack_type_capacity() {
-        assert_eq!(pack_type_capacity_wh(500).get(), 960.0);
+        assert_eq!(pack_type_capacity_wh(500).get(), 2400.0);
         assert_eq!(pack_type_capacity_wh(501).get(), 1920.0);
+        assert_eq!(pack_type_capacity_wh(999).get(), 1920.0);
     }
 
     /// The property `PollError` exists for: a response we failed to decode is
@@ -416,5 +438,52 @@ mod tests {
 
         assert_eq!(reading.telemetry.pack_capacities, None);
         assert!(reading.telemetry.pack_temps.is_empty());
+    }
+
+    /// `packData` matching the device's own `packNum` count is trusted and
+    /// summed in full.
+    #[test]
+    fn pack_data_matching_pack_num_reports_full_capacity() {
+        let report: ZendureReport = serde_json::from_str(
+            r#"{"properties":{"packNum":2},"packData":[{"packType":500},{"packType":501}]}"#,
+        )
+        .unwrap();
+
+        let reading = reading_from_report(&report, None, &AC2400_PLUS);
+
+        assert_eq!(
+            reading.telemetry.pack_capacities,
+            Some(vec![WattHours(2400.0), WattHours(1920.0)])
+        );
+    }
+
+    /// `packData` shorter than the device's own `packNum` count is a pack
+    /// that hasn't reported in yet, not the true total — treated the same as
+    /// no pack data so the caller keeps its last known capacity instead of
+    /// publishing an undersized figure.
+    #[test]
+    fn pack_data_short_of_pack_num_reports_no_pack_capacities() {
+        let report: ZendureReport =
+            serde_json::from_str(r#"{"properties":{"packNum":2},"packData":[{"packType":500}]}"#)
+                .unwrap();
+
+        let reading = reading_from_report(&report, None, &AC2400_PLUS);
+
+        assert_eq!(reading.telemetry.pack_capacities, None);
+    }
+
+    /// When the device omits `packNum` entirely, `packData` is trusted as-is
+    /// rather than rejected for lack of a count to check it against.
+    #[test]
+    fn pack_data_without_pack_num_is_trusted_as_is() {
+        let report: ZendureReport =
+            serde_json::from_str(r#"{"properties":{},"packData":[{"packType":500}]}"#).unwrap();
+
+        let reading = reading_from_report(&report, None, &AC2400_PLUS);
+
+        assert_eq!(
+            reading.telemetry.pack_capacities,
+            Some(vec![WattHours(2400.0)])
+        );
     }
 }
