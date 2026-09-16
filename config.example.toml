@@ -114,9 +114,14 @@ idle_timeout_secs = 300
 min_idle_before_discharge_secs = 300
 cycle_warn_threshold = 200
 min_soc = 10
-# Capping below 100% reduces cell wear from sitting at full charge; safe here
-# since the battery never drains overnight.
-max_soc = 80
+# The old 80 came with a note claiming the battery never drains overnight, which
+# `zendure analyze` disproved: over 2026-09-13..16, 3.4-8.5 kWh a day was
+# exported while the pack sat at that ceiling, and the night of the 15th hit
+# min_soc at 22:00 and idled until 06:00. The packs are LiFePO4, which tolerates
+# a high SOC far better than the phone/EV advice suggests, and this one is
+# cycled daily rather than parked full. `balance_weekday` still reaches 100%
+# whatever this says (see `effective_max_soc`), so cell balancing is unaffected.
+max_soc = 95
 # "none", "off" or "" disables the periodic cell-balancing full charge.
 balance_weekday = "Mon"
 # Solar export (W) on the solar phase at or above which discharge is skipped,

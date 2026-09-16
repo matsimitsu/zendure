@@ -481,7 +481,7 @@ fn the_example_config_is_what_production_runs() {
         idle_timeout: Duration::from_secs(300),
         cycle_warn_threshold: 200,
         min_soc: Soc::new(10),
-        max_soc: Soc::new(80),
+        max_soc: Soc::new(95),
         balance_weekday: Some(Weekday::Mon),
         solar_discharge_block_threshold: SolarPower::new(200.0),
         min_idle_before_discharge: Duration::from_secs(300),
