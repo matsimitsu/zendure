@@ -5,7 +5,7 @@ use crate::web::view::ForecastPanelView;
 /// The predicted-vs-actual solar chart: bars for the forecast, a line for
 /// today's actual measured production over whichever hours have elapsed.
 pub fn render(view: &ForecastPanelView) -> Markup {
-    let bar_width = 1000.0 / 24.0;
+    let bar_width = 1000.0 / view.bar_heights.len() as f64;
 
     html! {
         div class="forecast-panel" {

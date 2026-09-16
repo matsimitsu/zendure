@@ -36,19 +36,19 @@ pub struct BatteryPanelView {
 }
 
 /// The forecast panel's contents: a shared-scale bar chart (predicted
-/// production, one bar per local hour of today) with the actual measured
-/// production drawn over it as a line, for whichever hours have already
-/// elapsed.
+/// production, one bar per local half-hour of today — Solcast's own
+/// resolution) with the actual measured production drawn over it as a line,
+/// for whichever slots have already elapsed.
 pub struct ForecastPanelView {
     pub has_data: bool,
     pub as_of: String,
     /// Pixel heights within the panel's `1000x110` viewBox, one per local
-    /// hour of today; `0.0` where no forecast sample fell in that hour.
-    pub bar_heights: [f64; 24],
+    /// half-hour of today; `0.0` where no forecast sample fell in that slot.
+    pub bar_heights: [f64; FORECAST_BUCKETS_PER_DAY],
     /// The actual-production line's SVG path `d`, possibly several `M`/`L`
-    /// subpaths where an hour has no recorded sample.
+    /// subpaths where a slot has no recorded sample.
     pub line_path: String,
-    pub hour_labels: [String; 24],
+    pub hour_labels: [String; FORECAST_BUCKETS_PER_DAY],
 }
 
 pub struct DecisionLogRowView {
@@ -261,26 +261,30 @@ fn format_log_time(at: Timestamp, now: Timestamp, timezone: chrono_tz::Tz) -> St
 const FORECAST_CHART_WIDTH: f64 = 1000.0;
 const FORECAST_CHART_BASELINE: f64 = 108.0;
 const FORECAST_CHART_TOP_MARGIN: f64 = 4.0;
+/// Solcast's own resolution — see `SolcastEntry`'s doc comment in
+/// `prediction/solcast.rs`. Both series bucket to this so they share one axis.
+const FORECAST_BUCKETS_PER_DAY: usize = 48;
+const FORECAST_BUCKET_MS: i64 = 30 * 60 * 1000;
 
-/// Buckets a forecast series into today's 24 local hours, averaging any
-/// samples landing in the same hour (Solcast's ~30-minute resolution puts
-/// two per hour). A forecast is always forward-looking from the last fetch,
-/// so an elapsed hour simply has no bar — nothing here needs to know that on
-/// purpose.
-fn hourly_forecast_watts(
+/// Buckets a forecast series into today's 48 local half-hours (Solcast's own
+/// resolution, so this is normally a 1:1 mapping — the averaging only
+/// matters if two samples ever land in the same slot). A forecast is always
+/// forward-looking from the last fetch, so an elapsed slot simply has no
+/// bar — nothing here needs to know that on purpose.
+fn bucketed_forecast_watts(
     points: &[SolarForecastPoint],
     today_start: Timestamp,
-) -> [Option<f64>; 24] {
-    let mut sum = [0.0_f64; 24];
-    let mut count = [0u32; 24];
+) -> [Option<f64>; FORECAST_BUCKETS_PER_DAY] {
+    let mut sum = [0.0_f64; FORECAST_BUCKETS_PER_DAY];
+    let mut count = [0u32; FORECAST_BUCKETS_PER_DAY];
     let day_end = today_start + Elapsed::of(std::time::Duration::from_secs(24 * 3600));
 
     for point in points {
         if point.at < today_start || point.at >= day_end {
             continue;
         }
-        let hour = ((point.at - today_start).as_millis() / 3_600_000) as usize;
-        if let (Some(s), Some(c)) = (sum.get_mut(hour), count.get_mut(hour)) {
+        let bucket = ((point.at - today_start).as_millis() / FORECAST_BUCKET_MS) as usize;
+        if let (Some(s), Some(c)) = (sum.get_mut(bucket), count.get_mut(bucket)) {
             *s += point.estimate.get();
             *c += 1;
         }
@@ -290,15 +294,19 @@ fn hourly_forecast_watts(
 }
 
 /// The actual-production line's `d` attribute: one or more `M`/`L` subpaths,
-/// starting a new subpath at every hour with no recorded sample rather than
-/// interpolating across the gap — a restart that lost an hour must read as a
+/// starting a new subpath at every slot with no recorded sample rather than
+/// interpolating across the gap — a restart that lost a slot must read as a
 /// gap, not a smoothed-over guess.
-fn actual_line_path(hourly: &[Option<f64>; 24], scale: f64, plot_height: f64) -> String {
-    let bar_width = FORECAST_CHART_WIDTH / 24.0;
+fn actual_line_path(
+    buckets: &[Option<f64>; FORECAST_BUCKETS_PER_DAY],
+    scale: f64,
+    plot_height: f64,
+) -> String {
+    let bar_width = FORECAST_CHART_WIDTH / FORECAST_BUCKETS_PER_DAY as f64;
     let mut path = String::new();
     let mut drawing = false;
 
-    for (h, value) in hourly.iter().enumerate() {
+    for (h, value) in buckets.iter().enumerate() {
         let Some(watts) = value else {
             drawing = false;
             continue;
@@ -318,12 +326,12 @@ fn actual_line_path(hourly: &[Option<f64>; 24], scale: f64, plot_height: f64) ->
     path
 }
 
-/// Every third hour labelled, the rest blank — the same sparse axis the
-/// panel always drew, just generated rather than a fixed placeholder array.
-fn forecast_hour_labels() -> [String; 24] {
+/// The top of every hour labelled, the half-hour slot blank — the same
+/// density the panel drew when it had one bar per hour.
+fn forecast_hour_labels() -> [String; FORECAST_BUCKETS_PER_DAY] {
     std::array::from_fn(|h| {
-        if h % 3 == 0 {
-            format!("{h:02}")
+        if h % 2 == 0 {
+            format!("{:02}", h / 2)
         } else {
             String::new()
         }
@@ -340,26 +348,26 @@ fn forecast_panel_view(
         return ForecastPanelView {
             has_data: false,
             as_of: "No solar forecast configured — add [prediction] to config.toml".to_string(),
-            bar_heights: [0.0; 24],
+            bar_heights: [0.0; FORECAST_BUCKETS_PER_DAY],
             line_path: String::new(),
             hour_labels: forecast_hour_labels(),
         };
     }
 
     let today_start = crate::clock::local_midnight(now, timezone);
-    let forecast_hourly = hourly_forecast_watts(&forecast.points, today_start);
-    let actual_hourly = actual.averages();
+    let forecast_buckets = bucketed_forecast_watts(&forecast.points, today_start);
+    let actual_buckets = actual.averages();
 
-    let scale = forecast_hourly
+    let scale = forecast_buckets
         .iter()
-        .chain(actual_hourly.iter())
+        .chain(actual_buckets.iter())
         .filter_map(|v| *v)
         .fold(0.0_f64, f64::max)
         .max(1.0);
     let plot_height = FORECAST_CHART_BASELINE - FORECAST_CHART_TOP_MARGIN;
 
-    let bar_heights = forecast_hourly.map(|v| v.map_or(0.0, |w| (w / scale) * plot_height));
-    let line_path = actual_line_path(&actual_hourly, scale, plot_height);
+    let bar_heights = forecast_buckets.map(|v| v.map_or(0.0, |w| (w / scale) * plot_height));
+    let line_path = actual_line_path(&actual_buckets, scale, plot_height);
 
     ForecastPanelView {
         has_data: true,

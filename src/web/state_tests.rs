@@ -16,6 +16,10 @@ fn clock(secs: i64) -> Clock {
     journey::clock_at(secs)
 }
 
+fn tz() -> chrono_tz::Tz {
+    chrono_tz::UTC
+}
+
 fn engine_state(grid: GridPower, solar: SolarPower) -> EngineState {
     let mut world = World::new();
     world.observe_meter(MeterReading::total_only(grid), solar);
@@ -71,12 +75,14 @@ fn only_a_meter_tick_extends_the_sparklines() {
         &engine_state(GridPower(100.0), SolarPower::new(10.0)),
         None,
         &clock(3),
+        tz(),
     );
     state.poll_tick(&engine(), telemetry(), at(4));
     state.meter_tick(
         &engine_state(GridPower(200.0), SolarPower::new(20.0)),
         None,
         &clock(5),
+        tz(),
     );
 
     assert_eq!(
@@ -98,6 +104,7 @@ fn a_sparkline_holds_its_capacity_and_no_more() {
             &engine_state(GridPower(i as f64), SolarPower::ZERO),
             None,
             &clock(i as i64),
+            tz(),
         );
     }
 
@@ -130,7 +137,7 @@ fn telemetry_survives_the_ticks_that_do_not_carry_it() {
     let mut state = seeded();
     state.poll_tick(&engine(), telemetry(), at(1));
 
-    state.meter_tick(&engine(), None, &clock(2));
+    state.meter_tick(&engine(), None, &clock(2), tz());
     state.failsafe_tick(&engine(), None, at(3));
 
     assert_eq!(state.pack_capacity, KiloWattHours(3.84));
@@ -148,13 +155,18 @@ fn the_decision_log_appends_only_real_decisions_and_stays_bounded() {
     let mut state = seeded();
     assert!(state.last_decision.is_none());
 
-    state.meter_tick(&engine(), None, &clock(1));
+    state.meter_tick(&engine(), None, &clock(1), tz());
     assert!(state.recent_decisions.is_empty());
     assert!(state.last_decision.is_none());
 
     for i in 0..DECISION_LOG_CAPACITY + 5 {
         let decision = decision();
-        state.meter_tick(&engine(), Some((&decision, at(i as i64))), &clock(i as i64));
+        state.meter_tick(
+            &engine(),
+            Some((&decision, at(i as i64))),
+            &clock(i as i64),
+            tz(),
+        );
     }
 
     assert_eq!(state.recent_decisions.len(), DECISION_LOG_CAPACITY);
@@ -196,32 +208,43 @@ fn each_sparkline_carries_its_own_quantity() {
 
 // --- Actual solar history --------------------------------------------------
 
+/// A fixed instant at the given UTC hour/minute on an arbitrary day, so
+/// bucket math in these tests doesn't depend on wall-clock time.
+fn solar_ts(hour: u32, minute: u32) -> Timestamp {
+    use chrono::TimeZone;
+    Timestamp::from(
+        chrono_tz::UTC
+            .with_ymd_and_hms(2026, 1, 1, hour, minute, 0)
+            .unwrap(),
+    )
+}
+
 #[test]
-fn actual_solar_history_buckets_by_hour_and_averages() {
+fn actual_solar_history_buckets_by_half_hour_and_averages() {
     let mut history = ActualSolarHistory::default();
-    history.record(6, 100, SolarPower::new(1000.0));
-    history.record(6, 100, SolarPower::new(2000.0));
-    history.record(7, 100, SolarPower::new(500.0));
+    history.record(solar_ts(6, 0), tz(), 100, SolarPower::new(1000.0));
+    history.record(solar_ts(6, 10), tz(), 100, SolarPower::new(2000.0));
+    history.record(solar_ts(7, 0), tz(), 100, SolarPower::new(500.0));
 
     let averages = history.averages();
-    assert_eq!(averages[6], Some(1500.0));
-    assert_eq!(averages[7], Some(500.0));
+    assert_eq!(averages[12], Some(1500.0), "06:00-06:30 is bucket 12");
+    assert_eq!(averages[14], Some(500.0), "07:00-07:30 is bucket 14");
     assert_eq!(
-        averages[8], None,
-        "an hour with no samples reads as unknown, not zero"
+        averages[16], None,
+        "a slot with no samples reads as unknown, not zero"
     );
 }
 
-/// A new day ordinal must not let yesterday's samples for the same hour
+/// A new day ordinal must not let yesterday's samples for the same slot
 /// leak into today's average.
 #[test]
 fn actual_solar_history_resets_on_a_new_day() {
     let mut history = ActualSolarHistory::default();
-    history.record(10, 100, SolarPower::new(5000.0));
-    history.record(10, 101, SolarPower::new(1000.0));
+    history.record(solar_ts(10, 0), tz(), 100, SolarPower::new(5000.0));
+    history.record(solar_ts(10, 0), tz(), 101, SolarPower::new(1000.0));
 
     assert_eq!(
-        history.averages()[10],
+        history.averages()[20],
         Some(1000.0),
         "yesterday's sample must not survive the rollover"
     );
@@ -231,7 +254,7 @@ fn actual_solar_history_resets_on_a_new_day() {
 fn a_meter_tick_records_into_the_actual_solar_history() {
     let mut state = seeded();
     let clock = Clock {
-        hour: 14,
+        now: solar_ts(14, 0),
         day_ordinal: 200,
         ..Clock::test_at(journey::NOW_MS)
     };
@@ -239,9 +262,10 @@ fn a_meter_tick_records_into_the_actual_solar_history() {
         &engine_state(GridPower(0.0), SolarPower::new(3000.0)),
         None,
         &clock,
+        tz(),
     );
 
-    assert_eq!(state.actual_solar.averages()[14], Some(3000.0));
+    assert_eq!(state.actual_solar.averages()[28], Some(3000.0));
 }
 
 // --- Forecast tick ----------------------------------------------------------

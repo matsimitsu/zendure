@@ -5,6 +5,8 @@
 
 use std::collections::VecDeque;
 
+use chrono_tz::Tz;
+
 use crate::clock::Clock;
 use crate::engine::EngineState;
 use crate::journal::read::read_recent_decisions;
@@ -12,6 +14,12 @@ use crate::models::ControlDecision;
 use crate::units::{
     GridPower, KiloWattHours, Percent, SolarForecastPoint, SolarPower, Timestamp, Watts,
 };
+
+/// Solcast's own resolution (see `SolcastEntry`'s doc comment in
+/// `prediction/solcast.rs`) — the forecast panel's bars and
+/// [`ActualSolarHistory`]'s buckets both use this, so the two series share
+/// one axis.
+pub(crate) const SOLAR_BUCKETS_PER_DAY: usize = 48;
 
 /// How many meter readings each sparkline keeps. Only a meter tick appends
 /// one, so at the meter's ~1/s cadence this is ~96 seconds of history —
@@ -109,41 +117,57 @@ pub struct DashboardTelemetry {
     pub capacity: KiloWattHours,
 }
 
-/// Today's *actual* measured solar production, bucketed into the same 24
-/// local-calendar-day hours the forecast panel's bars use, so the two share
-/// one x-axis. Reset at local midnight — `record`'s caller passes the
-/// `Clock`-resolved `hour`/`day_ordinal` a meter tick already carries, so
-/// this needs no clock of its own.
-#[derive(Debug, Clone, Default)]
+/// Today's *actual* measured solar production, bucketed into the same 48
+/// local half-hours the forecast panel's bars use, so the two share one
+/// x-axis. Reset at local midnight, keyed on the `day_ordinal` a meter tick
+/// already carries via its `Clock`.
+#[derive(Debug, Clone)]
 pub struct ActualSolarHistory {
     day_ordinal: Option<u32>,
-    sum_by_hour: [f64; 24],
-    count_by_hour: [u32; 24],
+    sum_by_bucket: [f64; SOLAR_BUCKETS_PER_DAY],
+    count_by_bucket: [u32; SOLAR_BUCKETS_PER_DAY],
+}
+
+// `#[derive(Default)]` only covers arrays up to length 32 (a pre-const-generics
+// limitation std still carries), and `SOLAR_BUCKETS_PER_DAY` is 48.
+impl Default for ActualSolarHistory {
+    fn default() -> Self {
+        ActualSolarHistory {
+            day_ordinal: None,
+            sum_by_bucket: [0.0; SOLAR_BUCKETS_PER_DAY],
+            count_by_bucket: [0; SOLAR_BUCKETS_PER_DAY],
+        }
+    }
 }
 
 impl ActualSolarHistory {
-    /// Folds one meter reading into its local hour's running average,
+    /// Folds one meter reading into its local half-hour's running average,
     /// resetting every bucket first if `day_ordinal` has moved on from
-    /// whatever this last saw.
-    pub fn record(&mut self, hour: u32, day_ordinal: u32, solar: SolarPower) {
+    /// whatever this last saw. The bucket comes from `now`/`timezone` rather
+    /// than `Clock`, which deliberately resolves no finer than the hour (see
+    /// `prediction::LocalNow`'s doc comment) — extending it would touch every
+    /// journalled `Event`.
+    pub fn record(&mut self, now: Timestamp, timezone: Tz, day_ordinal: u32, solar: SolarPower) {
         if self.day_ordinal != Some(day_ordinal) {
             *self = ActualSolarHistory {
                 day_ordinal: Some(day_ordinal),
                 ..ActualSolarHistory::default()
             };
         }
-        let hour = hour as usize % 24;
-        self.sum_by_hour[hour] += solar.get();
-        self.count_by_hour[hour] += 1;
+        let today_start = crate::clock::local_midnight(now, timezone);
+        let elapsed_ms = (now - today_start).as_millis().max(0);
+        let bucket = ((elapsed_ms / (30 * 60 * 1000)) as usize).min(SOLAR_BUCKETS_PER_DAY - 1);
+        self.sum_by_bucket[bucket] += solar.get();
+        self.count_by_bucket[bucket] += 1;
     }
 
-    /// One average watts figure per local hour, `None` where nothing has
-    /// been recorded yet today (every hour from now on, and any hour lost to
+    /// One average watts figure per local half-hour, `None` where nothing has
+    /// been recorded yet today (every slot from now on, and any slot lost to
     /// downtime before this process's first meter tick or its startup seed).
-    pub fn averages(&self) -> [Option<f64>; 24] {
+    pub fn averages(&self) -> [Option<f64>; SOLAR_BUCKETS_PER_DAY] {
         std::array::from_fn(|h| {
-            (self.count_by_hour[h] > 0)
-                .then(|| self.sum_by_hour[h] / f64::from(self.count_by_hour[h]))
+            (self.count_by_bucket[h] > 0)
+                .then(|| self.sum_by_bucket[h] / f64::from(self.count_by_bucket[h]))
         })
     }
 }
@@ -227,19 +251,20 @@ impl DashboardState {
     /// A meter reading: the only tick that extends the sparklines, which is
     /// what keeps them on the meter's cadence. Takes the whole `Clock`
     /// (rather than a bare `Timestamp`, as the other ticks do) because
-    /// `actual_solar` needs the local hour and day ordinal it already
-    /// carries — nothing here reads a clock of its own.
+    /// `actual_solar` needs the day ordinal it already carries; `timezone` is
+    /// separate because `Clock` deliberately resolves no finer than the hour.
     pub fn meter_tick(
         &mut self,
         engine: &EngineState,
         decision: Option<(&ControlDecision, Timestamp)>,
         clock: &Clock,
+        timezone: Tz,
     ) {
         self.sparklines.solar.push(engine.world.solar);
         self.sparklines.grid.push(engine.world.grid.total);
         self.sparklines.home_usage.push(engine.world.home_usage());
         self.actual_solar
-            .record(clock.hour, clock.day_ordinal, engine.world.solar);
+            .record(clock.now, timezone, clock.day_ordinal, engine.world.solar);
         self.refresh(engine, decision, clock.now);
     }
 

@@ -15,6 +15,7 @@
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -23,6 +24,7 @@ use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
 use crate::config::PredictionConfig;
+use crate::journal::Journal;
 use crate::units::{SolarForecastPoint, Timestamp};
 use crate::web::{DashboardStateSender, ForecastSnapshot};
 
@@ -222,10 +224,11 @@ pub struct ForecastTracker {
     fetched_at: Option<Timestamp>,
     state_path: PathBuf,
     save_failed: AtomicBool,
+    timezone: Tz,
 }
 
 impl ForecastTracker {
-    pub fn new(state_path: PathBuf, poll_times: Vec<TimeOfDay>) -> Self {
+    pub fn new(state_path: PathBuf, poll_times: Vec<TimeOfDay>, timezone: Tz) -> Self {
         let mut tracker = ForecastTracker {
             // A date with nothing fired yet — `next_due`/`mark_used` both
             // treat any date mismatch as "budget is fresh", so this default
@@ -237,6 +240,7 @@ impl ForecastTracker {
             fetched_at: None,
             state_path,
             save_failed: AtomicBool::new(false),
+            timezone,
         };
         if let Some(parent) = tracker.state_path.parent()
             && !parent.as_os_str().is_empty()
@@ -289,9 +293,24 @@ impl ForecastTracker {
         self.save();
     }
 
-    /// Replaces the cached series on a successful fetch.
+    /// Merges a fresh fetch into the cached series by timestamp — a fresh
+    /// point wins on a timestamp collision, but a timestamp only the old
+    /// series has (an hour Solcast's forward-looking response no longer
+    /// covers) is kept, not dropped, so an already-elapsed hour doesn't lose
+    /// its bar the moment a new poll lands. Anything from before today is
+    /// pruned at the same time: durable history lives in the journal (see
+    /// `run_forecast_poller`), so this cache only needs to cover what the
+    /// dashboard currently displays.
     pub fn set_forecast(&mut self, points: Vec<SolarForecastPoint>, at: Timestamp) {
-        self.points = points;
+        let cutoff = crate::clock::local_midnight(at, self.timezone);
+        let merged: std::collections::BTreeMap<Timestamp, SolarForecastPoint> = self
+            .points
+            .iter()
+            .chain(points.iter())
+            .filter(|p| p.at >= cutoff)
+            .map(|p| (p.at, *p))
+            .collect();
+        self.points = merged.into_values().collect();
         self.fetched_at = Some(at);
         self.save();
     }
@@ -370,9 +389,10 @@ pub async fn run_forecast_poller(
     state_path: PathBuf,
     poll_times: Vec<TimeOfDay>,
     dashboard_tx: DashboardStateSender,
+    journal: Arc<Journal>,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
 ) {
-    let mut tracker = ForecastTracker::new(state_path, poll_times);
+    let mut tracker = ForecastTracker::new(state_path, poll_times, timezone);
     dashboard_tx.send_modify(|s| s.forecast_tick(tracker.snapshot()));
 
     let mut check = tokio::time::interval(CHECK_INTERVAL);
@@ -385,6 +405,13 @@ pub async fn run_forecast_poller(
                 tracing::info!("Fetching solar forecast ({slot} anchor)");
                 match forecaster.forecast().await {
                     Ok(points) => {
+                        // Durable history, independent of `tracker`'s own
+                        // today-only cache — the future day-per-page view
+                        // reads this back, not `forecast.json`.
+                        match serde_json::to_string(&points) {
+                            Ok(json) => journal.raw("solar_forecast", &json),
+                            Err(e) => tracing::warn!("Cannot serialize solar forecast for the journal: {e}"),
+                        }
                         tracker.set_forecast(points, Timestamp::from(chrono::Utc::now()));
                         tracker.mark_used(&now, slot);
                         dashboard_tx.send_modify(|s| s.forecast_tick(tracker.snapshot()));

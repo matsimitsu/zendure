@@ -233,7 +233,7 @@ fn seed_actual_solar(
     journal_path: &std::path::Path,
     timezone: chrono_tz::Tz,
 ) -> web::ActualSolarHistory {
-    use chrono::{Datelike, TimeZone, Timelike};
+    use chrono::{Datelike, TimeZone};
 
     let midnight = crate::clock::local_midnight(Clock::now(timezone).now, timezone);
 
@@ -242,7 +242,12 @@ fn seed_actual_solar(
         Ok(rows) => {
             for (ts_ms, solar) in rows {
                 if let Some(local) = timezone.timestamp_millis_opt(ts_ms).single() {
-                    history.record(local.hour(), local.ordinal(), solar);
+                    history.record(
+                        Timestamp::from_millis(ts_ms),
+                        timezone,
+                        local.ordinal(),
+                        solar,
+                    );
                 }
             }
         }
@@ -497,6 +502,7 @@ pub async fn run(
         let poll_times = prediction_cfg.poll_times().to_vec();
         let tx = tx.clone();
         let timezone = config.timezone;
+        let forecast_journal = journal.clone();
         forecast_task = Some(tokio::spawn(async move {
             prediction::run_forecast_poller(
                 forecaster,
@@ -504,6 +510,7 @@ pub async fn run(
                 state_path,
                 poll_times,
                 tx,
+                forecast_journal,
                 forecast_stop_rx,
             )
             .await;
@@ -604,7 +611,7 @@ pub async fn run(
                             let snapshot = engine.state();
                             let decision = step.decision.as_ref().map(|d| (d, clock.now));
                             tx.send_modify(|state| {
-                                state.meter_tick(&snapshot, decision, &clock)
+                                state.meter_tick(&snapshot, decision, &clock, config.timezone)
                             });
                         }
                     }

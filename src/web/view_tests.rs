@@ -136,6 +136,7 @@ fn the_mode_badge_follows_the_first_real_decision() {
         &engine_state(BatteryPower(-1200)),
         Some((&decision(ControlMode::Charge, "solar surplus"), at(1))),
         &clock(1),
+        tz(),
     );
 
     let battery = dashboard_view(&charging, tz())
@@ -346,17 +347,20 @@ fn forecast_point(hours_after_midnight: i64, minutes: i64, watts: f64) -> SolarF
     }
 }
 
+/// Two samples landing in the same half-hour slot average — normally only
+/// reachable with a misaligned or duplicated fetch, since Solcast's own
+/// resolution is one sample per slot.
 #[test]
-fn hourly_forecast_watts_averages_two_samples_in_the_same_hour() {
-    let points = vec![forecast_point(6, 0, 1000.0), forecast_point(6, 30, 2000.0)];
-    let hourly = hourly_forecast_watts(&points, Timestamp::from_millis(0));
+fn bucketed_forecast_watts_averages_two_samples_in_the_same_slot() {
+    let points = vec![forecast_point(6, 0, 1000.0), forecast_point(6, 10, 2000.0)];
+    let buckets = bucketed_forecast_watts(&points, Timestamp::from_millis(0));
 
-    assert_eq!(hourly[6], Some(1500.0));
-    assert_eq!(hourly[7], None);
+    assert_eq!(buckets[12], Some(1500.0), "06:00-06:30 is bucket 12");
+    assert_eq!(buckets[13], None, "06:30-07:00 has no sample");
 }
 
 #[test]
-fn hourly_forecast_watts_excludes_points_outside_the_24h_window() {
+fn bucketed_forecast_watts_excludes_points_outside_the_24h_window() {
     let today_start = Timestamp::from_millis(0);
     // One hour before today, and exactly at tomorrow's start.
     let points = vec![
@@ -370,14 +374,14 @@ fn hourly_forecast_watts_excludes_points_outside_the_24h_window() {
         },
     ];
 
-    let hourly = hourly_forecast_watts(&points, today_start);
-    assert!(hourly.iter().all(Option::is_none));
+    let buckets = bucketed_forecast_watts(&points, today_start);
+    assert!(buckets.iter().all(Option::is_none));
 }
 
 #[test]
-fn hourly_forecast_watts_of_an_empty_series_is_all_none() {
-    let hourly = hourly_forecast_watts(&[], Timestamp::from_millis(0));
-    assert!(hourly.iter().all(Option::is_none));
+fn bucketed_forecast_watts_of_an_empty_series_is_all_none() {
+    let buckets = bucketed_forecast_watts(&[], Timestamp::from_millis(0));
+    assert!(buckets.iter().all(Option::is_none));
 }
 
 #[test]
@@ -394,27 +398,27 @@ fn forecast_panel_view_of_an_empty_snapshot_has_no_data() {
     assert!(view.line_path.is_empty());
 }
 
-/// A gap (an hour with no recorded actual sample) must start a new `M`
+/// A gap (a slot with no recorded actual sample) must start a new `M`
 /// subpath rather than drawing a line straight across it.
 #[test]
 fn actual_line_path_starts_a_new_subpath_across_a_gap() {
-    let mut hourly: [Option<f64>; 24] = [None; 24];
-    hourly[6] = Some(1000.0);
-    hourly[7] = Some(1200.0);
-    // hour 8 is a gap
-    hourly[9] = Some(900.0);
+    let mut buckets: [Option<f64>; 48] = [None; 48];
+    buckets[12] = Some(1000.0);
+    buckets[13] = Some(1200.0);
+    // bucket 14 is a gap
+    buckets[15] = Some(900.0);
 
-    let path = actual_line_path(&hourly, 2000.0, 100.0);
+    let path = actual_line_path(&buckets, 2000.0, 100.0);
 
     let subpaths: Vec<&str> = path.split('M').filter(|s| !s.is_empty()).collect();
     assert_eq!(subpaths.len(), 2, "expected two subpaths, got: {path}");
     assert!(
         subpaths[0].contains('L'),
-        "the first subpath joins hours 6 and 7: {path}"
+        "the first subpath joins slots 12 and 13: {path}"
     );
     assert!(
         !subpaths[1].contains('L'),
-        "a single-hour subpath has nothing to join: {path}"
+        "a single-slot subpath has nothing to join: {path}"
     );
 }
 

@@ -17,7 +17,15 @@ fn tracker() -> ForecastTracker {
     ForecastTracker::new(
         dir.path().join("forecast.json"),
         default_poll_times().to_vec(),
+        chrono_tz::UTC,
     )
+}
+
+fn point(ms: i64, watts: f64) -> crate::units::SolarForecastPoint {
+    crate::units::SolarForecastPoint {
+        at: Timestamp::from_millis(ms),
+        estimate: crate::units::SolarPower::new(watts),
+    }
 }
 
 // --- Scheduler ---------------------------------------------------------------
@@ -55,12 +63,13 @@ fn a_restart_mid_day_skips_anchors_already_fired() {
     let now = at(2026, 1, 1, 13, 0);
 
     {
-        let mut t = ForecastTracker::new(path.clone(), default_poll_times().to_vec());
+        let mut t =
+            ForecastTracker::new(path.clone(), default_poll_times().to_vec(), chrono_tz::UTC);
         t.mark_used(&now, TimeOfDay::new(6, 0).unwrap());
         t.mark_used(&now, TimeOfDay::new(9, 30).unwrap());
     }
 
-    let restarted = ForecastTracker::new(path, default_poll_times().to_vec());
+    let restarted = ForecastTracker::new(path, default_poll_times().to_vec(), chrono_tz::UTC);
     assert_eq!(
         restarted.next_due(&now),
         Some(TimeOfDay::new(12, 30).unwrap()),
@@ -129,12 +138,13 @@ fn state_round_trips_through_a_restart() {
     }];
 
     {
-        let mut t = ForecastTracker::new(path.clone(), default_poll_times().to_vec());
+        let mut t =
+            ForecastTracker::new(path.clone(), default_poll_times().to_vec(), chrono_tz::UTC);
         t.set_forecast(points.clone(), Timestamp::from_millis(1_700_000_000_000));
         t.mark_used(&now, TimeOfDay::new(6, 0).unwrap());
     }
 
-    let restored = ForecastTracker::new(path, default_poll_times().to_vec());
+    let restored = ForecastTracker::new(path, default_poll_times().to_vec(), chrono_tz::UTC);
     let snapshot = restored.snapshot();
     assert_eq!(snapshot.points, points);
     assert_eq!(
@@ -152,7 +162,7 @@ fn state_round_trips_through_a_restart() {
 fn a_missing_state_directory_is_created() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nested/state/forecast.json");
-    let mut t = ForecastTracker::new(path.clone(), default_poll_times().to_vec());
+    let mut t = ForecastTracker::new(path.clone(), default_poll_times().to_vec(), chrono_tz::UTC);
     t.mark_used(&at(2026, 1, 1, 6, 0), TimeOfDay::new(6, 0).unwrap());
     assert!(path.exists());
 }
@@ -163,7 +173,11 @@ fn an_unwritable_path_does_not_panic() {
     let blocker = dir.path().join("iam-a-file");
     std::fs::write(&blocker, b"x").unwrap();
 
-    let mut t = ForecastTracker::new(blocker.join("state.json"), default_poll_times().to_vec());
+    let mut t = ForecastTracker::new(
+        blocker.join("state.json"),
+        default_poll_times().to_vec(),
+        chrono_tz::UTC,
+    );
     let now = at(2026, 1, 1, 6, 0);
     t.mark_used(&now, TimeOfDay::new(6, 0).unwrap());
     t.mark_used(&now, TimeOfDay::new(9, 30).unwrap()); // second failure takes the quiet path
@@ -175,8 +189,77 @@ fn a_corrupt_state_file_is_handled() {
     let path = dir.path().join("forecast.json");
     std::fs::write(&path, b"not valid json").unwrap();
 
-    let t = ForecastTracker::new(path, default_poll_times().to_vec());
+    let t = ForecastTracker::new(path, default_poll_times().to_vec(), chrono_tz::UTC);
     assert!(t.snapshot().points.is_empty());
+}
+
+// --- Merging a fresh fetch -----------------------------------------------------
+
+/// The bug this exists to fix: Solcast's forward-looking response drops
+/// hours that have already elapsed, and a wholesale replace used to take the
+/// cached bar for that hour down with it.
+#[test]
+fn a_second_fetch_keeps_a_timestamp_the_new_fetch_no_longer_covers() {
+    let mut t = tracker();
+    let first_at = Timestamp::from_millis(1_700_000_000_000); // an arbitrary "now"
+    t.set_forecast(vec![point(1_700_000_000_000, 500.0)], first_at);
+
+    // The next fetch, an hour later, no longer mentions that earlier slot —
+    // exactly what Solcast's forward-looking API does.
+    let second_at = Timestamp::from_millis(1_700_003_600_000);
+    t.set_forecast(vec![point(1_700_007_200_000, 800.0)], second_at);
+
+    let points = t.snapshot().points;
+    assert!(
+        points.iter().any(|p| p.at.as_millis() == 1_700_000_000_000),
+        "the earlier point must survive a fetch that no longer mentions it: {points:?}"
+    );
+    assert!(points.iter().any(|p| p.at.as_millis() == 1_700_007_200_000));
+}
+
+/// A timestamp both fetches share gets the fresh estimate, not the stale one.
+#[test]
+fn a_second_fetch_overwrites_a_shared_timestamp_with_fresh_data() {
+    let mut t = tracker();
+    let at_ms = 1_700_000_000_000;
+    t.set_forecast(vec![point(at_ms, 500.0)], Timestamp::from_millis(at_ms));
+    t.set_forecast(vec![point(at_ms, 900.0)], Timestamp::from_millis(at_ms));
+
+    let points = t.snapshot().points;
+    assert_eq!(points.len(), 1);
+    assert_eq!(points[0].estimate, crate::units::SolarPower::new(900.0));
+}
+
+/// A fetch on a new calendar day prunes yesterday's points — durable history
+/// lives in the journal now, so this cache only needs to cover today.
+#[test]
+fn a_fetch_on_a_new_day_prunes_points_from_before_today() {
+    use chrono::TimeZone;
+    let mut t = tracker();
+
+    let yesterday_evening = chrono_tz::UTC
+        .with_ymd_and_hms(2026, 1, 1, 20, 0, 0)
+        .unwrap();
+    t.set_forecast(
+        vec![point(yesterday_evening.timestamp_millis(), 500.0)],
+        Timestamp::from(yesterday_evening),
+    );
+
+    let this_morning = chrono_tz::UTC
+        .with_ymd_and_hms(2026, 1, 2, 6, 0, 0)
+        .unwrap();
+    t.set_forecast(
+        vec![point(this_morning.timestamp_millis(), 800.0)],
+        Timestamp::from(this_morning),
+    );
+
+    let points = t.snapshot().points;
+    assert_eq!(
+        points.len(),
+        1,
+        "yesterday's point must be pruned once today's fetch lands: {points:?}"
+    );
+    assert_eq!(points[0].at, Timestamp::from(this_morning));
 }
 
 /// A wire-format pin: a later refactor of `PersistedForecastState` can't
