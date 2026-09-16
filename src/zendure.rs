@@ -1,4 +1,5 @@
-use std::sync::Mutex;
+use std::collections::BTreeSet;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use crate::battery::BatteryState;
@@ -347,27 +348,84 @@ fn reading_from_report(
     }
 }
 
-/// Map a Zendure `pack_type` to its nominal capacity in Wh.
-fn pack_type_capacity_wh(pack_type: u32) -> WattHours {
+/// Nominal capacity for a `pack_type` this build recognises, `None` for one it
+/// does not. Pure and total, so the table stays a table: what an unidentified
+/// pack costs is [`pack_capacity`]'s decision, and it says so out loud.
+fn known_pack_type_capacity(pack_type: u32) -> Option<WattHours> {
     match pack_type {
         // AC2400 Plus's own built-in pack
-        500 => WattHours(2400.0),
+        500 => Some(WattHours(2400.0)),
         // AB2000 / AB2000S
-        501 => WattHours(1920.0),
-        // Unknown — assume AB2000 as conservative default
-        _ => {
-            tracing::warn!("Unknown pack_type {pack_type}, assuming 1920 Wh");
-            WattHours(1920.0)
-        }
+        501 => Some(WattHours(1920.0)),
+        _ => None,
+    }
+}
+
+/// What a pack this build cannot identify is assumed to hold: the smallest in
+/// the range. Understating capacity only makes `usable_kwh` and the published
+/// capacity figure pessimistic, while overstating it would have them promise
+/// energy the pack does not have.
+const UNIDENTIFIED_PACK_CAPACITY: WattHours = WattHours(1920.0);
+
+/// One pack's nominal capacity, naming anything this build cannot identify.
+///
+/// An expansion pack newer than the table — an AB3000 holds 2880 Wh — is
+/// otherwise counted as [`UNIDENTIFIED_PACK_CAPACITY`], and a total that is
+/// quietly ~1 kWh short reaches `RteTracker::usable_kwh`, the published
+/// capacity and the dashboard alike with nothing to say it was a guess.
+fn pack_capacity(pack: &PackData) -> WattHours {
+    let Some(pack_type) = pack.pack_type else {
+        report_unidentified_pack(None, pack.sn.as_deref());
+        return UNIDENTIFIED_PACK_CAPACITY;
+    };
+    known_pack_type_capacity(pack_type).unwrap_or_else(|| {
+        report_unidentified_pack(Some(pack_type), pack.sn.as_deref());
+        UNIDENTIFIED_PACK_CAPACITY
+    })
+}
+
+/// Warn once per distinct `pack_type`, not once per poll.
+///
+/// A pack reports on every poll, so per-report warnings are thousands of
+/// identical lines a day and the one that matters scrolls away. What is being
+/// reported is a gap in this build's table rather than something that
+/// happened, so it needs saying once — with the serial, since closing the gap
+/// means knowing which pack to go read the label off.
+fn report_unidentified_pack(pack_type: Option<u32>, sn: Option<&str>) {
+    static REPORTED: LazyLock<Mutex<BTreeSet<Option<u32>>>> =
+        LazyLock::new(|| Mutex::new(BTreeSet::new()));
+
+    // Taken through the poison, not past it: the only thing behind this lock is
+    // a set of already-printed warnings, and a logging concern has no business
+    // propagating a panic from an unrelated thread.
+    let mut reported = match REPORTED.lock() {
+        Ok(reported) => reported,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if !reported.insert(pack_type) {
+        return;
+    }
+
+    let sn = sn.unwrap_or("unknown");
+    let assumed_wh = UNIDENTIFIED_PACK_CAPACITY.get();
+    match pack_type {
+        Some(pack_type) => tracing::warn!(
+            pack_type,
+            sn,
+            assumed_wh,
+            "unrecognised packType; capacity is a guess — add it to known_pack_type_capacity"
+        ),
+        None => tracing::warn!(
+            sn,
+            assumed_wh,
+            "pack reported no packType; capacity is a guess"
+        ),
     }
 }
 
 /// Extract per-pack capacities from a report's `pack_data`.
 fn pack_capacities(packs: &[PackData]) -> Vec<WattHours> {
-    packs
-        .iter()
-        .map(|p| pack_type_capacity_wh(p.pack_type.unwrap_or(501)))
-        .collect()
+    packs.iter().map(pack_capacity).collect()
 }
 
 /// Sum pack capacities, but only once `packData` looks complete. `pack_num`
@@ -401,11 +459,57 @@ fn complete_pack_capacities(
 mod tests {
     use super::*;
 
+    fn pack(json: &str) -> PackData {
+        serde_json::from_str(json).expect("pack fixture should parse")
+    }
+
     #[test]
-    fn test_pack_type_capacity() {
-        assert_eq!(pack_type_capacity_wh(500).get(), 2400.0);
-        assert_eq!(pack_type_capacity_wh(501).get(), 1920.0);
-        assert_eq!(pack_type_capacity_wh(999).get(), 1920.0);
+    fn the_pack_type_table_knows_the_packs_this_build_ships_with() {
+        assert_eq!(known_pack_type_capacity(500), Some(WattHours(2400.0)));
+        assert_eq!(known_pack_type_capacity(501), Some(WattHours(1920.0)));
+    }
+
+    /// The case this exists for: an expansion pack newer than the table. An
+    /// AB3000 holds 2880 Wh, so until its `packType` is added here the total is
+    /// a guess — one the controller keeps running on, but never silently.
+    #[test]
+    fn an_unrecognised_pack_type_is_not_in_the_table() {
+        assert_eq!(known_pack_type_capacity(999), None);
+    }
+
+    /// Loud and running beats silent and stopped: an unidentified pack still
+    /// yields a capacity, so the dashboard and `usable_kwh` keep working
+    /// (pessimistically) rather than going blank.
+    #[test]
+    fn an_unidentified_pack_still_reports_a_capacity() {
+        assert_eq!(
+            pack_capacity(&pack(r#"{"packType":999}"#)),
+            UNIDENTIFIED_PACK_CAPACITY
+        );
+    }
+
+    /// A pack that reports no `packType` at all used to take the 1920 Wh
+    /// default with nothing said about it — the same guess as an unrecognised
+    /// type, and it deserves the same warning.
+    #[test]
+    fn a_pack_with_no_pack_type_is_also_unidentified() {
+        assert_eq!(
+            pack_capacity(&pack(r#"{"sn":"JO4AENCN4900105"}"#)),
+            UNIDENTIFIED_PACK_CAPACITY
+        );
+    }
+
+    /// The shape the AB3000 arrives in: a second pack alongside the built-in
+    /// one, each mapped on its own type rather than the first pack's standing
+    /// for both.
+    #[test]
+    fn each_pack_is_mapped_on_its_own_type() {
+        let packs = [pack(r#"{"packType":500}"#), pack(r#"{"packType":501}"#)];
+
+        assert_eq!(
+            pack_capacities(&packs),
+            vec![WattHours(2400.0), WattHours(1920.0)]
+        );
     }
 
     /// The property `PollError` exists for: a response we failed to decode is
