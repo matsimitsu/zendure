@@ -452,6 +452,44 @@ pub fn read_meter_solar_since(path: &Path, since_ms: i64) -> Result<Vec<(i64, So
     Ok(readings)
 }
 
+/// Every foldable observation between two instants, oldest first — the raw
+/// material `analyze` integrates.
+///
+/// `meter` and `device_update` only: `mqtt_timeout` carries no measurement, and
+/// the raw `shelly`/`zendure_poll` captures are stamped with their write time
+/// rather than their observation time, which would put them out of order among
+/// rows that aren't. Returned as `Event`s rather than a shape chosen here —
+/// what a reading *means* is `analyze`'s business, and this module's job ends
+/// at handing over rows it could decode.
+pub fn read_events_in_range(path: &Path, from: Timestamp, to: Timestamp) -> Result<Vec<Event>> {
+    let conn = open_for_reading(path)?;
+
+    // Ordered by `seq`, not `ts_ms`: `seq` is assigned by the single writer
+    // thread, so it is the order these were observed in even where two rows
+    // share a millisecond.
+    let mut stmt = conn.prepare(
+        "SELECT payload_json FROM events \
+         WHERE kind IN ('meter', 'device_update') AND ts_ms >= ?1 AND ts_ms <= ?2 \
+         ORDER BY seq",
+    )?;
+    let rows: Vec<String> = stmt
+        .query_map([from.as_millis(), to.as_millis()], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut skipped = 0usize;
+    let mut events = Vec::with_capacity(rows.len());
+    for payload in rows {
+        match decode::<Event>("an event", &payload) {
+            Ok(event) => events.push(event),
+            Err(_) => skipped += 1,
+        }
+    }
+    if skipped > 0 {
+        tracing::warn!(skipped, path = %path.display(), "skipped undecodable event rows");
+    }
+    Ok(events)
+}
+
 #[cfg(test)]
 #[path = "read_tests.rs"]
 mod tests;

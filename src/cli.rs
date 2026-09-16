@@ -33,6 +33,12 @@ zendure — home battery controller
         the last decision at or before --from, since that is the most recent
         state a replay can resume from. Writes to stdout without --out.
 
+    zendure analyze --from <when> --to <when> [--db <path>]
+        Integrate the journal between two instants into daily energy: grid
+        import and export, how much export the battery did not take, what it
+        charged and discharged, demand above its discharge limit, and the
+        same import/export split per phase. All kWh.
+
     zendure replay <fixture> [--verify] [--set <knob>=<value>]...
         Re-run a fixture's events through the decision engine and print the
         commands. --verify diffs them against what the daemon actually did and
@@ -66,6 +72,14 @@ pub enum Invocation {
         verify: bool,
         overrides: Vec<(String, String)>,
     },
+    // No config field either, for the same reason `Export` has none: energy is
+    // integrated from what was recorded, and nothing about how to reach a
+    // device could change the answer.
+    Analyze {
+        from: Timestamp,
+        to: Timestamp,
+        db: PathBuf,
+    },
 }
 
 /// `args` is everything after the program name.
@@ -81,6 +95,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Invocation, Stri
     match first.as_str() {
         "-h" | "--help" | "help" => Ok(Invocation::Help),
         "export" => parse_export(args),
+        "analyze" => parse_analyze(args),
         "replay" => parse_replay(args),
         // Anything else that looks like a flag is a daemon argument: there is
         // no explicit `daemon` subcommand, so `--config`/`--check` showing up
@@ -139,6 +154,35 @@ fn parse_export<I: Iterator<Item = String>>(mut args: I) -> Result<Invocation, S
         to,
         db: db.unwrap_or_else(|| PathBuf::from(DEFAULT_JOURNAL_PATH)),
         out,
+    })
+}
+
+/// Same range arguments as `export`, minus `--out`: this prints a table for a
+/// human to read, not a fixture to feed back in.
+fn parse_analyze<I: Iterator<Item = String>>(mut args: I) -> Result<Invocation, String> {
+    let mut from = None;
+    let mut to = None;
+    let mut db = None;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--from" => from = Some(instant(&value(&mut args, "--from")?)?),
+            "--to" => to = Some(instant(&value(&mut args, "--to")?)?),
+            "--db" => db = Some(PathBuf::from(value(&mut args, "--db")?)),
+            other => return Err(format!("analyze: unexpected argument `{other}`")),
+        }
+    }
+
+    let from = from.ok_or("analyze: --from is required")?;
+    let to = to.ok_or("analyze: --to is required")?;
+    if to < from {
+        return Err("analyze: --to is before --from".to_string());
+    }
+
+    Ok(Invocation::Analyze {
+        from,
+        to,
+        db: db.unwrap_or_else(|| PathBuf::from(DEFAULT_JOURNAL_PATH)),
     })
 }
 
@@ -325,6 +369,48 @@ mod tests {
         assert!(parse_args(&["export", "--to", "2000"]).is_err());
         assert!(parse_args(&["export", "--from", "1000"]).is_err());
         assert!(parse_args(&["export", "--from", "2000", "--to", "1000"]).is_err());
+    }
+
+    #[test]
+    fn analyze_takes_a_range_and_defaults_the_database() {
+        assert_eq!(
+            parse_args(&["analyze", "--from", "1000", "--to", "2000"]),
+            Ok(Invocation::Analyze {
+                from: Timestamp::from_millis(1000),
+                to: Timestamp::from_millis(2000),
+                db: PathBuf::from(DEFAULT_JOURNAL_PATH),
+            })
+        );
+    }
+
+    #[test]
+    fn analyze_requires_both_ends_and_an_ordered_range() {
+        assert!(parse_args(&["analyze", "--to", "2000"]).is_err());
+        assert!(parse_args(&["analyze", "--from", "1000"]).is_err());
+        assert!(parse_args(&["analyze", "--from", "2000", "--to", "1000"]).is_err());
+    }
+
+    /// `analyze` reads no configuration either — see the module doc comment.
+    #[test]
+    fn analyze_rejects_config() {
+        let err = parse_args(&[
+            "analyze",
+            "--from",
+            "1000",
+            "--to",
+            "2000",
+            "--config",
+            "/tmp/zendure.toml",
+        ])
+        .unwrap_err();
+        assert!(err.contains("--config"), "{err}");
+    }
+
+    /// `--out` belongs to `export`, which writes a fixture; `analyze` prints a
+    /// table, and silently accepting a path to write it to would be a lie.
+    #[test]
+    fn analyze_rejects_out() {
+        assert!(parse_args(&["analyze", "--from", "1000", "--to", "2000", "--out", "x"]).is_err());
     }
 
     #[test]

@@ -9,6 +9,7 @@
 use std::io::Write;
 use std::path::Path;
 
+use crate::analyze;
 use crate::config::Config;
 use crate::journal::read;
 use crate::replay::{self, Fixture};
@@ -46,6 +47,20 @@ pub fn export(
         // an ordinary thing to do with a tool whose default is stdout.
         None => write_stdout(&json)?,
     }
+    Ok(())
+}
+
+/// `zendure analyze` — the journal between two instants, as daily energy.
+/// Reads no configuration for the same reason `export` doesn't: the rows carry
+/// everything the arithmetic needs, so this runs against a copied database
+/// anywhere.
+pub fn analyze(
+    db: &Path,
+    from: Timestamp,
+    to: Timestamp,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let events = read::read_events_in_range(db, from, to)?;
+    write_stdout(&analyze::render(&analyze::daily(&events)))?;
     Ok(())
 }
 

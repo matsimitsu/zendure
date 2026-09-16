@@ -1,6 +1,6 @@
 //! Integration tests for offline subcommands.
 //!
-//! `export` and `replay` are documented in three places — README.md,
+//! `export`, `analyze` and `replay` are documented in three places — README.md,
 //! src/cli.rs, and src/commands.rs — as reading **no configuration at all**.
 //! This is what lets them run on a machine with no broker, no battery, and no
 //! `ZENDURE_IP` or `MQTT_HOST` — you can copy a database to your laptop and
@@ -123,5 +123,58 @@ fn replay_rejects_config_flag() {
     assert!(
         !output.status.success(),
         "replay --config should exit non-zero"
+    );
+}
+
+/// `analyze` is offline for the same reason `export` is: energy is integrated
+/// from rows that already happened, and nothing about how to reach a broker or
+/// a battery could change the answer. A missing database must therefore fail as
+/// a file error, never as a configuration one.
+#[test]
+fn analyze_fails_on_missing_db_with_file_error() {
+    let output = Command::new(offline_binary())
+        .arg("analyze")
+        .arg("--from")
+        .arg("0")
+        .arg("--to")
+        .arg("1")
+        .arg("--db")
+        .arg("/nonexistent/zendure.db")
+        .env_clear()
+        .output()
+        .expect("failed to run analyze");
+
+    assert!(
+        !output.status.success(),
+        "analyze on missing db should exit non-zero"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.to_lowercase().contains("config"),
+        "analyze should fail with a file error, not a configuration error: {}",
+        stderr
+    );
+}
+
+/// `analyze` rejects `--config` too. `Invocation::Analyze` carries no config
+/// field, so this is structural rather than a check someone has to remember.
+#[test]
+fn analyze_rejects_config_flag() {
+    let output = Command::new(offline_binary())
+        .arg("analyze")
+        .arg("--from")
+        .arg("0")
+        .arg("--to")
+        .arg("1")
+        .arg("--config")
+        .arg("/tmp/x.toml")
+        .env_clear()
+        .output()
+        .expect("failed to run analyze");
+
+    assert!(
+        !output.status.success(),
+        "analyze --config should exit non-zero"
     );
 }

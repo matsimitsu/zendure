@@ -34,19 +34,21 @@ anything:
 zendure [--config <path>] [--check]
 ```
 
-Two offline subcommands read the journal instead, and read **no configuration
+Three offline subcommands read the journal instead, and read **no configuration
 at all** — not even `--config`'s default path — so they work against a copied
 database on a machine with no broker and no battery:
 
 ```
-zendure export --from <when> --to <when> [--db <path>] [--out <file>]
-zendure replay <fixture> [--verify] [--set <knob>=<value>]...
+zendure export  --from <when> --to <when> [--db <path>] [--out <file>]
+zendure analyze --from <when> --to <when> [--db <path>]
+zendure replay  <fixture> [--verify] [--set <knob>=<value>]...
 ```
 
 `<when>` is unix milliseconds or RFC 3339. `--db` defaults to
 `/var/lib/zendure/journal.db` and does **not** read `[journal] path` from a
 config file — these subcommands read no configuration at all, so a deployment
-that moves the journal has to say `--db` too. See [Replay](#replay) below.
+that moves the journal has to say `--db` too. See [Analyze](#analyze) and
+[Replay](#replay) below.
 
 ## Configuration
 
@@ -262,6 +264,52 @@ Dropped records and failed writes are both counted and warned about (on the
 first and then at powers of two, so a wedged writer cannot flood the log), and
 summarised on shutdown. `RUST_LOG` overrides the default `zendure=info` filter
 outright, so `RUST_LOG=zendure=debug` shows the per-record detail.
+
+## Analyze
+
+The journal records power and never energy — `rte.rs` is the only thing that
+integrates, and it keeps a rolling 24 h window it never persists. `analyze`
+re-integrates a stretch of the journal into daily totals, which is how you ask
+whether a battery is short of capacity or short of power.
+
+```
+zendure analyze --from 2026-09-13T00:00:00Z --to 2026-09-17T00:00:00Z --db ./journal.db
+```
+
+```
+day           cover   import   export  unstored  charged  discharged   >cap      soc
+2026-09-14    100%     0.25     6.97      6.84     0.89        1.53   0.02   50-86%
+2026-09-15    100%     0.74     8.81      8.64     1.87        2.49   0.44   11-80%
+
+day            A imp    A exp    B imp    B exp    C imp    C exp
+2026-09-14     1.05     8.36     1.47     0.96     0.07     0.00
+2026-09-15     1.00    11.70     3.41     0.87     0.08     0.00
+```
+
+All kWh, bucketed by local calendar day. Two columns carry the argument:
+
+- **`unstored`** is export while the battery was *not charging* — surplus that
+  reached the grid because nothing took it. This is what more **capacity** would
+  have held. It is deliberately not "export while at max SoC": a full battery is
+  only one reason surplus escapes, and the question does not care which applied.
+- **`>cap`** is demand above the inverter's own reported discharge limit,
+  measured against the grid *underlying* the battery. This is what a second
+  **inverter** would buy, and nothing else does.
+
+**`cover` is not decoration.** The journal drops rows when its write queue is
+full, deletes them when retention prunes, and a restart leaves a hole the width
+of the outage. Intervals longer than 30 s are skipped rather than integrated
+across — a 1 Hz signal says nothing about an hour-long gap — so a day under 100%
+is short by whatever happened in the hole, and anything under 95% is called out
+below the tables.
+
+Figures that depend on the battery (`unstored`, `>cap`, `charged`, `discharged`)
+are absent rather than zero before the range's first `device_update`: with no
+poll yet there is no way to know whether the battery was taking the surplus, and
+reading "unknown" as "idle" would inflate exactly the number being asked for.
+Battery telemetry also arrives once per `poll_interval_secs` against the meter's
+1 Hz, so every battery figure is up to one poll stale — fine for energy over a
+day, wrong for anything about a single ramp.
 
 ## Replay
 
