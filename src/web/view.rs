@@ -185,7 +185,7 @@ fn panel_badge(mode: Option<ControlMode>) -> (&'static str, &'static str) {
 /// A zero-parameter placeholder: the EV card has no real integration, and a
 /// function that cannot read `DashboardState` cannot accidentally regress
 /// into pretending it does.
-pub fn ev_stat_card_placeholder() -> StatCardView {
+fn ev_stat_card_placeholder() -> StatCardView {
     StatCardView {
         variant: "ev",
         glyph: "⛽",

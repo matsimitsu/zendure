@@ -9,7 +9,7 @@ use crate::config::WebConfig;
 use super::routes::{self, AppState};
 use super::state::DashboardStateReceiver;
 
-pub type ServerHandle = tokio::task::JoinHandle<()>;
+pub(crate) type ServerHandle = tokio::task::JoinHandle<()>;
 
 /// Binds and serves the dashboard, or logs a warning and returns `None` if
 /// the port cannot be bound — a missing dashboard degrades the same way a

@@ -32,12 +32,12 @@ const SPARKLINE_CAPACITY: usize = 96;
 
 /// How many rows the decision log shows: seeded from the journal at startup
 /// and capped at this size from then on as new decisions arrive.
-pub const DECISION_LOG_CAPACITY: usize = 20;
+const DECISION_LOG_CAPACITY: usize = 20;
 
 /// A quantity a sparkline can plot: the bare scalar it normalises against.
 /// Implemented per role type rather than taken as `f64`, so a buffer of one
 /// quantity cannot be fed another (`RUST-2`).
-pub trait Plottable: Copy {
+pub(crate) trait Plottable: Copy {
     fn plot_value(self) -> f64;
 }
 
