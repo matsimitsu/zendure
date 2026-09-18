@@ -279,7 +279,7 @@ pub fn read_range(path: &Path, from: Timestamp, to: Timestamp) -> Result<Recordi
 
     let seed = seed_row
         .map(|(_, at, state_json, _)| {
-            decode(" the seed snapshot", &state_json).map(|state| Seed {
+            decode("the seed snapshot", &state_json).map(|state| Seed {
                 at: Timestamp::from_millis(at),
                 state,
             })
