@@ -44,25 +44,39 @@ crossed a boundary without anyone saying what the conversion meant.
 ## Project structure
 
 - `src/main.rs` — Entry point: arguments, logging, config
+- `src/cli.rs` — What the binary was asked to do: argument parsing only, no I/O
+- `src/commands.rs` — The offline subcommand handlers (`export`, `analyze`, `replay`, `check-config`), synchronous and device-free
 - `src/run.rs` — The coordinator loop and shutdown
-- `src/config.rs` — Environment variable configuration
+- `src/config.rs` — TOML configuration: parsed from `/etc/zendure/config.toml` (or `--config`), unknown keys warn instead of failing, `--check` parses and reports
+- `src/units.rs` — Physical quantities as newtypes: the units and roles the Types section above is about
 - `src/models.rs` — Wire types (MQTT, Zendure API) and control decisions
+- `src/world.rs` — What the controller knows right now, as a projection of the event log
 - `src/clock.rs` — Time context captured at the edge; the controller never reads a clock
 - `src/event.rs` — What the engine can react to
 - `src/engine.rs` — The event fold: `step(&Event) -> Step`
 - `src/controller.rs` — Control logic (charge/discharge/idle decisions)
+- `src/allocate.rs` — One objective decision turned into per-device commands: which box does it
 - `src/command.rs` — What gets sent to the device, split from the decision
+- `src/device.rs` — What a device is: rated limits and the capability traits an adapter implements
+- `src/registry.rs` — Every battery this process drives, as an enum, and the loop that reaches the right one
 - `src/battery.rs` — Battery state derived from device properties
 - `src/publish.rs` — The sink the decision path publishes through
 - `src/announce.rs` — What Home Assistant has been told, on this connection
+- `src/backpressure.rs` — Counting what had to be thrown away, without becoming the flood
+- `src/sync.rs` — Takes a poisoned lock rather than panicking through it
 - `src/mqtt/` — The broker: `publisher` (queue + task), `discovery` (wire
   format), `subscriber` (eventloop + meter feed)
+- `src/source/` — Where a meter reading comes from: one wire format per adapter (`shelly`, `synthetic`), out comes a `MeterObservation`
 - `src/zendure.rs` — Zendure REST API client
 - `src/journal/` — Append-only SQLite record of events, decisions and outcomes
 - `src/rte.rs` — Round-trip efficiency tracking
 - `src/prediction/` — Solar forecast: `Prediction` trait, `solcast` (real) and
   `simulated` backends, the daily poll budget. Dashboard-only, feeds nothing
   into `controller.rs`
+- `src/simulation.rs` — A virtual battery that integrates real power over real time, so the controller can run against no hardware
+- `src/replay.rs` — Decision diff: a recorded event stream re-folded through the engine, hermetic
+- `src/analyze.rs` — Integrating a recorded run into daily energy, offline
+- `src/fixtures.rs` — Test scenarios shared across modules
 - `src/web/` — Live dashboard: Axum routes, SSE fan-out, live-state cell, Maud view-models
 - `assets/scss/` — Dashboard component stylesheets (Grass), compiled by `build.rs` and served via `rust-embed`
 
