@@ -521,7 +521,13 @@ fn first_decision_after_mode_change_uses_75_percent() {
     );
     assert_eq!(d1.mode, ControlMode::Charge);
     assert_eq!(d1.power_watts, Setpoint::new(262));
-    assert!(d1.reason.contains("ramped"));
+    // The whole suffix, not just "ramped": the percentage is interpolated from
+    // RAMP_FACTOR, and this is the string the journal and the decision log keep.
+    assert!(
+        d1.reason.ends_with(" (ramped 75%)"),
+        "reason was {:?}",
+        d1.reason
+    );
 }
 
 #[test]

@@ -1,6 +1,6 @@
 //! Tests for `units.rs`, kept in their own file because the module is long.
 //!
-//! The bulk of these pin *wire formats*, not arithmetic: `mqtt.rs`,
+//! The bulk of these pin *wire formats*, not arithmetic: `mqtt/discovery.rs`,
 //! `zendure.rs`, `command.rs` and `models.rs` have no tests of their own, so
 //! the bytes that must not move are otherwise unguarded.
 
@@ -177,10 +177,25 @@ fn a_zeroed_cap_stops_everything() {
 }
 
 #[test]
+fn a_ramp_factor_displays_the_percentage_it_multiplies_by() {
+    // The journalled decision reason interpolates this, so the string and the
+    // arithmetic cannot name different percentages.
+    assert_eq!(RampFactor::new(75).to_string(), "75%");
+    assert_eq!(RampFactor::new(75).fraction(), 0.75);
+    assert_eq!(RampFactor::new(100).to_string(), "100%");
+}
+
+#[test]
 fn ramp_truncates_toward_zero() {
-    assert_eq!(Setpoint::new(1000).ramped(0.75), Setpoint::new(750));
-    assert_eq!(Setpoint::new(145).ramped(0.75), Setpoint::new(108)); // 108.75
-    assert_eq!(Setpoint::ZERO.ramped(0.75), Setpoint::ZERO);
+    assert_eq!(
+        Setpoint::new(1000).ramped(RampFactor::new(75)),
+        Setpoint::new(750)
+    );
+    assert_eq!(
+        Setpoint::new(145).ramped(RampFactor::new(75)),
+        Setpoint::new(108)
+    ); // 108.75
+    assert_eq!(Setpoint::ZERO.ramped(RampFactor::new(75)), Setpoint::ZERO);
 }
 
 #[test]

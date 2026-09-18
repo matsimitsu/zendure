@@ -365,8 +365,8 @@ impl Setpoint {
 
     /// Scale by the ramp factor applied on the first decision after a mode
     /// change. Truncates toward zero.
-    pub fn ramped(self, factor: f64) -> Self {
-        Setpoint((f64::from(self.0) * factor) as i32)
+    pub fn ramped(self, factor: RampFactor) -> Self {
+        Setpoint((f64::from(self.0) * factor.fraction()) as i32)
     }
 
     pub fn is_positive(self) -> bool {
@@ -375,6 +375,32 @@ impl Setpoint {
 
     pub fn get(self) -> i32 {
         self.0
+    }
+}
+
+/// How much of a target [`Setpoint`] to command on the first decision after a
+/// mode change, as a whole percent. `Display` writes the unit, so a journalled
+/// reason cannot name a percentage the arithmetic did not use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RampFactor(u32);
+
+impl fmt::Display for RampFactor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}%", self.0)
+    }
+}
+
+impl RampFactor {
+    /// `const fn`, so the one caller's `const` rejects a percentage over 100 at
+    /// compile time rather than clamping one into a running controller.
+    pub const fn new(percent: u32) -> Self {
+        assert!(percent <= 100, "a ramp factor cannot exceed 100%");
+        RampFactor(percent)
+    }
+
+    /// As a 0.0-1.0 multiplier, which is how a setpoint consumes it.
+    pub fn fraction(self) -> f64 {
+        f64::from(self.0) / 100.0
     }
 }
 

@@ -7,13 +7,16 @@ use crate::battery::BatteryState;
 use crate::clock::Clock;
 use crate::config::{Config, SessionConfig};
 use crate::models::{ControlDecision, ControlMode, CycleCounts};
-use crate::units::{Elapsed, GridPower, PowerMargin, Setpoint, Soc, SolarPower, Timestamp};
+use crate::units::{
+    Elapsed, GridPower, PowerMargin, RampFactor, Setpoint, Soc, SolarPower, Timestamp,
+};
 use crate::world::World;
 
-/// Fraction of the target commanded on the first decision after a mode change.
-/// Easing into a new direction rather than stepping straight to full power is a
-/// battery-safety measure, and the convention most BMS implementations follow.
-const RAMP_FACTOR: f64 = 0.75;
+/// How much of the target is commanded on the first decision after a mode
+/// change. Easing into a new direction rather than stepping straight to full
+/// power is a battery-safety measure, and the convention most BMS
+/// implementations follow.
+const RAMP_FACTOR: RampFactor = RampFactor::new(75);
 
 /// Mutable history, split from the config fields (which live in the journal's
 /// `sessions` row) so a decision can be replayed: hysteresis/cooldown history,
@@ -391,7 +394,6 @@ impl Controller {
             } else {
                 None
             };
-            // Ramp: 75% power on first decision after mode change
             if power.is_positive() {
                 (power.ramped(RAMP_FACTOR), true)
             } else {
@@ -434,7 +436,11 @@ fn build_reason(
     hour: u32,
     ramped: bool,
 ) -> String {
-    let ramp = if ramped { " (ramped 75%)" } else { "" };
+    let ramp = if ramped {
+        format!(" (ramped {RAMP_FACTOR})")
+    } else {
+        String::new()
+    };
     match mode {
         ControlMode::Charge => {
             format!(
