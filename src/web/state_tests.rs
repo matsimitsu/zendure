@@ -56,6 +56,25 @@ fn decision() -> ControlDecision {
     ControlDecision::test_sample()
 }
 
+/// A decision whose *command* differs from every other `watts`, while its
+/// reason and grid reading stay put — the axis the log collapses on.
+fn at_watts(watts: i32) -> ControlDecision {
+    ControlDecision {
+        power_watts: crate::units::Setpoint::new(watts),
+        ..ControlDecision::test_sample()
+    }
+}
+
+/// The same command as [`decision`], but with the live figures a quiet period
+/// moves under it: this is what must *not* push a new row.
+fn same_command_different_reason(reason: &str, grid: f64) -> ControlDecision {
+    ControlDecision {
+        reason: reason.to_string(),
+        grid_power: GridPower(grid),
+        ..ControlDecision::test_sample()
+    }
+}
+
 // --- Sparklines sample the meter, and only the meter ---------------------
 
 /// The poll timer and the MQTT failsafe both fire on their own schedules. A
@@ -160,7 +179,7 @@ fn the_decision_log_appends_only_real_decisions_and_stays_bounded() {
     assert!(state.last_decision.is_none());
 
     for i in 0..DECISION_LOG_CAPACITY + 5 {
-        let decision = decision();
+        let decision = at_watts(i as i32);
         state.meter_tick(
             &engine(),
             Some((&decision, at(i as i64))),
@@ -171,10 +190,141 @@ fn the_decision_log_appends_only_real_decisions_and_stays_bounded() {
 
     assert_eq!(state.recent_decisions.len(), DECISION_LOG_CAPACITY);
     assert_eq!(
-        state.recent_decisions.front().map(|(at, _)| *at),
+        state.recent_decisions.front().map(|entry| entry.first_at),
         Some(at(5))
     );
     assert!(state.last_decision.is_some());
+}
+
+/// A quiet period decides the same thing every 5 seconds. Those repeats must
+/// fold into one row rather than flushing everything interesting out of a
+/// 20-row log — and they fold on the *command*, even though the reason and
+/// the grid reading move under it.
+#[test]
+fn a_repeated_command_extends_the_newest_row_instead_of_pushing_another() {
+    let mut state = seeded();
+
+    state.failsafe_tick(
+        &engine(),
+        Some((&same_command_different_reason("grid: 150W", 150.5), at(1))),
+        at(1),
+    );
+    state.failsafe_tick(
+        &engine(),
+        Some((&same_command_different_reason("grid: 162W", 162.25), at(6))),
+        at(6),
+    );
+    state.failsafe_tick(
+        &engine(),
+        Some((&same_command_different_reason("grid: 171W", 171.75), at(11))),
+        at(11),
+    );
+
+    assert_eq!(state.recent_decisions.len(), 1);
+    let row = state.recent_decisions.back().unwrap();
+    assert_eq!(row.repeats, 3);
+    assert_eq!(row.first_at, at(1));
+    assert_eq!(row.last_at, at(11));
+    // The row speaks for the moment it claims to: the newest reason, not the
+    // one the run opened with.
+    assert_eq!(row.decision.reason, "grid: 171W");
+}
+
+/// A row collapses only what it commands. A different setpoint is a different
+/// thing to have done, so it earns its own row.
+#[test]
+fn a_different_command_pushes_a_new_row() {
+    let mut state = seeded();
+
+    state.failsafe_tick(&engine(), Some((&at_watts(145), at(1))), at(1));
+    state.failsafe_tick(&engine(), Some((&at_watts(145), at(6))), at(6));
+    state.failsafe_tick(&engine(), Some((&at_watts(900), at(11))), at(11));
+
+    assert_eq!(state.recent_decisions.len(), 2);
+    assert_eq!(state.recent_decisions.front().unwrap().repeats, 2);
+    let newest = state.recent_decisions.back().unwrap();
+    assert_eq!(newest.repeats, 1);
+    assert_eq!(newest.first_at, at(11));
+    assert_eq!(newest.last_at, at(11));
+}
+
+/// The badge renders from `last_decision`, so a collapsed decision still has
+/// to reach it — otherwise a quiet stretch would leave the badge showing the
+/// figures of whenever the run started.
+#[test]
+fn a_collapsed_decision_still_updates_the_badge() {
+    let mut state = seeded();
+
+    state.failsafe_tick(
+        &engine(),
+        Some((&same_command_different_reason("first", 150.5), at(1))),
+        at(1),
+    );
+    state.failsafe_tick(
+        &engine(),
+        Some((&same_command_different_reason("newest", 162.25), at(6))),
+        at(6),
+    );
+
+    assert_eq!(state.recent_decisions.len(), 1);
+    assert_eq!(
+        state.last_decision.as_ref().map(|d| d.reason.as_str()),
+        Some("newest")
+    );
+    assert_eq!(
+        state.last_decision.as_ref().map(|d| d.grid_power),
+        Some(GridPower(162.25))
+    );
+}
+
+/// The seeded rows arrive from the journal uncollapsed, so they must go
+/// through the same fold — otherwise a page load right after a restart would
+/// disagree with the same process ten minutes later.
+#[test]
+fn the_seeded_log_collapses_the_same_way_a_running_one_does() {
+    let history = vec![
+        (at(1), at_watts(145)),
+        (at(6), at_watts(145)),
+        (at(11), at_watts(145)),
+        (at(16), at_watts(900)),
+    ];
+    let state = DashboardState::seed(&engine(), history, ActualSolarHistory::default(), at(16));
+
+    assert_eq!(state.recent_decisions.len(), 2);
+    let first = state.recent_decisions.front().unwrap();
+    assert_eq!(first.repeats, 3);
+    assert_eq!(first.first_at, at(1));
+    assert_eq!(first.last_at, at(11));
+    // Journalled rows still cannot speak for what this process is doing.
+    assert!(state.last_decision.is_none());
+}
+
+/// Collapsing must not be a way around the cap: a run of distinct commands
+/// longer than the log still drops its oldest rows.
+#[test]
+fn collapsed_runs_still_obey_the_capacity_cap() {
+    let mut state = seeded();
+
+    for i in 0..DECISION_LOG_CAPACITY + 5 {
+        // Two decisions per command, so every row is a collapsed run.
+        for repeat in 0..2 {
+            let decision = at_watts(i as i32);
+            let at = at((i * 2 + repeat) as i64);
+            state.failsafe_tick(&engine(), Some((&decision, at)), at);
+        }
+    }
+
+    assert_eq!(state.recent_decisions.len(), DECISION_LOG_CAPACITY);
+    assert!(
+        state
+            .recent_decisions
+            .iter()
+            .all(|entry| entry.repeats == 2)
+    );
+    assert_eq!(
+        state.recent_decisions.front().map(|entry| entry.first_at),
+        Some(at(10))
+    );
 }
 
 /// The failsafe's forced idle is a decision this process made, so the badge

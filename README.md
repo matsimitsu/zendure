@@ -453,6 +453,12 @@ seeded and reads `Awaiting decision` until this process makes its first
 decision, since a journalled row describes what the battery *was* doing, not
 what it is doing now.
 
+Consecutive decisions that command the same thing — the same mode and the same
+setpoint — collapse into one row, marked `×12` with the run's start time behind
+it. A quiet Idle stretch decides the same thing every few seconds, and without
+this it would fill all twenty rows in under two minutes and push out everything
+worth reading. The mode badge still follows every decision, collapsed or not.
+
 The EV card is a static placeholder: it has no real data source in this
 controller yet, and renders fixed sample content rather than pretending to
 be live.

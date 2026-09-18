@@ -127,6 +127,41 @@ fn the_mode_badge_awaits_a_decision_rather_than_inheriting_a_journalled_one() {
     // of seeding the log.
     assert_eq!(view.decision_log.len(), 1);
     assert_eq!(view.decision_log[0].mode_label, "DISCHARGE");
+    assert!(view.decision_log[0].repeat.is_none());
+}
+
+/// A collapsed run has to say so on the page: without the marker the log
+/// would look like a single decision and the minutes it covered would vanish.
+#[test]
+fn a_collapsed_run_renders_its_repeat_count_and_the_span_it_covers() {
+    let mut state = state(vec![]);
+    for secs in [-10, -5, 0] {
+        state.failsafe_tick(
+            &engine_state(BatteryPower::ZERO),
+            Some((&decision(ControlMode::Idle, "nothing to do"), at(secs))),
+            at(secs),
+        );
+    }
+
+    let view = dashboard_view(&state, tz());
+    assert_eq!(view.decision_log.len(), 1);
+    let repeat = view.decision_log[0]
+        .repeat
+        .as_ref()
+        .expect("three identical commands collapsed into one row");
+    assert_eq!(repeat.label, "×3");
+    assert!(
+        repeat.span.starts_with("3 identical decisions since "),
+        "unexpected span text: {}",
+        repeat.span
+    );
+
+    let html = layout::decision_log_inner(&view).into_string();
+    assert!(
+        html.contains(r#"<span class="decision-log__repeat" title="#),
+        "the repeat marker never reached the markup: {html}"
+    );
+    assert!(html.contains("×3"));
 }
 
 #[test]

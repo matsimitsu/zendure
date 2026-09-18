@@ -19,7 +19,12 @@ pub fn render(rows: &[DecisionLogRowView]) -> Markup {
                             span class=(format!("decision-log__badge decision-log__badge--{}", row.badge_variant)) {
                                 (row.mode_label)
                             }
-                            span class="decision-log__reason" { (row.reason) }
+                            span class="decision-log__reason" {
+                                span class="decision-log__reason-text" { (row.reason) }
+                                @if let Some(repeat) = &row.repeat {
+                                    span class="decision-log__repeat" title=(repeat.span) { (repeat.label) }
+                                }
+                            }
                             span class="decision-log__power" { (row.power) }
                         }
                     }

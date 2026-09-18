@@ -60,6 +60,18 @@ pub struct DecisionLogRowView {
     pub badge_variant: &'static str,
     pub reason: String,
     pub power: String,
+    /// Present only when this row collapses a run of identical commands —
+    /// otherwise the row is one decision and there is nothing to mark.
+    pub repeat: Option<DecisionRepeatView>,
+}
+
+/// The marker a collapsed run wears, so time passing under an unchanged
+/// command is visible rather than silently hidden.
+pub struct DecisionRepeatView {
+    /// What the row shows: `×12`.
+    pub label: String,
+    /// The `title` behind it: how many decisions, and when the run started.
+    pub span: String,
 }
 
 pub struct TopBarView {
@@ -447,17 +459,28 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
         .recent_decisions
         .iter()
         .rev()
-        .map(|(at, decision)| {
-            let badge = badge(decision.mode);
+        .map(|entry| {
+            let badge = badge(entry.decision.mode);
             DecisionLogRowView {
-                time: format_log_time(*at, state.as_of, timezone),
+                time: format_log_time(entry.last_at, state.as_of, timezone),
                 mode_label: badge.log_label,
                 badge_variant: badge.variant,
-                reason: decision.reason.clone(),
+                reason: entry.decision.reason.clone(),
                 power: format!(
                     "{} W",
-                    format_watts(Watts(decision.power_watts.get()), SignStyle::Magnitude)
+                    format_watts(
+                        Watts(entry.decision.power_watts.get()),
+                        SignStyle::Magnitude
+                    )
                 ),
+                repeat: (entry.repeats > 1).then(|| DecisionRepeatView {
+                    label: format!("×{}", entry.repeats),
+                    span: format!(
+                        "{} identical decisions since {}",
+                        entry.repeats,
+                        format_log_time(entry.first_at, state.as_of, timezone)
+                    ),
+                }),
             }
         })
         .collect();

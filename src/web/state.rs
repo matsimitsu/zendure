@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use chrono_tz::Tz;
 
 use crate::clock::Clock;
+use crate::command::Command;
 use crate::engine::EngineState;
 use crate::journal::read::read_recent_decisions;
 use crate::models::ControlDecision;
@@ -33,6 +34,26 @@ const SPARKLINE_CAPACITY: usize = 96;
 /// How many rows the decision log shows: seeded from the journal at startup
 /// and capped at this size from then on as new decisions arrive.
 const DECISION_LOG_CAPACITY: usize = 20;
+
+/// One row of the decision log: a run of consecutive decisions that all
+/// commanded the same thing, collapsed into a single entry.
+///
+/// Named rather than a tuple because `first_at` and `last_at` are adjacent
+/// `Timestamp`s and a swap would be invisible (`RUST-2`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecisionLogEntry {
+    /// When the run's first decision landed — the start of the span this row
+    /// covers.
+    pub first_at: Timestamp,
+    /// When the run's newest decision landed.
+    pub last_at: Timestamp,
+    /// How many decisions the run holds. `1` for a row that has not collapsed
+    /// anything.
+    pub repeats: u32,
+    /// The run's newest decision. Its command is the one every decision in the
+    /// run shares; its `reason` and `grid_power` are the freshest of them.
+    pub decision: ControlDecision,
+}
 
 /// A quantity a sparkline can plot: the bare scalar it normalises against.
 /// Implemented per role type rather than taken as `f64`, so a buffer of one
@@ -198,11 +219,12 @@ pub struct DashboardState {
     /// journal.
     pub last_decision: Option<ControlDecision>,
     /// The decision log, oldest first, capped at [`DECISION_LOG_CAPACITY`].
-    /// Seeded from the journal once at startup; every later decision pushes
-    /// onto the end and drops the oldest row once full — the same rows a
-    /// page load and every SSE fragment render from, so the two can never
-    /// disagree about what the log currently shows.
-    pub recent_decisions: VecDeque<(Timestamp, ControlDecision)>,
+    /// Seeded from the journal once at startup; every later decision either
+    /// collapses into the newest row or pushes onto the end, dropping the
+    /// oldest row once full — the same rows a page load and every SSE
+    /// fragment render from, so the two can never disagree about what the log
+    /// currently shows.
+    pub recent_decisions: VecDeque<DecisionLogEntry>,
     pub rte_percent: Option<Percent>,
     pub usable_energy: KiloWattHours,
     pub pack_capacity: KiloWattHours,
@@ -222,19 +244,22 @@ impl DashboardState {
     ///
     /// `history` is journalled rows, bounded by neither session nor age, so
     /// it cannot speak for what the battery is doing now — `last_decision`
-    /// stays `None` until this process decides. `actual_solar` is likewise
-    /// seeded from the journal (see `crate::journal::read::read_meter_solar_since`)
-    /// so a restart doesn't blank today's actual-production line.
+    /// stays `None` until this process decides. It arrives uncollapsed and is
+    /// folded through [`record_decision`](Self::record_decision), so a page
+    /// load and a long-running process show the same runs. `actual_solar` is
+    /// likewise seeded from the journal (see
+    /// `crate::journal::read::read_meter_solar_since`) so a restart doesn't
+    /// blank today's actual-production line.
     pub fn seed(
         engine: &EngineState,
         history: Vec<(Timestamp, ControlDecision)>,
         actual_solar: ActualSolarHistory,
         as_of: Timestamp,
     ) -> Self {
-        DashboardState {
+        let mut state = DashboardState {
             engine: engine.clone(),
             last_decision: None,
-            recent_decisions: history.into(),
+            recent_decisions: VecDeque::new(),
             rte_percent: None,
             usable_energy: KiloWattHours::ZERO,
             pack_capacity: KiloWattHours::ZERO,
@@ -242,7 +267,11 @@ impl DashboardState {
             actual_solar,
             forecast: ForecastSnapshot::default(),
             as_of,
+        };
+        for (at, decision) in history {
+            state.record_decision(&decision, at);
         }
+        state
     }
 
     /// Seeds the telemetry panel from the startup poll, so the first page
@@ -315,13 +344,42 @@ impl DashboardState {
     ) {
         self.engine = engine.clone();
         if let Some((decision, at)) = decision {
-            if self.recent_decisions.len() == DECISION_LOG_CAPACITY {
-                self.recent_decisions.pop_front();
-            }
-            self.recent_decisions.push_back((at, decision.clone()));
+            self.record_decision(decision, at);
             self.last_decision = Some(decision.clone());
         }
         self.as_of = as_of;
+    }
+
+    /// Folds one decision into the log, extending the newest row when it
+    /// commands the same thing and pushing a new row otherwise.
+    ///
+    /// Equality is the [`Command`] — mode and setpoint — and not the whole
+    /// decision, because `reason` interpolates the live grid reading and
+    /// `grid_power` is that reading: both move nearly every tick, so
+    /// whole-struct equality would never fire and a quiet Idle stretch would
+    /// still flush every interesting row out of a 20-row log.
+    ///
+    /// The row keeps the *newest* decision of the run, so its reason and grid
+    /// figure describe the moment the log claims to show.
+    fn record_decision(&mut self, decision: &ControlDecision, at: Timestamp) {
+        if let Some(newest) = self.recent_decisions.back_mut()
+            && Command::from(&newest.decision) == Command::from(decision)
+        {
+            newest.last_at = at;
+            newest.repeats += 1;
+            newest.decision = decision.clone();
+            return;
+        }
+
+        if self.recent_decisions.len() == DECISION_LOG_CAPACITY {
+            self.recent_decisions.pop_front();
+        }
+        self.recent_decisions.push_back(DecisionLogEntry {
+            first_at: at,
+            last_at: at,
+            repeats: 1,
+            decision: decision.clone(),
+        });
     }
 }
 
