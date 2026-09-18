@@ -12,13 +12,14 @@ fn at(y: i32, m: u32, d: u32, hour: u32, minute: u32) -> LocalNow {
     }
 }
 
-fn tracker() -> ForecastTracker {
+fn tracker() -> (tempfile::TempDir, ForecastTracker) {
     let dir = tempfile::tempdir().unwrap();
-    ForecastTracker::new(
+    let tracker = ForecastTracker::new(
         dir.path().join("forecast.json"),
         default_poll_times().to_vec(),
         chrono_tz::UTC,
-    )
+    );
+    (dir, tracker)
 }
 
 fn point(ms: i64, watts: f64) -> crate::units::SolarForecastPoint {
@@ -32,13 +33,13 @@ fn point(ms: i64, watts: f64) -> crate::units::SolarForecastPoint {
 
 #[test]
 fn nothing_is_due_before_the_first_anchor() {
-    let t = tracker();
+    let (_dir, t) = tracker();
     assert_eq!(t.next_due(&at(2026, 1, 1, 5, 59)), None);
 }
 
 #[test]
 fn the_first_anchor_is_due_once_its_time_has_passed() {
-    let t = tracker();
+    let (_dir, t) = tracker();
     assert_eq!(
         t.next_due(&at(2026, 1, 1, 6, 0)),
         Some(TimeOfDay::new(6, 0).unwrap())
@@ -47,7 +48,7 @@ fn the_first_anchor_is_due_once_its_time_has_passed() {
 
 #[test]
 fn a_used_anchor_is_not_offered_again_the_same_day() {
-    let mut t = tracker();
+    let (_dir, mut t) = tracker();
     let now = at(2026, 1, 1, 6, 0);
     t.mark_used(&now, TimeOfDay::new(6, 0).unwrap());
     assert_eq!(t.next_due(&now), None);
@@ -79,7 +80,7 @@ fn a_restart_mid_day_skips_anchors_already_fired() {
 
 #[test]
 fn once_every_anchor_is_used_nothing_is_due_for_the_rest_of_the_day() {
-    let mut t = tracker();
+    let (_dir, mut t) = tracker();
     let evening = at(2026, 1, 1, 23, 0);
     for slot in default_poll_times() {
         t.mark_used(&evening, slot);
@@ -91,7 +92,7 @@ fn once_every_anchor_is_used_nothing_is_due_for_the_rest_of_the_day() {
 /// yesterday's anchors — `next_due`/`mark_used` both key off `now.date`.
 #[test]
 fn a_new_day_treats_the_budget_as_fresh() {
-    let mut t = tracker();
+    let (_dir, mut t) = tracker();
     let yesterday = at(2026, 1, 1, 23, 0);
     for slot in default_poll_times() {
         t.mark_used(&yesterday, slot);
@@ -111,7 +112,7 @@ fn a_new_day_treats_the_budget_as_fresh() {
 /// they are never offered later in the day either.
 #[test]
 fn a_catch_up_after_downtime_collapses_into_a_single_fetch() {
-    let mut t = tracker();
+    let (_dir, mut t) = tracker();
     let now = at(2026, 1, 1, 13, 0); // past anchors 1-3 (06:00, 09:30, 12:30)
 
     let due = t.next_due(&now);
@@ -200,7 +201,7 @@ fn a_corrupt_state_file_is_handled() {
 /// cached bar for that hour down with it.
 #[test]
 fn a_second_fetch_keeps_a_timestamp_the_new_fetch_no_longer_covers() {
-    let mut t = tracker();
+    let (_dir, mut t) = tracker();
     let first_at = Timestamp::from_millis(1_700_000_000_000); // an arbitrary "now"
     t.set_forecast(vec![point(1_700_000_000_000, 500.0)], first_at);
 
@@ -220,7 +221,7 @@ fn a_second_fetch_keeps_a_timestamp_the_new_fetch_no_longer_covers() {
 /// A timestamp both fetches share gets the fresh estimate, not the stale one.
 #[test]
 fn a_second_fetch_overwrites_a_shared_timestamp_with_fresh_data() {
-    let mut t = tracker();
+    let (_dir, mut t) = tracker();
     let at_ms = 1_700_000_000_000;
     t.set_forecast(vec![point(at_ms, 500.0)], Timestamp::from_millis(at_ms));
     t.set_forecast(vec![point(at_ms, 900.0)], Timestamp::from_millis(at_ms));
@@ -235,7 +236,7 @@ fn a_second_fetch_overwrites_a_shared_timestamp_with_fresh_data() {
 #[test]
 fn a_fetch_on_a_new_day_prunes_points_from_before_today() {
     use chrono::TimeZone;
-    let mut t = tracker();
+    let (_dir, mut t) = tracker();
 
     let yesterday_evening = chrono_tz::UTC
         .with_ymd_and_hms(2026, 1, 1, 20, 0, 0)
