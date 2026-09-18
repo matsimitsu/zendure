@@ -8,12 +8,6 @@
 //! discovery, the journal, the RTE state file) is unchanged. Casts live only in named
 //! conversions here, never in the decision path.
 
-// Several accessors here are exercised only by the test modules and the
-// wire-format guards, which the non-test build doesn't compile — the same
-// situation `Config` and the wire DTOs in `models.rs` already carry this
-// attribute for. Every item below has a call site; none is speculative API.
-#![allow(dead_code)]
-
 use std::fmt;
 use std::ops::{Add, Neg, Sub};
 use std::time::Duration;
@@ -320,6 +314,9 @@ pub struct PowerCap(u32);
 forward_display!(PowerCap, u32);
 
 impl PowerCap {
+    /// Only tests assert against a zeroed cap; the decision path builds them
+    /// from device limits.
+    #[cfg(test)]
     pub const ZERO: PowerCap = PowerCap(0);
 
     pub const fn new(watts: u32) -> Self {
@@ -500,6 +497,9 @@ impl Efficiency {
         self.0 / 100.0
     }
 
+    /// The raw percent, read back only by the clamping tests. Production goes
+    /// through [`Efficiency::fraction`].
+    #[cfg(test)]
     pub fn get(self) -> f64 {
         self.0
     }
@@ -694,6 +694,9 @@ impl RetentionDays {
         Ok(RetentionDays(days.min(Self::MAX_DAYS)))
     }
 
+    /// The clamped day count, read only by the constructor's tests. `prune`
+    /// asks for a [`Timestamp`] via [`RetentionDays::cutoff`].
+    #[cfg(test)]
     pub fn days(self) -> i64 {
         self.0
     }
