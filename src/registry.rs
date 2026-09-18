@@ -164,9 +164,9 @@ fn unreadable(id: &DeviceId) -> PollError {
 }
 
 /// Every battery this process drives, keyed by the id its directives carry.
-/// A `BTreeMap`, not a `Vec`: `batteries()`/`primary()` need the stable,
-/// deterministic order the journal replay and `allocate` rely on, and a
-/// lookup by `DeviceId` should be real, not a linear scan.
+/// A `BTreeMap`, not a `Vec`: `primary()` needs the stable, deterministic
+/// order the journal replay and `allocate` rely on, and a lookup by
+/// `DeviceId` should be real, not a linear scan.
 pub struct Devices {
     batteries: BTreeMap<DeviceId, Battery>,
 }
@@ -190,15 +190,6 @@ impl Devices {
     /// outcome rather than a panic or a silent no-op.
     pub fn battery(&self, id: &DeviceId) -> Option<&Battery> {
         self.batteries.get(id)
-    }
-
-    /// Every registered battery, in id order. Nothing calls this yet — `allocate`
-    /// still walks `World` to decide which devices get a directive — but a
-    /// `Devices` with no way to iterate every device it holds would not be a
-    /// registry.
-    #[allow(dead_code)]
-    pub fn batteries(&self) -> impl Iterator<Item = (&DeviceId, &Battery)> {
-        self.batteries.iter()
     }
 
     /// The lowest id, mirroring `World::battery` so the registry and world agree
