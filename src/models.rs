@@ -180,7 +180,6 @@ pub struct PackData {
 }
 
 /// Request body for POST /properties/write.
-#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct ZendureWriteRequest {
     /// Device serial number
@@ -192,7 +191,6 @@ pub struct ZendureWriteRequest {
 // --- Control decision ---
 
 /// Battery storage mode: Flash saves ~19W idle power but requires a 5s wake delay.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum StorageMode {
     /// smartMode: 1 — active, ready for charge/discharge commands

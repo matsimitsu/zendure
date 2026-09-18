@@ -13,7 +13,6 @@ use crate::sync::guard;
 use crate::units::{DeciKelvin, PackTemperature, Soc, WattHours, Watts};
 use crate::world::DeviceId;
 
-#[allow(dead_code)]
 pub struct ZendureClient {
     http: reqwest::Client,
     base_url: String,
@@ -83,7 +82,6 @@ impl ZendureClient {
     /// Ensure the device is in RAM mode (smartMode: 1) before sending commands.
     /// If currently in Flash mode, sends the wake command and waits 5 seconds
     /// for the device to transition.
-    #[allow(dead_code)]
     pub async fn ensure_ram_mode(&self) -> Result<(), reqwest::Error> {
         {
             let mode = guard(&self.storage_mode);
@@ -99,7 +97,6 @@ impl ZendureClient {
     }
 
     /// Update the tracked storage mode after an external write.
-    #[allow(dead_code)]
     pub fn set_storage_mode(&self, mode: StorageMode) {
         *guard(&self.storage_mode) = mode;
     }
@@ -171,7 +168,6 @@ impl ZendureClient {
         changed
     }
 
-    #[allow(dead_code)]
     pub async fn write_properties(
         &self,
         properties: serde_json::Value,
