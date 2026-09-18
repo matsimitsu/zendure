@@ -258,11 +258,9 @@ fn format_log_time(at: Timestamp, now: Timestamp, timezone: chrono_tz::Tz) -> St
 
 // --- Forecast panel: a shared-scale bar+line chart --------------------------
 
-/// The panel's fixed `1000x110` viewBox geometry — kept as named constants
-/// rather than literals scattered through the functions below, since the bar
-/// and line builders both have to agree on it.
-const FORECAST_CHART_WIDTH: f64 = 1000.0;
-const FORECAST_CHART_BASELINE: f64 = 108.0;
+/// The panel's viewBox geometry, shared so the bar and line builders agree.
+pub(super) const FORECAST_CHART_WIDTH: f64 = 1000.0;
+pub(super) const FORECAST_CHART_BASELINE: f64 = 108.0;
 const FORECAST_CHART_TOP_MARGIN: f64 = 4.0;
 
 /// Buckets a forecast series into today's 48 local half-hours (Solcast's own

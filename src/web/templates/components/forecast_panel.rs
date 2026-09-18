@@ -1,11 +1,11 @@
 use maud::{Markup, html};
 
-use crate::web::view::ForecastPanelView;
+use crate::web::view::{FORECAST_CHART_BASELINE, FORECAST_CHART_WIDTH, ForecastPanelView};
 
 /// The predicted-vs-actual solar chart: bars for the forecast, a line for
 /// today's actual measured production over whichever hours have elapsed.
 pub fn render(view: &ForecastPanelView) -> Markup {
-    let bar_width = 1000.0 / view.bar_heights.len() as f64;
+    let bar_width = FORECAST_CHART_WIDTH / view.bar_heights.len() as f64;
 
     html! {
         div class="forecast-panel" {
@@ -19,10 +19,12 @@ pub fn render(view: &ForecastPanelView) -> Markup {
             @if view.has_data {
                 div class="forecast-panel__chart-label" { "Forecast (bars) vs. actual (line), in watts" }
 
-                svg class="forecast-panel__chart" viewBox="0 0 1000 110" {
+                // Height stays a literal here because `forecast_panel.scss`
+                // pins the same 110px on `&__chart`.
+                svg class="forecast-panel__chart" viewBox=(format!("0 0 {FORECAST_CHART_WIDTH:.0} 110")) {
                     @for (hour, &height) in view.bar_heights.iter().enumerate() {
                         @let x = hour as f64 * bar_width;
-                        @let y = 108.0 - height;
+                        @let y = FORECAST_CHART_BASELINE - height;
                         rect class="forecast-panel__bar" x=(format!("{x:.1}")) y=(format!("{y:.1}")) width=(format!("{:.1}", bar_width - 1.0)) height=(format!("{height:.1}")) {}
                     }
                     path class="forecast-panel__line" d=(view.line_path) fill="none" {}
