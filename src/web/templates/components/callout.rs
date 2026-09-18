@@ -3,7 +3,7 @@ use maud::{Markup, html};
 /// A static teaser banner — copy only, no functionality in this build.
 pub fn render() -> Markup {
     html! {
-        div class="callout callout--info" {
+        div class="callout" {
             span class="callout__icon" { "ⓘ" }
             div class="callout__body" {
                 div class="callout__title" { "Goal-based scheduling is coming" }
