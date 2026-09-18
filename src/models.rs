@@ -190,12 +190,16 @@ pub struct ZendureWriteRequest {
 
 // --- Control decision ---
 
-/// Battery storage mode: Flash saves ~19W idle power but requires a 5s wake delay.
+/// Where a written property lands: `Flash` (smartMode 0) commits it to the
+/// device's flash, so Zendure recommends `Ram` (1) for anything written often.
+/// Flash is entered on standby because some units otherwise never enter it and
+/// keep drawing ~20 W; leaving it costs a 5s wake delay.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum StorageMode {
-    /// smartMode: 1 — active, ready for charge/discharge commands
+    /// smartMode: 1 — active, and writes stay in RAM: the mode Zendure
+    /// recommends for frequent configuration changes
     Ram,
-    /// smartMode: 0 — low-power standby
+    /// smartMode: 0 — standby, and every write is committed to flash
     Flash,
 }
 
