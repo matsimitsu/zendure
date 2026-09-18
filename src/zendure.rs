@@ -1,6 +1,6 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::{LazyLock, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::battery::BatteryState;
 use crate::command::Command;
@@ -33,6 +33,7 @@ pub struct ZendureClient {
     /// one that would change nothing costs no write.
     last_input_limit: Mutex<Option<Setpoint>>,
     last_output_limit: Mutex<Option<Setpoint>>,
+    flash_budget: Mutex<FlashWriteBudget>,
 }
 
 /// What the device is believed to be holding: the tracked state the write
@@ -61,12 +62,107 @@ impl DeviceState {
 /// wasteful. Suppression is on the tracked *device state*, never on the command
 /// repeating: charge and discharge carry a fresh setpoint every tick, write in
 /// RAM, and always go out.
-fn needs_write(command: &Command, state: DeviceState) -> bool {
+fn needs_write(command: &Command, state: DeviceState, can_enter_flash: bool) -> bool {
     match *command {
         Command::SetCharge(_) | Command::SetDischarge(_) => true,
         Command::SetIdle => !state.is_zeroed(),
-        Command::SetStandby => state.storage_mode != StorageMode::Flash || !state.is_zeroed(),
+        // Out of budget, standby has nothing left to say that idle has not
+        // already said: the caps are zero and flash is off the table until the
+        // window rolls. The tracked mode stays honestly `Ram`, so the wake path
+        // still sees the device as it is.
+        Command::SetStandby => {
+            (can_enter_flash && state.storage_mode != StorageMode::Flash) || !state.is_zeroed()
+        }
     }
+}
+
+/// How many flash-committed writes this adapter will spend on the device in any
+/// rolling 24 hours.
+///
+/// One standby round trip costs two: the `smartMode: 0` that enters flash mode,
+/// and the `smartMode: 1` that leaves it, which is issued while the device is
+/// still committing every write to flash. Community-cited endurance for this
+/// part is ~100,000 cycles, so 50 writes/day is 25 standby cycles/day and
+/// 100_000 / 50 / 365 ≈ 5.5 years even assuming no wear-levelling whatsoever.
+/// Normal operation spends well under 20 a day, so this should never bind; what
+/// it is here for is a pathological oscillation, which `cycle_warn_threshold`
+/// alone tolerates up to ~200 mode transitions a day of.
+const FLASH_WRITE_BUDGET: usize = 50;
+
+/// The window [`FLASH_WRITE_BUDGET`] is counted over. Rolling rather than
+/// calendar: the controller's daily counters already reset at midnight, and a
+/// burst either side of that boundary would spend two budgets in minutes.
+const FLASH_WRITE_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// A rolling-window count of the writes the device commits to its flash, so an
+/// oscillation the control loop is happy to keep deciding cannot wear the part
+/// out.
+///
+/// Every method takes `now` rather than reading a clock, which keeps the window
+/// testable without sleeping. `Instant` is the right clock here because it is
+/// monotonic and this is the I/O adapter — the decision path still gets its time
+/// from `Clock`, and `BatteryController::apply` is unchanged.
+#[derive(Debug, Default)]
+struct FlashWriteBudget {
+    spent: VecDeque<Instant>,
+    /// Whether this binding has been reported. Cleared when the window rolls, so
+    /// each exhaustion costs one log line rather than one per decision interval.
+    reported: bool,
+}
+
+impl FlashWriteBudget {
+    /// Drop everything that has aged out of the window ending at `now`.
+    fn prune(&mut self, now: Instant) {
+        while self
+            .spent
+            .front()
+            .is_some_and(|&oldest| now.saturating_duration_since(oldest) >= FLASH_WRITE_WINDOW)
+        {
+            self.spent.pop_front();
+        }
+        if self.spent.len() < FLASH_WRITE_BUDGET {
+            self.reported = false;
+        }
+    }
+
+    /// Whether one more flash-committed write fits in the window ending at `now`.
+    fn has_headroom(&mut self, now: Instant) -> bool {
+        self.prune(now);
+        self.spent.len() < FLASH_WRITE_BUDGET
+    }
+
+    /// Charge one flash-committed write to the window. Recorded even when it put
+    /// the count over budget: [`ensure_ram_mode`](ZendureClient::ensure_ram_mode)
+    /// is never refused, so the count must be free to exceed what it permits.
+    fn spend(&mut self, now: Instant) {
+        self.prune(now);
+        self.spent.push_back(now);
+    }
+}
+
+/// The properties a standby write carries. Without `enters_flash` — the budget
+/// is spent — the caps are still zeroed, which costs nothing in RAM, and only
+/// the `smartMode: 0` that wears the part is left out.
+fn standby_properties(enters_flash: bool) -> serde_json::Value {
+    let mut properties = serde_json::json!({
+        "inputLimit": 0,
+        "outputLimit": 0,
+    });
+    if enters_flash {
+        properties["smartMode"] = serde_json::json!(0);
+    }
+    properties
+}
+
+/// Whether a write about to be issued will be committed to the device's flash:
+/// one sent while it is already in flash mode, or the `smartMode: 0` that puts
+/// it there.
+fn commits_to_flash(properties: &serde_json::Value, mode: StorageMode) -> bool {
+    mode == StorageMode::Flash
+        || properties
+            .get("smartMode")
+            .and_then(serde_json::Value::as_u64)
+            == Some(0)
 }
 
 impl ZendureClient {
@@ -89,6 +185,7 @@ impl ZendureClient {
             last_ac_mode: Mutex::new(None),
             last_input_limit: Mutex::new(None),
             last_output_limit: Mutex::new(None),
+            flash_budget: Mutex::new(FlashWriteBudget::default()),
         }
     }
 
@@ -123,6 +220,12 @@ impl ZendureClient {
     /// Ensure the device is in RAM mode (smartMode: 1) before sending commands.
     /// If currently in Flash mode, sends the wake command and waits 5 seconds
     /// for the device to transition.
+    ///
+    /// Never budget-blocked, though the wake is itself flash-committed (it is
+    /// issued while the device is still in flash mode, so it is charged to
+    /// [`FlashWriteBudget`] and may put it over): refusing to wake would strand
+    /// the battery unable to charge or discharge at all. Only the `smartMode: 0`
+    /// that *enters* standby is ever skipped.
     pub async fn ensure_ram_mode(&self) -> Result<(), reqwest::Error> {
         {
             let mode = guard(&self.storage_mode);
@@ -213,7 +316,13 @@ impl ZendureClient {
     /// re-POSTed every decision interval — see [`needs_write`] for what that
     /// costs in standby.
     pub async fn apply_command(&self, command: &Command) -> Result<(), reqwest::Error> {
-        if !needs_write(command, self.tracked_state()) {
+        // Asked once: `can_commit_to_flash` warns the first time it refuses, and
+        // the standby arm below must not ask again and warn twice.
+        let enters_flash = match *command {
+            Command::SetStandby => self.can_commit_to_flash(),
+            _ => false,
+        };
+        if !needs_write(command, self.tracked_state(), enters_flash) {
             return Ok(());
         }
         match *command {
@@ -254,16 +363,44 @@ impl ZendureClient {
                 // `smartMode: 0` is what actually puts some units into standby
                 // — under `Ram` they idle on at ~20W — so this write must not be
                 // dropped, only de-duplicated.
-                self.write_properties(serde_json::json!({
-                    "smartMode": 0,
-                    "inputLimit": 0,
-                    "outputLimit": 0,
-                }))
-                .await?;
-                self.record_standby();
+                //
+                // Zeroing the caps is free in RAM; entering flash mode is the
+                // part that wears. Out of budget the device idles at ~20W
+                // instead, which is the trade on purpose: more consumption,
+                // never a worn-out part. Still a success — nothing failed.
+                self.write_properties(standby_properties(enters_flash))
+                    .await?;
+                if enters_flash {
+                    self.record_standby();
+                } else {
+                    self.record_idle();
+                }
                 Ok(())
             }
         }
+    }
+
+    /// Whether the device can afford another flash-committed write right now.
+    ///
+    /// Warns the first time the budget binds in a window rather than on every
+    /// suppressed write, the way [`report_unidentified_pack`] warns once per
+    /// unknown pack: what is being reported is a standing condition, not an
+    /// event that keeps happening.
+    fn can_commit_to_flash(&self) -> bool {
+        let mut budget = guard(&self.flash_budget);
+        if budget.has_headroom(Instant::now()) {
+            return true;
+        }
+        if !budget.reported {
+            budget.reported = true;
+            tracing::warn!(
+                spent = budget.spent.len(),
+                budget = FLASH_WRITE_BUDGET,
+                window_hours = FLASH_WRITE_WINDOW.as_secs() / 3600,
+                "flash write budget exhausted; standby will idle at ~20W rather than commit smartMode:0"
+            );
+        }
+        false
     }
 
     /// Updates the tracked acMode, returns true if it changed (and should be sent).
@@ -304,12 +441,19 @@ impl ZendureClient {
         &self,
         properties: serde_json::Value,
     ) -> Result<(), reqwest::Error> {
+        let flash_committed = commits_to_flash(&properties, *guard(&self.storage_mode));
         let url = format!("{}/properties/write", self.base_url);
         let body = ZendureWriteRequest {
             sn: self.id.to_string(),
             properties,
         };
         self.http.post(&url).json(&body).send().await?;
+        // Charged here, at the one place a write is issued, and only once the
+        // POST returned — a write that never reached the device wore nothing
+        // out, the same reason the tracked limits are recorded after the call.
+        if flash_committed {
+            guard(&self.flash_budget).spend(Instant::now());
+        }
         Ok(())
     }
 }
@@ -579,6 +723,15 @@ mod tests {
         ZendureClient::new("127.0.0.1:1", "TESTSN".to_string())
     }
 
+    /// Spend a whole window's worth of flash writes, so the next one is refused.
+    fn exhaust_flash_budget(client: &ZendureClient) {
+        let mut budget = guard(&client.flash_budget);
+        let now = Instant::now();
+        for _ in 0..FLASH_WRITE_BUDGET {
+            budget.spend(now);
+        }
+    }
+
     /// The write the guard exists to stop: standby is re-decided every 5s, and
     /// each POST of `smartMode: 0` commits to the battery's flash, so once the
     /// device is in standby the repeat has nothing to say.
@@ -586,10 +739,18 @@ mod tests {
     fn a_standby_is_written_once_and_then_suppressed() {
         let client = client();
 
-        assert!(needs_write(&Command::SetStandby, client.tracked_state()));
+        assert!(needs_write(
+            &Command::SetStandby,
+            client.tracked_state(),
+            true
+        ));
         client.record_standby();
 
-        assert!(!needs_write(&Command::SetStandby, client.tracked_state()));
+        assert!(!needs_write(
+            &Command::SetStandby,
+            client.tracked_state(),
+            true
+        ));
     }
 
     /// The property that makes suppression safe: the device can leave standby
@@ -605,7 +766,11 @@ mod tests {
             .expect("fixture should parse");
 
         assert_eq!(client.tracked_state().storage_mode, StorageMode::Ram);
-        assert!(needs_write(&Command::SetStandby, client.tracked_state()));
+        assert!(needs_write(
+            &Command::SetStandby,
+            client.tracked_state(),
+            true
+        ));
     }
 
     /// A report that says nothing about `smartMode` is not evidence the device
@@ -620,7 +785,11 @@ mod tests {
             .expect("fixture should parse");
 
         assert_eq!(client.tracked_state().storage_mode, StorageMode::Flash);
-        assert!(!needs_write(&Command::SetStandby, client.tracked_state()));
+        assert!(!needs_write(
+            &Command::SetStandby,
+            client.tracked_state(),
+            true
+        ));
     }
 
     /// Standby zeroes the caps as well as the mode, so a device in flash mode
@@ -631,7 +800,11 @@ mod tests {
         client.record_standby();
         client.record_input_limit(Setpoint::new(800));
 
-        assert!(needs_write(&Command::SetStandby, client.tracked_state()));
+        assert!(needs_write(
+            &Command::SetStandby,
+            client.tracked_state(),
+            true
+        ));
     }
 
     /// Idle is decided every interval too, and repeats the same two zeroes.
@@ -639,10 +812,14 @@ mod tests {
     fn an_idle_is_written_once_and_then_suppressed() {
         let client = client();
 
-        assert!(needs_write(&Command::SetIdle, client.tracked_state()));
+        assert!(needs_write(&Command::SetIdle, client.tracked_state(), true));
         client.record_idle();
 
-        assert!(!needs_write(&Command::SetIdle, client.tracked_state()));
+        assert!(!needs_write(
+            &Command::SetIdle,
+            client.tracked_state(),
+            true
+        ));
     }
 
     /// Nothing is suppressed on the strength of the command alone: until a
@@ -651,8 +828,8 @@ mod tests {
     fn an_idle_is_written_while_the_caps_are_unknown() {
         let client = client();
 
-        assert!(needs_write(&Command::SetIdle, client.tracked_state()));
-        assert!(needs_write(&Command::SetIdle, client.tracked_state()));
+        assert!(needs_write(&Command::SetIdle, client.tracked_state(), true));
+        assert!(needs_write(&Command::SetIdle, client.tracked_state(), true));
     }
 
     /// Charge and discharge carry a setpoint that genuinely changes tick to
@@ -665,11 +842,13 @@ mod tests {
 
         assert!(needs_write(
             &Command::SetCharge(Setpoint::ZERO),
-            client.tracked_state()
+            client.tracked_state(),
+            true
         ));
         assert!(needs_write(
             &Command::SetDischarge(Setpoint::ZERO),
-            client.tracked_state()
+            client.tracked_state(),
+            true
         ));
     }
 
@@ -703,7 +882,184 @@ mod tests {
             .expect_err("nothing is listening on port 1");
 
         assert_eq!(client.tracked_state().storage_mode, StorageMode::Ram);
-        assert!(needs_write(&Command::SetStandby, client.tracked_state()));
+        assert!(needs_write(
+            &Command::SetStandby,
+            client.tracked_state(),
+            true
+        ));
+    }
+
+    /// Writes under budget are permitted; nothing changes for a normal day.
+    #[test]
+    fn a_flash_write_under_budget_is_permitted() {
+        let mut budget = FlashWriteBudget::default();
+        let now = Instant::now();
+
+        for _ in 0..FLASH_WRITE_BUDGET - 1 {
+            assert!(budget.has_headroom(now));
+            budget.spend(now);
+        }
+
+        assert!(budget.has_headroom(now));
+    }
+
+    /// The point of the whole thing: at the limit, the budget binds.
+    #[test]
+    fn the_budget_binds_at_the_limit() {
+        let mut budget = FlashWriteBudget::default();
+        let now = Instant::now();
+
+        for _ in 0..FLASH_WRITE_BUDGET {
+            budget.spend(now);
+        }
+
+        assert!(!budget.has_headroom(now));
+    }
+
+    /// The window rolls rather than resetting: writes that have aged out stop
+    /// counting, so a day of oscillation does not lock standby out forever.
+    #[test]
+    fn writes_older_than_the_window_stop_counting() {
+        let mut budget = FlashWriteBudget::default();
+        let start = Instant::now();
+
+        for _ in 0..FLASH_WRITE_BUDGET {
+            budget.spend(start);
+        }
+        assert!(!budget.has_headroom(start));
+
+        assert!(budget.has_headroom(start + FLASH_WRITE_WINDOW));
+    }
+
+    /// Only what has aged out is dropped — a write one second inside the window
+    /// is still spent, which is what makes it a rolling window and not a daily
+    /// reset.
+    #[test]
+    fn a_write_still_inside_the_window_keeps_counting() {
+        let mut budget = FlashWriteBudget::default();
+        let start = Instant::now();
+
+        budget.spend(start);
+        for _ in 1..FLASH_WRITE_BUDGET {
+            budget.spend(start + Duration::from_secs(1));
+        }
+
+        assert!(!budget.has_headroom(start + FLASH_WRITE_WINDOW - Duration::from_secs(1)));
+    }
+
+    /// The exhaustion is reported once, not once per suppressed write. The flag
+    /// clears only when the window rolls enough to free capacity.
+    #[test]
+    fn an_exhausted_budget_is_reported_once_per_window() {
+        let mut budget = FlashWriteBudget::default();
+        let start = Instant::now();
+
+        for _ in 0..FLASH_WRITE_BUDGET {
+            budget.spend(start);
+        }
+        budget.has_headroom(start);
+        budget.reported = true;
+        budget.has_headroom(start);
+        assert!(budget.reported);
+
+        budget.has_headroom(start + FLASH_WRITE_WINDOW);
+        assert!(!budget.reported);
+    }
+
+    /// What counts: anything issued while the device is already committing to
+    /// flash, plus the `smartMode: 0` that puts it in that state.
+    #[test]
+    fn a_write_is_flash_committed_in_flash_mode_or_when_it_enters_flash_mode() {
+        let caps = standby_properties(false);
+
+        assert!(!commits_to_flash(&caps, StorageMode::Ram));
+        assert!(commits_to_flash(&caps, StorageMode::Flash));
+        assert!(commits_to_flash(
+            &standby_properties(true),
+            StorageMode::Ram
+        ));
+    }
+
+    /// The round trip the budget is denominated in. Entering standby writes
+    /// `smartMode: 0`; leaving it writes `smartMode: 1` *while the device is
+    /// still in flash mode*, so both are committed and one cycle costs two.
+    #[test]
+    fn a_standby_round_trip_costs_two_flash_writes() {
+        assert!(commits_to_flash(
+            &standby_properties(true),
+            StorageMode::Ram
+        ));
+        assert!(commits_to_flash(
+            &serde_json::json!({ "smartMode": 1 }),
+            StorageMode::Flash
+        ));
+    }
+
+    /// Out of budget, standby still zeroes the caps — free in RAM — and omits
+    /// only the write that wears the flash.
+    #[test]
+    fn an_exhausted_budget_stops_restating_a_standby_it_has_already_reached() {
+        let client = client();
+        client.record_idle();
+        exhaust_flash_budget(&client);
+
+        // Caps already zero and flash unaffordable: idle has said everything
+        // standby could, so the interval writes nothing at all.
+        assert!(!needs_write(
+            &Command::SetStandby,
+            client.tracked_state(),
+            false
+        ));
+
+        // The moment the window frees up, standby is attempted again with no
+        // other trigger.
+        assert!(needs_write(
+            &Command::SetStandby,
+            client.tracked_state(),
+            true
+        ));
+    }
+
+    #[test]
+    fn an_exhausted_budget_still_zeroes_caps_that_are_not_yet_zero() {
+        let client = client();
+        client.record_input_limit(Setpoint::new(800));
+        exhaust_flash_budget(&client);
+
+        assert!(needs_write(
+            &Command::SetStandby,
+            client.tracked_state(),
+            false
+        ));
+    }
+
+    #[test]
+    fn an_exhausted_budget_zeroes_the_limits_without_entering_flash_mode() {
+        let degraded = standby_properties(false);
+
+        assert_eq!(degraded["inputLimit"], 0);
+        assert_eq!(degraded["outputLimit"], 0);
+        assert!(degraded.get("smartMode").is_none());
+        assert_eq!(standby_properties(true)["smartMode"], 0);
+    }
+
+    /// Waking the device is never budget-blocked: a battery that cannot leave
+    /// standby cannot charge or discharge at all, which is worse than a worn
+    /// flash. Against a closed port the wake fails — but it was *attempted*,
+    /// where a refusal would have returned `Ok` without touching the network.
+    #[tokio::test]
+    async fn an_exhausted_budget_still_lets_the_device_wake() {
+        let client = client();
+        client.record_standby();
+        exhaust_flash_budget(&client);
+
+        client
+            .ensure_ram_mode()
+            .await
+            .expect_err("nothing is listening on port 1");
+
+        assert_eq!(client.tracked_state().storage_mode, StorageMode::Flash);
+        assert!(!client.can_commit_to_flash());
     }
 
     #[test]
