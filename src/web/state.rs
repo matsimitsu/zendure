@@ -18,8 +18,12 @@ use crate::units::{
 /// Solcast's own resolution (see `SolcastEntry`'s doc comment in
 /// `prediction/solcast.rs`) — the forecast panel's bars and
 /// [`ActualSolarHistory`]'s buckets both use this, so the two series share
-/// one axis.
-pub(crate) const SOLAR_BUCKETS_PER_DAY: usize = 48;
+/// one axis. `forecast-panel__axis`'s column count has to match.
+pub(super) const SOLAR_BUCKETS_PER_DAY: usize = 48;
+
+/// One bucket's width: the half-hour [`SOLAR_BUCKETS_PER_DAY`] divides the
+/// day into.
+pub(super) const SOLAR_BUCKET_MS: i64 = 30 * 60 * 1000;
 
 /// How many meter readings each sparkline keeps. Only a meter tick appends
 /// one, so at the meter's ~1/s cadence this is ~96 seconds of history —
@@ -156,7 +160,7 @@ impl ActualSolarHistory {
         }
         let today_start = crate::clock::local_midnight(now, timezone);
         let elapsed_ms = (now - today_start).as_millis().max(0);
-        let bucket = ((elapsed_ms / (30 * 60 * 1000)) as usize).min(SOLAR_BUCKETS_PER_DAY - 1);
+        let bucket = ((elapsed_ms / SOLAR_BUCKET_MS) as usize).min(SOLAR_BUCKETS_PER_DAY - 1);
         self.sum_by_bucket[bucket] += solar.get();
         self.count_by_bucket[bucket] += 1;
     }

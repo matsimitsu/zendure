@@ -5,7 +5,10 @@
 use crate::models::ControlMode;
 use crate::units::{Elapsed, KiloWattHours, Percent, SolarForecastPoint, Timestamp, Watts};
 
-use super::state::{ActualSolarHistory, DashboardState, ForecastSnapshot, Plottable, Sparkline};
+use super::state::{
+    ActualSolarHistory, DashboardState, ForecastSnapshot, Plottable, SOLAR_BUCKET_MS,
+    SOLAR_BUCKETS_PER_DAY, Sparkline,
+};
 
 pub struct StatCardView {
     /// BEM modifier selecting the semantic color: "solar" | "home" | "grid" | "ev".
@@ -44,11 +47,11 @@ pub struct ForecastPanelView {
     pub as_of: String,
     /// Pixel heights within the panel's `1000x110` viewBox, one per local
     /// half-hour of today; `0.0` where no forecast sample fell in that slot.
-    pub bar_heights: [f64; FORECAST_BUCKETS_PER_DAY],
+    pub bar_heights: [f64; SOLAR_BUCKETS_PER_DAY],
     /// The actual-production line's SVG path `d`, possibly several `M`/`L`
     /// subpaths where a slot has no recorded sample.
     pub line_path: String,
-    pub hour_labels: [String; FORECAST_BUCKETS_PER_DAY],
+    pub hour_labels: [String; SOLAR_BUCKETS_PER_DAY],
 }
 
 pub struct DecisionLogRowView {
@@ -261,10 +264,6 @@ fn format_log_time(at: Timestamp, now: Timestamp, timezone: chrono_tz::Tz) -> St
 const FORECAST_CHART_WIDTH: f64 = 1000.0;
 const FORECAST_CHART_BASELINE: f64 = 108.0;
 const FORECAST_CHART_TOP_MARGIN: f64 = 4.0;
-/// Solcast's own resolution — see `SolcastEntry`'s doc comment in
-/// `prediction/solcast.rs`. Both series bucket to this so they share one axis.
-const FORECAST_BUCKETS_PER_DAY: usize = 48;
-const FORECAST_BUCKET_MS: i64 = 30 * 60 * 1000;
 
 /// Buckets a forecast series into today's 48 local half-hours (Solcast's own
 /// resolution, so this is normally a 1:1 mapping — the averaging only
@@ -274,16 +273,16 @@ const FORECAST_BUCKET_MS: i64 = 30 * 60 * 1000;
 fn bucketed_forecast_watts(
     points: &[SolarForecastPoint],
     today_start: Timestamp,
-) -> [Option<f64>; FORECAST_BUCKETS_PER_DAY] {
-    let mut sum = [0.0_f64; FORECAST_BUCKETS_PER_DAY];
-    let mut count = [0u32; FORECAST_BUCKETS_PER_DAY];
+) -> [Option<f64>; SOLAR_BUCKETS_PER_DAY] {
+    let mut sum = [0.0_f64; SOLAR_BUCKETS_PER_DAY];
+    let mut count = [0u32; SOLAR_BUCKETS_PER_DAY];
     let day_end = today_start + Elapsed::of(std::time::Duration::from_secs(24 * 3600));
 
     for point in points {
         if point.at < today_start || point.at >= day_end {
             continue;
         }
-        let bucket = ((point.at - today_start).as_millis() / FORECAST_BUCKET_MS) as usize;
+        let bucket = ((point.at - today_start).as_millis() / SOLAR_BUCKET_MS) as usize;
         if let (Some(s), Some(c)) = (sum.get_mut(bucket), count.get_mut(bucket)) {
             *s += point.estimate.get();
             *c += 1;
@@ -298,11 +297,11 @@ fn bucketed_forecast_watts(
 /// interpolating across the gap — a restart that lost a slot must read as a
 /// gap, not a smoothed-over guess.
 fn actual_line_path(
-    buckets: &[Option<f64>; FORECAST_BUCKETS_PER_DAY],
+    buckets: &[Option<f64>; SOLAR_BUCKETS_PER_DAY],
     scale: f64,
     plot_height: f64,
 ) -> String {
-    let bar_width = FORECAST_CHART_WIDTH / FORECAST_BUCKETS_PER_DAY as f64;
+    let bar_width = FORECAST_CHART_WIDTH / SOLAR_BUCKETS_PER_DAY as f64;
     let mut path = String::new();
     let mut drawing = false;
 
@@ -328,7 +327,7 @@ fn actual_line_path(
 
 /// The top of every hour labelled, the half-hour slot blank — the same
 /// density the panel drew when it had one bar per hour.
-fn forecast_hour_labels() -> [String; FORECAST_BUCKETS_PER_DAY] {
+fn forecast_hour_labels() -> [String; SOLAR_BUCKETS_PER_DAY] {
     std::array::from_fn(|h| {
         if h % 2 == 0 {
             format!("{:02}", h / 2)
@@ -348,7 +347,7 @@ fn forecast_panel_view(
         return ForecastPanelView {
             has_data: false,
             as_of: "No solar forecast configured — add [prediction] to config.toml".to_string(),
-            bar_heights: [0.0; FORECAST_BUCKETS_PER_DAY],
+            bar_heights: [0.0; SOLAR_BUCKETS_PER_DAY],
             line_path: String::new(),
             hour_labels: forecast_hour_labels(),
         };

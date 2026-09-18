@@ -48,13 +48,10 @@
 
   &__axis {
     display: grid;
-    grid-template-columns: 60px repeat(24, 1fr);
+    // One column per bucket in `SOLAR_BUCKETS_PER_DAY`, plus the gutter.
+    grid-template-columns: 60px repeat(48, 1fr);
     gap: 0 1px;
     margin-bottom: var(--space-3);
-  }
-
-  &__axis-gutter {
-    // Empty spacer
   }
 
   &__axis-label {
@@ -80,7 +77,7 @@
 @media (max-width: 860px) {
   .forecast-panel {
     &__axis {
-      grid-template-columns: 44px repeat(24, 1fr);
+      grid-template-columns: 44px repeat(48, 1fr);
     }
   }
 }
