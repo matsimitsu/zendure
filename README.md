@@ -12,7 +12,7 @@ Smart controller for the Zendure AC 2400+ home battery. Reads net grid power fro
    - **Idle** otherwise
    - **Standby** after prolonged idle or when daily cycle limit is reached
 5. **Safety guards**:
-   - **SOC limits** — stops charging at max SOC (default 100%) and discharging at min SOC (default 10%); on the configured `BALANCE_WEEKDAY` (default Monday), max SOC is raised to 100% for a periodic cell-balancing full charge
+   - **SOC limits** — stops charging at max SOC (default 100%) and discharging at min SOC (default 10%); on the configured `[tuning] balance_weekday` (default Monday), max SOC is raised to 100% whatever `max_soc` says, so a deployment that keeps it lower for longevity (production runs 95) still gets a periodic cell-balancing full charge
    - **Cooldown** — prevents rapid charge/discharge toggling
    - **Ramp** — starts at 75% power on mode changes to avoid overshooting
    - **SOC calibration** — idles when the battery reports SOC calibration in progress
@@ -57,7 +57,11 @@ whatever `--config` points at. [`config.example.toml`](config.example.toml) is
 the authoritative reference: every key, its default, and the failure policy
 (what's fatal versus what warns and falls back) live there as comments,
 production runs it verbatim, and a test in `config_tests.rs` pins the file to
-that fact. The shape, briefly:
+that fact. The shape, briefly — a skeleton that mostly leans on the **built-in
+defaults**, where `config.example.toml` records **what production actually
+runs**, so the two differ wherever a knob has been tuned (`max_soc` and
+`solar_discharge_block_threshold` today). Where they disagree, the example file
+is the one describing a live system:
 
 ```toml
 [mqtt]
@@ -77,6 +81,13 @@ poll_interval_secs = 10
 topic = "shellypro3em-XXXX/status/em:0"   # required
 solar_phase = "A"           # A, B or C — which phase the solar inverter feeds
 
+# Which meter feeds the engine. Absent means kind = "shelly", i.e. the
+# [shelly] table above. See "Running against the simulator" below.
+# [meter]
+# kind = "shelly"              # or "synthetic"
+# base_load = 500              # synthetic only, watts; required for it
+# solar_peak = 3000            # synthetic only, watts; required for it
+
 [homeassistant]
 publish_prefix = "zendure"
 
@@ -85,6 +96,16 @@ publish_prefix = "zendure"
 # [web]
 # bind_address = "127.0.0.1"   # default
 # port = 8080                  # default
+
+# Presence, not a flag, turns the solar forecast poller on — absent runs none
+# and the dashboard's forecast panel is empty. See "Dashboard" below.
+# [prediction]
+# kind = "solcast"             # or "simulated"
+# api_key = "…"                # solcast only, required for it
+# site_east = "…"              # solcast only, required for it
+# site_west = "…"              # solcast only, required for it
+# state_path = "/var/lib/zendure/prediction_state.json"
+# poll_times = ["06:00", "09:30", "12:30", "15:30", "18:30"]   # default
 
 [clock]
 timezone = "Europe/Amsterdam"   # IANA name
@@ -137,7 +158,8 @@ degrading a running controller.
 
 ### Migrating from environment variables
 
-Configuration was replaced by a TOML file in version 0.3.0. If you had
+Configuration moved from environment variables to a TOML file in version
+0.2.27; the variables below are no longer read. If you had
 environment variables set, this table maps each one to its new location:
 
 | Old env var | New TOML location | Notes |
