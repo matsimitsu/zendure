@@ -11,7 +11,7 @@ use crate::units::GridPower;
 #[test]
 fn display_renders_the_journaled_command_string() {
     // The journal reaches this string through `Directive::describe()`
-    // (`src/device.rs`), and README's raw-capture example quotes this exact
+    // (`src/allocate.rs`), and README's raw-capture example quotes this exact
     // text.
     assert_eq!(
         Command::SetDischarge(Setpoint::new(145)).to_string(),

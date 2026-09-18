@@ -1,6 +1,6 @@
 // Design tokens for the dashboard: every raw color/type/spacing value lives
 // here, once. Component stylesheets only ever consume var(--token-name) —
-// never a literal, per the design handoff's architecture rules.
+// never a literal, per CLAUDE.md's "Dashboard styling" rules.
 :root {
   // Color
   --color-bg-canvas: oklch(0.16 0.015 250);

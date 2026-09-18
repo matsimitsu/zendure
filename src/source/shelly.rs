@@ -2,9 +2,7 @@
 //! that turns them into a [`MeterObservation`].
 //!
 //! Everything Shelly-shaped lives here — the DTO, the phase selector, the
-//! `SOLAR_PHASE` parse. Adding a second meter would still mean edits in
-//! `mqtt.rs`, `run_subscriber`, `Config` and `main.rs` — see `source/mod.rs`
-//! for the list.
+//! `[shelly] solar_phase` parse.
 
 use serde::{Deserialize, Serialize};
 
@@ -62,8 +60,7 @@ pub enum SolarPhase {
 
 impl SolarPhase {
     /// The one gate: case-insensitive and trimming, since a person types this
-    /// into a config file. The error names what is wrong, not where it was read from —
-    /// the caller knows whether it came from an env var or a TOML key.
+    /// into a config file. The error names what is wrong, not the key.
     pub(crate) fn parse(s: &str) -> Result<Self, String> {
         match s.trim().to_ascii_uppercase().as_str() {
             "A" => Ok(SolarPhase::A),
@@ -75,9 +72,8 @@ impl SolarPhase {
 }
 
 // Routed through `parse` rather than derived, so the one gate stays the one
-// gate. A derived enum `Deserialize` would be a second, stricter gate — it
-// would reject `"a"` and `" A "`, which the environment has always accepted and
-// which a hand-written config file will contain.
+// gate: a derived `Deserialize` would reject `"a"` and `" A "`, which a
+// hand-written config file will contain.
 validating_deserialize_result!(SolarPhase, String, |s: String| SolarPhase::parse(&s));
 
 /// Parse a Shelly Pro 3EM `status/em:0` payload into a normalized observation.

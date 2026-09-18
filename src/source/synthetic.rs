@@ -105,7 +105,7 @@ fn observation(profile: &HouseProfile, clock: &Clock, flow: BatteryPower) -> Met
 /// Feeds synthetic [`MeterObservation`]s onto the coordinator's `MqttEvent`
 /// channel once a second — the Shelly's own rate. Takes `battery` as an
 /// `Arc`, shared with the device registry's own clone: read-only here, only
-/// [`super::super::device`]'s `BatteryController::apply` writes it. If `tx.send` fails
+/// [`crate::device`]'s `BatteryController::apply` writes it. If `tx.send` fails
 /// the coordinator is gone, so logging and returning (not retrying) is correct.
 pub async fn run_synthetic_meter(
     profile: HouseProfile,

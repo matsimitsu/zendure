@@ -8,18 +8,17 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 // `SolarPhase` is the meter's own idea of how many wires it watches, so it
-// belongs to the adapter that reads them. Parsing `SOLAR_PHASE` is still this
-// file's job — reading the environment is what `Config` is for.
+// belongs to the adapter that reads them, not here.
 use crate::prediction::TimeOfDay;
 use crate::source::shelly::SolarPhase;
 use crate::units::{
     Efficiency, GridPower, PowerMargin, RetentionDays, Soc, SolarPower, WattHours, Watts,
 };
 
-/// Where the journal lives unless `JOURNAL_PATH` says otherwise.
+/// Where the journal lives unless `[journal] path` says otherwise.
 ///
-/// Only a default, not the effective path: `export` reads no environment at
-/// all, so a deployment that sets `JOURNAL_PATH` must pass `--db` too.
+/// Only a default, not the effective path: `export` reads no config file, so a
+/// deployment that sets `[journal] path` must pass `--db` too.
 pub const DEFAULT_JOURNAL_PATH: &str = "/var/lib/zendure/journal.db";
 
 /// Where the rolling round-trip-efficiency window is persisted. Not `/tmp`:
@@ -47,8 +46,7 @@ fn parse_weekday(s: &str) -> Result<Weekday, String> {
         "fri" | "friday" => Ok(Weekday::Fri),
         "sat" | "saturday" => Ok(Weekday::Sat),
         "sun" | "sunday" => Ok(Weekday::Sun),
-        // Names what is wrong, not where it was read from — the caller knows
-        // whether that was an environment variable or a TOML key.
+        // Names what is wrong, not the key: the caller has the key name.
         _ => Err("must be one of Mon, Tue, Wed, Thu, Fri, Sat, Sun, or 'none'".to_string()),
     }
 }

@@ -33,9 +33,6 @@ pub fn create_mqtt_client(mqtt: &MqttConfig) -> (AsyncClient, EventLoop) {
     AsyncClient::new(opts, 50)
 }
 
-/// Eight arguments, and the alternative is worse: bundling them into a struct
-/// whose only purpose is to be destructured here would hide which of them the
-/// Shelly adapter owns and which the broker does. The TOML work reshapes this.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_subscriber(
     client: AsyncClient,

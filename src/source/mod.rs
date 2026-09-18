@@ -3,10 +3,6 @@
 //! A source adapter owns one meter's wire format: its JSON, its field names,
 //! how many phases it has. What leaves this module is a [`MeterObservation`],
 //! which carries none of that.
-//!
-//! No `trait Source` or dispatch yet, so a second meter still touches
-//! `mqtt.rs` (hardcodes `shelly::parse`), `run_subscriber` (takes a `SolarPhase`),
-//! `Config`, and `main.rs` — not "one new file".
 
 pub mod shelly;
 pub mod synthetic;

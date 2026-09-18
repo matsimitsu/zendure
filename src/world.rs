@@ -56,9 +56,8 @@ impl Default for MeterReading {
     }
 }
 
-/// A device's stable identity. `String`, not `&'static str`, since it comes
-/// from `ZENDURE_SN` at runtime; not an enum, since that would make the
-/// device set a compile-time constant. Also a journal key
+/// A device's stable identity. `String`, not an enum, since `[[device]] sn` is
+/// read at runtime rather than fixed at compile time. Also a journal key
 /// (`decisions.device`), so it must stay human-readable and stable across restarts.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -157,8 +156,8 @@ impl World {
 
     /// What the house itself is drawing, not a decision input. The meter nets
     /// both solar and the battery out of its total (`grid.total = load - solar -
-    /// battery_flow`), so load is both added back; `underlying_grid` is already
-    /// the battery half.
+    /// battery_flow`), so both have to be added back: `underlying_grid` returns
+    /// the battery half, and this adds the solar.
     pub fn home_usage(&self) -> Watts {
         self.underlying_grid().importing() + self.solar.into_watts()
     }
