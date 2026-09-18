@@ -40,7 +40,6 @@ pub struct ZendureClient {
 /// [`needs_write`] stays pure and testable.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct DeviceState {
-    storage_mode: StorageMode,
     input_limit: Option<Setpoint>,
     output_limit: Option<Setpoint>,
 }
@@ -55,17 +54,14 @@ impl DeviceState {
 
 /// Whether `command` still has anything to say to a device already in `state`.
 ///
-/// `smartMode: 0` makes the device commit every written property to its flash,
-/// and high-frequency writing in that mode is reported to damage the flash
-/// itself — so re-asserting standby on each decision interval is not merely
-/// wasteful. Suppression is on the tracked *device state*, never on the command
-/// repeating: charge and discharge carry a fresh setpoint every tick, write in
-/// RAM, and always go out.
+/// Suppression is on the tracked *device state*, never on the command
+/// repeating: charge and discharge carry a fresh setpoint every tick and always
+/// go out.
 fn needs_write(command: &Command, state: DeviceState) -> bool {
     match *command {
         Command::SetCharge(_) | Command::SetDischarge(_) => true,
-        Command::SetIdle => !state.is_zeroed(),
-        Command::SetStandby => state.storage_mode != StorageMode::Flash || !state.is_zeroed(),
+        // Standby asks the device for what idle does — see `apply_command`.
+        Command::SetIdle | Command::SetStandby => !state.is_zeroed(),
     }
 }
 
@@ -157,10 +153,16 @@ impl ZendureClient {
         }
     }
 
+    /// What the device's own reports say its storage mode is. Only
+    /// `ensure_ram_mode` consults it in production.
+    #[cfg(test)]
+    fn tracked_storage_mode(&self) -> StorageMode {
+        *guard(&self.storage_mode)
+    }
+
     /// One consistent snapshot for the write guard to decide on.
     fn tracked_state(&self) -> DeviceState {
         DeviceState {
-            storage_mode: *guard(&self.storage_mode),
             input_limit: *guard(&self.last_input_limit),
             output_limit: *guard(&self.last_output_limit),
         }
@@ -183,13 +185,6 @@ impl ZendureClient {
         *guard(&self.last_ac_mode) = None;
         self.record_input_limit(Setpoint::ZERO);
         self.record_output_limit(Setpoint::ZERO);
-    }
-
-    /// The state a landed standby write leaves the device in: idle's zeroed
-    /// caps, plus the flash mode `smartMode: 0` asks for.
-    fn record_standby(&self) {
-        self.record_idle();
-        self.set_storage_mode(StorageMode::Flash);
     }
 
     /// Charge/discharge power-cap setpoints. The device can reset these to 0,
@@ -241,26 +236,17 @@ impl ZendureClient {
                 self.record_output_limit(power_watts);
                 Ok(())
             }
-            Command::SetIdle => {
+            // One arm, because they are one request. Standby would also write
+            // `smartMode: 0`, which commits every later write to the device's
+            // flash; until the wear that costs is designed for, it is not
+            // commanded, and standby settles for idle's zeroed caps.
+            Command::SetIdle | Command::SetStandby => {
                 self.write_properties(serde_json::json!({
                     "inputLimit": 0,
                     "outputLimit": 0,
                 }))
                 .await?;
                 self.record_idle();
-                Ok(())
-            }
-            Command::SetStandby => {
-                // `smartMode: 0` is what actually puts some units into standby
-                // — under `Ram` they idle on at ~20W — so this write must not be
-                // dropped, only de-duplicated.
-                self.write_properties(serde_json::json!({
-                    "smartMode": 0,
-                    "inputLimit": 0,
-                    "outputLimit": 0,
-                }))
-                .await?;
-                self.record_standby();
                 Ok(())
             }
         }
@@ -579,56 +565,73 @@ mod tests {
         ZendureClient::new("127.0.0.1:1", "TESTSN".to_string())
     }
 
-    /// The write the guard exists to stop: standby is re-decided every 5s, and
-    /// each POST of `smartMode: 0` commits to the battery's flash, so once the
-    /// device is in standby the repeat has nothing to say.
+    /// Standby is re-decided every 5s and repeats the same two zeroes, so once
+    /// they have landed the repeat has nothing to say.
     #[test]
     fn a_standby_is_written_once_and_then_suppressed() {
         let client = client();
 
         assert!(needs_write(&Command::SetStandby, client.tracked_state()));
-        client.record_standby();
+        client.record_idle();
 
         assert!(!needs_write(&Command::SetStandby, client.tracked_state()));
     }
 
-    /// The property that makes suppression safe: the device can leave standby
-    /// on its own, and the next poll's report — not our own last write — is
-    /// what the guard believes, so the following decision re-asserts standby.
+    /// The contract this build commits to: flash mode is never commanded, so
+    /// standby and idle are one request and the guard cannot tell them apart.
     #[test]
-    fn a_report_showing_the_device_left_standby_re_arms_the_write() {
+    fn standby_asks_the_device_for_exactly_what_idle_does() {
         let client = client();
-        client.record_standby();
+        for _ in 0..2 {
+            let state = client.tracked_state();
+            assert_eq!(
+                needs_write(&Command::SetStandby, state),
+                needs_write(&Command::SetIdle, state)
+            );
+            client.record_idle();
+        }
+    }
+
+    /// The device can enter flash mode on its own, and its own report — never a
+    /// write of ours — is what says so. `ensure_ram_mode` reads this to decide
+    /// whether a wake is owed before the next charge.
+    #[test]
+    fn a_report_is_what_moves_the_tracked_storage_mode() {
+        let client = client();
+
+        client
+            .parse_report(r#"{"properties":{"smartMode":0}}"#.to_string())
+            .expect("fixture should parse");
+        assert_eq!(client.tracked_storage_mode(), StorageMode::Flash);
 
         client
             .parse_report(r#"{"properties":{"smartMode":1}}"#.to_string())
             .expect("fixture should parse");
-
-        assert_eq!(client.tracked_state().storage_mode, StorageMode::Ram);
-        assert!(needs_write(&Command::SetStandby, client.tracked_state()));
+        assert_eq!(client.tracked_storage_mode(), StorageMode::Ram);
     }
 
     /// A report that says nothing about `smartMode` is not evidence the device
-    /// left the mode it was put in.
+    /// left the mode it was in.
     #[test]
     fn a_report_without_a_smart_mode_leaves_the_tracked_mode_alone() {
         let client = client();
-        client.record_standby();
+        client
+            .parse_report(r#"{"properties":{"smartMode":0}}"#.to_string())
+            .expect("fixture should parse");
 
         client
             .parse_report(r#"{"properties":{}}"#.to_string())
             .expect("fixture should parse");
 
-        assert_eq!(client.tracked_state().storage_mode, StorageMode::Flash);
-        assert!(!needs_write(&Command::SetStandby, client.tracked_state()));
+        assert_eq!(client.tracked_storage_mode(), StorageMode::Flash);
     }
 
-    /// Standby zeroes the caps as well as the mode, so a device in flash mode
-    /// still holding a non-zero cap has not been put into standby yet.
+    /// Zeroing the caps is the whole of a standby now, so one still holding a
+    /// non-zero cap has not been stood down yet.
     #[test]
     fn standby_is_still_written_while_a_cap_is_not_zero() {
         let client = client();
-        client.record_standby();
+        client.record_idle();
         client.record_input_limit(Setpoint::new(800));
 
         assert!(needs_write(&Command::SetStandby, client.tracked_state()));
@@ -679,14 +682,17 @@ mod tests {
     #[tokio::test]
     async fn a_charge_after_standby_still_wakes_the_device_and_writes() {
         let client = client();
-        client.record_standby();
+        client.record_idle();
+        client
+            .parse_report(r#"{"properties":{"smartMode":0}}"#.to_string())
+            .expect("fixture should parse");
 
         client
             .apply_command(&Command::SetCharge(Setpoint::new(500)))
             .await
             .expect_err("nothing is listening on port 1");
 
-        assert_eq!(client.tracked_state().storage_mode, StorageMode::Flash);
+        assert_eq!(client.tracked_storage_mode(), StorageMode::Flash);
         assert_eq!(client.tracked_state().input_limit, Some(Setpoint::ZERO));
     }
 
@@ -702,7 +708,7 @@ mod tests {
             .await
             .expect_err("nothing is listening on port 1");
 
-        assert_eq!(client.tracked_state().storage_mode, StorageMode::Ram);
+        assert_eq!(client.tracked_storage_mode(), StorageMode::Ram);
         assert!(needs_write(&Command::SetStandby, client.tracked_state()));
     }
 
