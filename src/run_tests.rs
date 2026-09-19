@@ -92,6 +92,7 @@ fn virtual_config(dir: &tempfile::TempDir, capacity: WattHours) -> Config {
             soc: Soc::new(50),
             charge_efficiency: Efficiency::new(95.0),
             discharge_efficiency: Efficiency::new(95.0),
+            poll_interval: Duration::from_secs(1),
         },
         shelly: None,
         // A constant 2 kW load and no solar: the grid reading always

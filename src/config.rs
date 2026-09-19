@@ -38,6 +38,11 @@ pub const DEFAULT_PREDICTION_STATE_PATH: &str = "/var/lib/zendure/prediction_sta
 /// not given, so this one string is the only place that default is spelled.
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/zendure/config.toml";
 
+/// How often a `[[device]] kind = "virtual"` entry is polled when it names no
+/// period of its own. A simulator answers in-process, so there is no network
+/// round trip to pace.
+const DEFAULT_VIRTUAL_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
 fn parse_weekday(s: &str) -> Result<Weekday, String> {
     match s.trim().to_ascii_lowercase().as_str() {
         "mon" | "monday" => Ok(Weekday::Mon),
@@ -269,6 +274,7 @@ pub enum DeviceConfig {
         soc: Soc,
         charge_efficiency: Efficiency,
         discharge_efficiency: Efficiency,
+        poll_interval: Duration,
     },
 }
 
@@ -282,14 +288,11 @@ impl DeviceConfig {
         }
     }
 
-    /// How often `run.rs`'s poll timer fires. `Virtual` has no
-    /// `poll_interval_secs` to read — no network round trip to pace, only
-    /// an in-process model — so this returns a fixed cadence close to a real Zendure's
-    /// instead of a config key nothing needs yet.
+    /// How often `run.rs`'s poll timer fires.
     pub fn poll_interval(&self) -> Duration {
         match self {
             DeviceConfig::Zendure { poll_interval, .. } => *poll_interval,
-            DeviceConfig::Virtual { .. } => Duration::from_secs(10),
+            DeviceConfig::Virtual { poll_interval, .. } => *poll_interval,
         }
     }
 }
@@ -464,7 +467,7 @@ fn take_device(root: &mut toml::Table) -> Result<(DeviceConfig, Vec<String>), St
             let ip = take_device_field(&mut table, "ip")?;
             let sn = take_device_field(&mut table, "sn")?;
             let poll_interval =
-                take_poll_interval(&mut table, "poll_interval_secs", &mut warnings)?;
+                take_zendure_poll_interval(&mut table, "poll_interval_secs", &mut warnings)?;
             DeviceConfig::Zendure {
                 ip,
                 sn,
@@ -477,12 +480,14 @@ fn take_device(root: &mut toml::Table) -> Result<(DeviceConfig, Vec<String>), St
             let soc = take_device_soc(&mut table, "soc")?;
             let charge_efficiency = take_device_f64(&mut table, "charge_efficiency")?;
             let discharge_efficiency = take_device_f64(&mut table, "discharge_efficiency")?;
+            let poll_interval = take_virtual_poll_interval(&mut table, "poll_interval_secs")?;
             DeviceConfig::Virtual {
                 id,
                 packs,
                 soc,
                 charge_efficiency: Efficiency::new(charge_efficiency),
                 discharge_efficiency: Efficiency::new(discharge_efficiency),
+                poll_interval,
             }
         }
         other => {
@@ -499,7 +504,7 @@ fn take_device(root: &mut toml::Table) -> Result<(DeviceConfig, Vec<String>), St
     Ok((device, warnings))
 }
 
-fn take_poll_interval(
+fn take_zendure_poll_interval(
     table: &mut toml::Table,
     key: &str,
     warnings: &mut Vec<String>,
@@ -518,6 +523,21 @@ fn take_poll_interval(
     Ok(configured)
 }
 
+/// [`POLL_INTERVAL_FLOOR`] is the Zendure firmware's report-refresh rate, so it
+/// says nothing about a simulator and is not applied here. Zero is refused
+/// because `tokio::time::interval` panics on it.
+fn take_virtual_poll_interval(table: &mut toml::Table, key: &str) -> Result<Duration, String> {
+    let Some(secs) = take_optional_device_secs(table, key)? else {
+        return Ok(DEFAULT_VIRTUAL_POLL_INTERVAL);
+    };
+
+    if secs == 0 {
+        return Err(format!("device.{key} must be at least 1, found 0"));
+    }
+
+    Ok(Duration::from_secs(secs))
+}
+
 fn take_device_field(table: &mut toml::Table, key: &str) -> Result<String, String> {
     match table.remove(key) {
         None => Err(format!("device.{key} is required")),
@@ -530,9 +550,14 @@ fn take_device_field(table: &mut toml::Table, key: &str) -> Result<String, Strin
 }
 
 fn take_device_secs(table: &mut toml::Table, key: &str) -> Result<u64, String> {
+    take_optional_device_secs(table, key)?.ok_or_else(|| format!("device.{key} is required"))
+}
+
+fn take_optional_device_secs(table: &mut toml::Table, key: &str) -> Result<Option<u64>, String> {
     match table.remove(key) {
-        None => Err(format!("device.{key} is required")),
+        None => Ok(None),
         Some(toml::Value::Integer(n)) => u64::try_from(n)
+            .map(Some)
             .map_err(|_| format!("device.{key} must be a non-negative integer, found {n}")),
         Some(v) => Err(format!(
             "device.{key} must be an integer, found {}",

@@ -561,8 +561,38 @@ fn a_brokerless_virtual_config_parses_with_zero_warnings() {
             soc: Soc::new(50),
             charge_efficiency: Efficiency::new(95.0),
             discharge_efficiency: Efficiency::new(95.0),
+            poll_interval: Duration::from_secs(1),
         }
     );
+}
+
+/// The simulator has no firmware refresh to respect, so the Zendure floor —
+/// which would silently triple this period — must not reach it.
+#[test]
+fn a_virtual_device_sets_its_own_poll_interval_below_the_zendure_floor() {
+    let toml = minimal_virtual_toml().replace("soc = 50", "soc = 50\npoll_interval_secs = 1");
+
+    let (config, warnings) = Config::from_toml_str(&toml).unwrap();
+
+    assert_eq!(warnings, Vec::<String>::new(), "{warnings:?}");
+    assert_eq!(config.device.poll_interval(), Duration::from_secs(1));
+}
+
+#[test]
+fn a_virtual_device_without_a_poll_interval_polls_every_second() {
+    let (config, _warnings) = Config::from_toml_str(&minimal_virtual_toml()).unwrap();
+    assert_eq!(config.device.poll_interval(), Duration::from_secs(1));
+}
+
+/// `tokio::time::interval` panics on a zero period, so the config file is
+/// where that has to stop.
+#[test]
+fn a_zero_poll_interval_is_fatal_for_a_virtual_device() {
+    let toml = minimal_virtual_toml().replace("soc = 50", "soc = 50\npoll_interval_secs = 0");
+
+    let err = Config::from_toml_str(&toml).unwrap_err();
+
+    assert!(err.contains("device.poll_interval_secs"), "{err}");
 }
 
 #[test]

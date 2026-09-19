@@ -155,7 +155,9 @@ request timeout is derived from it — half the period, clamped to 2–5 s — s
 stalled request is always abandoned before the next poll is due, and one
 unresponsive box can hold the control loop for at most 5 s however long the
 period is. Below 3 s, the device's own report refresh, it warns and is raised
-to 3.
+to 3. A `kind = "virtual"` device answers in-process, so neither the floor nor
+the derived timeout applies to it: the key is optional there and defaults to
+1 s, and only zero is refused.
 
 `zendure --check --config <path>` runs the same parse, but strictly: a parse
 error is fatal exactly as it is for the daemon, and **any warning is promoted

@@ -64,6 +64,8 @@ pub fn from_config(config: &Config) -> Devices {
             soc,
             charge_efficiency,
             discharge_efficiency,
+            // The loop's own pacing, read through `DeviceConfig::poll_interval`.
+            poll_interval: _,
         } => Battery::Virtual(Arc::new(VirtualBattery::new(
             DeviceId::new(id.clone()),
             AC2400_PLUS,

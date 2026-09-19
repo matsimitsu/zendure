@@ -41,6 +41,10 @@ soc = 50
 # in — see `simulation.rs`'s own tests for the exact arithmetic.
 charge_efficiency = 95.0
 discharge_efficiency = 95.0
+# How often the loop reads the pack. There is no HTTP round trip and no
+# firmware refresh rate here, so the 3 s floor a real Zendure imposes does
+# not apply; 1 is the default and may be left out.
+poll_interval_secs = 1
 
 [meter]
 kind = "synthetic"
