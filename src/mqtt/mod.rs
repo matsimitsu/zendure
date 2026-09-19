@@ -2,8 +2,8 @@
 //!
 //! Three jobs that share a transport and little else, so they are three files.
 //! [`publisher`] is the queue and the task that drains it; [`discovery`] is the
-//! Home Assistant wire format; [`subscriber`] owns the eventloop, the
-//! subscription and the meter feed.
+//! Home Assistant wire format; [`subscriber`] owns the connection and the
+//! eventloop that carries the other two onto the socket.
 
 pub mod discovery;
 pub mod publisher;
@@ -14,4 +14,4 @@ pub use discovery::{
     publish_rte, publish_soc_calibrating, publish_status, publish_temperatures,
 };
 pub use publisher::{MqttPublisher, PublisherTask};
-pub use subscriber::{MqttEvent, create_mqtt_client, run_subscriber};
+pub use subscriber::{MqttEvent, create_mqtt_client, run_connection};

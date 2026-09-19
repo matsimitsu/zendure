@@ -10,7 +10,7 @@ use std::time::Duration;
 use crate::allocate::Directive;
 use crate::announce::Announcer;
 use crate::clock::Clock;
-use crate::config::{Config, MeterConfig};
+use crate::config::Config;
 use crate::device::{Applied, BatteryMonitor, BatteryReading, ControlPath};
 use crate::engine::Engine;
 use crate::event::Event;
@@ -20,9 +20,8 @@ use crate::models::ControlDecision;
 use crate::mqtt::{self, MqttEvent, MqttPublisher, PublisherTask};
 use crate::prediction;
 use crate::publish::{NullPublisher, Publisher};
-use crate::registry::{self, Battery, Devices};
+use crate::registry::{self, Devices};
 use crate::source;
-use crate::source::shelly::SolarPhase;
 use crate::units::{Soc, Timestamp, WattHours};
 use crate::web;
 use crate::world::{Measurement, World};
@@ -339,11 +338,9 @@ pub async fn run(
     let ha_prefix = config.ha_publish_prefix.clone();
 
     let (tx, mut rx) = mpsc::channel::<MqttEvent>(64);
-    // Every task that can produce an `MqttEvent` — the subscriber, the synthetic meter,
-    // both, or
-    // (impossible per `Config::from_toml_str`'s coherence checks) neither. `rx.recv()`
-    // returning
-    // `None` below is true only once every feeder here has ended.
+    // Every task the loop's life depends on: the meter feed, and the broker
+    // connection when there is one. `rx.recv()` returning `None` below is true
+    // only once every feeder holding a sender has ended.
     let mut feeders: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     // The publisher: a real, queued sink over MQTT if `[mqtt]` is configured,
@@ -357,41 +354,21 @@ pub async fn run(
                 // The sink the decision path publishes through. Its task owns
                 // the only `await` against the broker; nothing below this line
                 // can block on one.
-                let (mqtt_publisher, publisher_task) = MqttPublisher::open(mqtt_client.clone());
+                let (mqtt_publisher, publisher_task) = MqttPublisher::open(mqtt_client);
                 let publisher: std::sync::Arc<dyn Publisher> = mqtt_publisher.clone();
 
-                // A synthetic meter has no Shelly topic, but this task must still run:
-                // it drives
-                // the broker's eventloop, without which nothing queued ever reaches the
-                // socket. An
-                // empty topic never matches a real publish, so the subscribe-and-parse
-                // half of the loop below simply never fires.
-                let shelly_topic = config
-                    .shelly
-                    .as_ref()
-                    .map(|s| s.topic.clone())
-                    .unwrap_or_default();
-                let solar_phase = config
-                    .shelly
-                    .as_ref()
-                    .map(|s| s.solar_phase)
-                    .unwrap_or(SolarPhase::A);
-                let subscriber_journal = journal.clone();
-                let subscriber_prefix = ha_prefix.clone();
-                let subscriber_publisher = publisher.clone();
-                let subscriber_announcer = announcer.clone();
-                let feed_tx = tx.clone();
+                // Nothing incoming is subscribed to, but this task must still
+                // run: it drives the broker's eventloop, without which nothing
+                // queued ever reaches the socket.
+                let connection_prefix = ha_prefix.clone();
+                let connection_publisher = publisher.clone();
+                let connection_announcer = announcer.clone();
                 feeders.push(tokio::spawn(async move {
-                    mqtt::run_subscriber(
-                        mqtt_client,
+                    mqtt::run_connection(
                         eventloop,
-                        shelly_topic,
-                        solar_phase,
-                        subscriber_prefix,
-                        subscriber_publisher,
-                        subscriber_announcer,
-                        feed_tx,
-                        subscriber_journal,
+                        connection_prefix,
+                        connection_publisher,
+                        connection_announcer,
                     )
                     .await;
                 }));
@@ -404,28 +381,14 @@ pub async fn run(
             }
         };
 
-    // The meter: a synthetic house feeding the same channel, when
-    // configured. `Config::from_toml_str` guarantees the primary device is
-    // `Battery::Virtual` whenever the meter is synthetic — see its coherence
-    // checks — so the match below never reaches its `unreachable!`.
-    if let MeterConfig::Synthetic {
-        base_load,
-        solar_peak,
-    } = &config.meter
-    {
-        let virtual_battery = match primary {
-            Battery::Virtual(battery) => battery.clone(),
-            _ => unreachable!(
-                "Config::from_toml_str requires a virtual device when the meter is synthetic"
-            ),
-        };
-        let profile =
-            source::synthetic::HouseProfile::new(*base_load, *solar_peak, config.timezone);
-        let feed_tx = tx.clone();
-        feeders.push(tokio::spawn(async move {
-            source::synthetic::run_synthetic_meter(profile, virtual_battery, feed_tx).await;
-        }));
-    }
+    // The meter, whichever kind `[meter]` selected, read on its own interval
+    // and offered to the loop through the channel above.
+    let meter = source::from_config(&config, &devices);
+    let feed_tx = tx.clone();
+    let feed_journal = journal.clone();
+    feeders.push(tokio::spawn(async move {
+        source::run_meter_feed(meter, feed_tx, feed_journal).await;
+    }));
 
     // Only the clones handed to the feeders above keep the channel open now.
     drop(tx);
@@ -532,7 +495,7 @@ pub async fn run(
     // a signal that arrived mid-iteration would be dropped.
     let mut stop = std::pin::pin!(stop);
 
-    tracing::info!("Coordinator running, waiting for MQTT data...");
+    tracing::info!("Coordinator running, waiting for the first meter reading...");
 
     loop {
         tokio::select! {

@@ -25,7 +25,7 @@ fn config() -> Config {
             poll_interval: Duration::from_secs(30),
         },
         shelly: Some(ShellyConfig {
-            topic: "SECRET-TOPIC".to_string(),
+            ip: "SECRET-METER-IP".to_string(),
             solar_phase: SolarPhase::A,
         }),
         meter: MeterConfig::Shelly,
@@ -68,7 +68,7 @@ fn the_session_config_carries_no_connection_settings() {
         "SECRET-CLIENT",
         "SECRET-IP",
         "SECRET-SERIAL",
-        "SECRET-TOPIC",
+        "SECRET-METER-IP",
         "SECRET-PREFIX",
         "/SECRET/journal.db",
         "/SECRET/rte_state.json",
@@ -144,7 +144,7 @@ fn the_session_config_matches_what_the_controller_was_built_with() {
 // --- `from_toml_str` --------------------------------------------------------
 
 /// The smallest file that satisfies every fatal requirement: a host, one
-/// zendure device, and a Shelly topic. Every test below starts here and
+/// zendure device, and a Shelly address. Every test below starts here and
 /// changes exactly the one thing it means to test, so a failure is never
 /// ambiguous about which knob caused it.
 fn minimal_toml() -> String {
@@ -159,7 +159,7 @@ fn minimal_toml() -> String {
         poll_interval_secs = 10
 
         [shelly]
-        topic = "shellypro3em/status/em:0"
+        ip = "192.168.1.11"
     "#
     .to_string()
 }
@@ -184,18 +184,17 @@ fn missing_mqtt_host_is_fatal() {
         poll_interval_secs = 10
 
         [shelly]
-        topic = "x"
+        ip = "192.168.1.11"
     "#;
     let err = Config::from_toml_str(toml).unwrap_err();
     assert!(err.contains("mqtt.host"), "{err}");
 }
 
-/// The coherence check `missing_mqtt_host_is_fatal` deliberately routes
-/// around: no `[mqtt]` table at all, with the default (Shelly) meter, is
-/// fatal — the Shelly reading arrives over MQTT, so there is nothing for the
-/// engine to decide against without a broker.
+/// A broker is an output, not an input: the meter is read over HTTP, so a
+/// deployment with a real Shelly and no Home Assistant is coherent and runs
+/// through a `NullPublisher`.
 #[test]
-fn a_shelly_meter_with_no_mqtt_table_is_fatal() {
+fn a_shelly_meter_with_no_mqtt_table_is_valid() {
     let toml = r#"
         [[device]]
         kind = "zendure"
@@ -204,14 +203,19 @@ fn a_shelly_meter_with_no_mqtt_table_is_fatal() {
         poll_interval_secs = 10
 
         [shelly]
-        topic = "x"
+        ip = "192.168.1.11"
     "#;
-    let err = Config::from_toml_str(toml).unwrap_err();
-    assert!(err.contains("[mqtt]"), "{err}");
+    let (config, warnings) = Config::from_toml_str(toml).unwrap();
+
+    assert_eq!(warnings, Vec::<String>::new(), "{warnings:?}");
+    assert!(config.mqtt.is_none());
+    assert_eq!(config.meter, MeterConfig::Shelly);
 }
 
+/// The surviving coherence check: a Shelly meter with no `[shelly]` table has
+/// no address to read.
 #[test]
-fn missing_shelly_topic_is_fatal() {
+fn a_shelly_meter_with_no_shelly_table_is_fatal() {
     let toml = r#"
         [mqtt]
         host = "127.0.0.1"
@@ -223,7 +227,26 @@ fn missing_shelly_topic_is_fatal() {
         poll_interval_secs = 10
     "#;
     let err = Config::from_toml_str(toml).unwrap_err();
-    assert!(err.contains("shelly.topic"), "{err}");
+    assert!(err.contains("[shelly]"), "{err}");
+}
+
+#[test]
+fn missing_shelly_ip_is_fatal() {
+    let toml = r#"
+        [mqtt]
+        host = "127.0.0.1"
+
+        [[device]]
+        kind = "zendure"
+        ip = "192.168.1.253"
+        sn = "SN123"
+        poll_interval_secs = 10
+
+        [shelly]
+        solar_phase = "A"
+    "#;
+    let err = Config::from_toml_str(toml).unwrap_err();
+    assert!(err.contains("shelly.ip"), "{err}");
 }
 
 #[test]
@@ -238,7 +261,7 @@ fn missing_device_ip_is_fatal() {
         poll_interval_secs = 10
 
         [shelly]
-        topic = "x"
+        ip = "192.168.1.11"
     "#;
     let err = Config::from_toml_str(toml).unwrap_err();
     assert!(err.contains("device.ip"), "{err}");
@@ -256,7 +279,7 @@ fn missing_device_sn_is_fatal() {
         poll_interval_secs = 10
 
         [shelly]
-        topic = "x"
+        ip = "192.168.1.11"
     "#;
     let err = Config::from_toml_str(toml).unwrap_err();
     assert!(err.contains("device.sn"), "{err}");
@@ -293,7 +316,7 @@ fn a_wrong_typed_connection_setting_is_fatal() {
         poll_interval_secs = 10
 
         [shelly]
-        topic = "x"
+        ip = "192.168.1.11"
     "#;
     let err = Config::from_toml_str(toml).unwrap_err();
     assert!(err.contains("mqtt.port"), "{err}");
@@ -434,7 +457,7 @@ fn debug_redacts_the_password() {
         poll_interval_secs = 10
 
         [shelly]
-        topic = "x"
+        ip = "192.168.1.11"
     "#;
     let (config, _) = Config::from_toml_str(toml).unwrap();
     let debug = format!("{config:?}");
@@ -482,7 +505,7 @@ fn the_example_config_is_what_production_runs() {
             poll_interval: Duration::from_secs(10),
         },
         shelly: Some(ShellyConfig {
-            topic: "shellypro3em-a4f00fcfcc18/status/em:0".to_string(),
+            ip: "192.168.1.11".to_string(),
             solar_phase: SolarPhase::A,
         }),
         meter: MeterConfig::Shelly,
@@ -653,7 +676,7 @@ fn an_unknown_device_kind_is_still_fatal() {
         host = "127.0.0.1"
 
         [shelly]
-        topic = "x"
+        ip = "192.168.1.11"
     "#;
     let err = Config::from_toml_str(toml).unwrap_err();
     assert!(err.contains("device.kind"), "{err}");

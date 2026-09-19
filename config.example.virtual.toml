@@ -24,7 +24,7 @@
 # `NullPublisher` instead of a real queued sink, so nothing is lost by not
 # having one — Home Assistant discovery and telemetry simply have nowhere to
 # go. [shelly] is absent for the matching reason on the read side: the meter
-# below is synthetic, so there is no Shelly topic to subscribe to.
+# below is synthetic, so there is no Shelly to poll.
 
 [[device]]
 kind = "virtual"

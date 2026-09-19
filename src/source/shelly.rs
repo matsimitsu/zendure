@@ -1,20 +1,24 @@
-//! The Shelly Pro 3EM adapter: its JSON, its three phases, and the arithmetic
-//! that turns them into a [`MeterObservation`].
+//! The Shelly Pro 3EM adapter: its HTTP endpoint, its JSON, its three phases,
+//! and the arithmetic that turns them into a [`MeterObservation`].
 //!
-//! Everything Shelly-shaped lives here — the DTO, the phase selector, the
-//! `[shelly] solar_phase` parse.
+//! Everything Shelly-shaped lives here — the client, the DTO, the phase
+//! selector, the `[shelly] solar_phase` parse.
+
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::device::{PollError, RawCapture};
+use crate::scan::request_timeout;
 use crate::units::validating_deserialize_result;
 
-use super::MeterObservation;
+use super::{MeterObservation, MeterSample, MeterSource};
 use crate::units::{GridPower, SolarPower};
 use crate::world::MeterReading;
 
-/// Shelly Pro 3EM energy meter reading, received via MQTT on the status/em:0 topic.
-/// Provides signed per-phase and total active power every second.
-/// Positive = importing from grid, negative = exporting to grid.
+/// Shelly Pro 3EM energy meter reading, as the `em:0` component answers
+/// `/rpc/EM.GetStatus`. Signed per-phase and total active power: positive =
+/// importing from grid, negative = exporting to grid.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct ShellyReading {
@@ -76,7 +80,74 @@ impl SolarPhase {
 // hand-written config file will contain.
 validating_deserialize_result!(SolarPhase, String, |s: String| SolarPhase::parse(&s));
 
-/// Parse a Shelly Pro 3EM `status/em:0` payload into a normalized observation.
+/// The kind string every capture of this meter's bytes is filed under in the
+/// journal; `replay` and `export` select on it.
+const RAW_KIND: &str = "shelly";
+
+/// Reads the `em:0` component over the meter's local RPC endpoint.
+pub struct ShellyClient {
+    http: reqwest::Client,
+    status_url: String,
+    solar_phase: SolarPhase,
+}
+
+impl ShellyClient {
+    pub fn new(ip: &str, solar_phase: SolarPhase, scan_period: Duration) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(request_timeout(scan_period))
+            .build()
+            .expect("failed to create HTTP client");
+
+        Self {
+            http,
+            status_url: format!("http://{ip}/rpc/EM.GetStatus?id=0"),
+            solar_phase,
+        }
+    }
+
+    async fn fetch(&self) -> Result<String, reqwest::Error> {
+        self.http
+            .get(&self.status_url)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await
+    }
+}
+
+impl MeterSource for ShellyClient {
+    async fn sample(&self) -> Result<MeterSample, PollError> {
+        let body = self.fetch().await.map_err(|e| PollError {
+            raw: None,
+            error: e.to_string(),
+        })?;
+        capture(body, self.solar_phase)
+    }
+}
+
+/// Turns one response body into a sample, keeping the bytes on either
+/// outcome: a reading that failed to decode is the one most worth having on
+/// record.
+fn capture(body: String, solar_phase: SolarPhase) -> Result<MeterSample, PollError> {
+    let raw = RawCapture {
+        kind: RAW_KIND,
+        body,
+    };
+
+    match parse(raw.body.as_bytes(), solar_phase) {
+        Ok(observation) => Ok(MeterSample {
+            observation,
+            raw: Some(raw),
+        }),
+        Err(e) => Err(PollError {
+            error: e.to_string(),
+            raw: Some(raw),
+        }),
+    }
+}
+
+/// Parse a Shelly Pro 3EM `em:0` payload into a normalized observation.
 pub fn parse(
     payload: &[u8],
     solar_phase: SolarPhase,
@@ -197,10 +268,46 @@ mod tests {
 
     #[test]
     fn a_malformed_payload_is_an_error_not_a_panic() {
-        // The subscriber logs and drops this; it must never take the process
-        // down, because a truncated MQTT frame is a routine event.
+        // The meter feed logs and drops this; it must never take the process
+        // down, because a truncated response is a routine event.
         assert!(parse(b"{\"a_act_power\":", SolarPhase::A).is_err());
         assert!(parse(b"not json at all", SolarPhase::A).is_err());
+    }
+
+    /// A verbatim `/rpc/EM.GetStatus?id=0` response, keys and all, so the
+    /// endpoint is pinned to the same `em:0` object the parser already reads.
+    const RPC_BODY: &str = r#"{"id":0,"a_current":1.898,"a_voltage":231.4,
+        "a_act_power":-1200.3,"a_aprt_power":439.1,"a_pf":0.95,"a_freq":50.0,
+        "b_current":10.417,"b_voltage":230.1,"b_act_power":250.4,
+        "b_aprt_power":2396.9,"b_pf":0.99,"b_freq":50.0,
+        "c_current":0.311,"c_voltage":232.0,"c_act_power":70.1,
+        "c_aprt_power":72.1,"c_pf":0.97,"c_freq":50.0,
+        "n_current":null,"total_current":12.626,"total_act_power":-879.8,
+        "total_aprt_power":2908.1,"user_calibrated_phase":[]}"#;
+
+    #[test]
+    fn an_rpc_response_parses_and_is_captured_verbatim() {
+        let sample = capture(RPC_BODY.to_string(), SolarPhase::A).unwrap();
+
+        assert_eq!(sample.observation.solar, SolarPower::new(1200.3));
+        assert_eq!(sample.observation.grid.total, GridPower(-879.8));
+
+        let raw = sample.raw.expect("the bytes a reading was parsed from");
+        assert_eq!(raw.kind, "shelly");
+        assert_eq!(raw.body, RPC_BODY);
+    }
+
+    /// The bytes matter most when they did not decode, so the failure carries
+    /// them rather than only the message.
+    #[test]
+    fn a_body_that_does_not_decode_still_hands_back_its_bytes() {
+        let error = capture("<html>403 Forbidden</html>".to_string(), SolarPhase::A)
+            .err()
+            .expect("a non-JSON body is a failure");
+
+        let raw = error.raw.expect("the bytes that failed to decode");
+        assert_eq!(raw.kind, "shelly");
+        assert_eq!(raw.body, "<html>403 Forbidden</html>");
     }
 
     #[test]

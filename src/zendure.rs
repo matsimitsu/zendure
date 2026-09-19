@@ -9,6 +9,7 @@ use crate::device::{
     PollError, RawCapture,
 };
 use crate::models::{PackData, StorageMode, ZendureReport, ZendureWriteRequest};
+use crate::scan::request_timeout;
 use crate::sync::guard;
 use crate::units::{DeciKelvin, PackTemperature, Setpoint, Soc, WattHours, Watts};
 use crate::world::DeviceId;
@@ -68,19 +69,6 @@ fn needs_write(command: &Command, state: DeviceState) -> bool {
 /// The shortest period this box is worth polling at: the firmware refreshes its
 /// own report every 3 s, and a faster poll re-reads state it has not updated.
 pub const POLL_INTERVAL_FLOOR: Duration = Duration::from_secs(3);
-
-/// What [`request_timeout`] derives within: the ceiling bounds how long one
-/// unresponsive device can hold `run.rs`'s poll arm, and the floor stays under
-/// [`POLL_INTERVAL_FLOOR`] so a request is abandoned before the next poll is due.
-const MIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
-const MAX_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Half the period the caller polls at, bounded: this firmware answers
-/// overlapping GET/POST with delayed replies and `ECONNRESET`, so a stalled
-/// request has to be abandoned before the next one goes out.
-fn request_timeout(poll_interval: Duration) -> Duration {
-    (poll_interval / 2).clamp(MIN_REQUEST_TIMEOUT, MAX_REQUEST_TIMEOUT)
-}
 
 impl ZendureClient {
     pub fn new(ip: &str, sn: String, poll_interval: Duration) -> Self {
@@ -571,7 +559,6 @@ fn complete_pack_capacities(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
 
     fn pack(json: &str) -> PackData {
         serde_json::from_str(json).expect("pack fixture should parse")
@@ -581,36 +568,6 @@ mod tests {
     /// attempt fails fast instead of reaching a device.
     fn client() -> ZendureClient {
         ZendureClient::new("127.0.0.1:1", "TESTSN".to_string(), POLL_INTERVAL_FLOOR)
-    }
-
-    /// Catches a timeout that would leave a request in flight when the next
-    /// poll starts, and one that would hold the coordinator's poll arm for
-    /// longer than the fixed ceiling however long the period grows.
-    #[test]
-    fn a_request_gives_up_before_the_next_poll_and_within_a_fixed_bound() {
-        for secs in [3, 4, 5, 9, 10, 11, 60, 150, 3_600, 86_400] {
-            let period = Duration::from_secs(secs);
-            let timeout = request_timeout(period);
-
-            assert!(timeout < period, "{period:?} derived {timeout:?}");
-            assert!(
-                timeout <= MAX_REQUEST_TIMEOUT,
-                "{period:?} derived {timeout:?}"
-            );
-        }
-    }
-
-    /// Catches a change to the timeout the deployed period derives, which is
-    /// the one that reaches the box.
-    #[test]
-    fn the_shipped_poll_period_derives_a_five_second_timeout() {
-        let (config, _) = Config::from_toml_str(include_str!("../config.example.toml"))
-            .expect("the example config parses");
-
-        assert_eq!(
-            request_timeout(config.device.poll_interval()),
-            Duration::from_secs(5)
-        );
     }
 
     /// Standby is re-decided every 5s and repeats the same two zeroes, so once

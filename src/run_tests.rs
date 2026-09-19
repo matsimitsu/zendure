@@ -1,7 +1,8 @@
 use super::*;
-use crate::config::{DeviceConfig, SessionConfig, WebConfig};
+use crate::config::{DeviceConfig, MeterConfig, SessionConfig, WebConfig};
 use crate::fixtures;
 use crate::journal;
+use crate::registry::Battery;
 use crate::simulation::VirtualBattery;
 use crate::units::{Efficiency, GridPower, PowerMargin, RetentionDays, SolarPower, Watts};
 

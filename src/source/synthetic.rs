@@ -1,7 +1,7 @@
 //! A synthetic house meter, so a brokerless run exercises the controller
 //! instead of proving nothing. It makes a fake house (load, solar curve,
-//! battery) and pushes readings onto the same [`MqttEvent`] channel the real subscriber
-//! uses, so the coordinator loop cannot tell the two apart.
+//! battery) and answers a [`MeterSource`] read from it, so the coordinator
+//! loop cannot tell it apart from a real meter.
 //!
 //! **The feedback term is the entire point.** `grid = load - solar` alone
 //! lies: the meter reports a fixed surplus forever, the controller charges
@@ -10,19 +10,17 @@
 //! import, and the controller backs off.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use chrono::{TimeZone, Timelike};
 use chrono_tz::Tz;
-use tokio::sync::mpsc;
 
 use crate::clock::Clock;
-use crate::mqtt::MqttEvent;
+use crate::device::PollError;
 use crate::simulation::VirtualBattery;
 use crate::units::{BatteryPower, GridPower, SolarPower, Watts};
 use crate::world::MeterReading;
 
-use super::MeterObservation;
+use super::{MeterObservation, MeterSample, MeterSource};
 
 /// The house side of the simulation: a constant base load and a solar array
 /// with a rated peak, neither of which knows the battery exists. The battery's
@@ -117,34 +115,38 @@ fn observation(profile: &HouseProfile, clock: &Clock, flow: BatteryPower) -> Met
     }
 }
 
-/// Feeds synthetic [`MeterObservation`]s onto the coordinator's `MqttEvent`
-/// channel once a second — the Shelly's own rate. Takes `battery` as an
-/// `Arc`, shared with the device registry's own clone: read-only here, only
-/// [`crate::device`]'s `BatteryController::apply` writes it. If `tx.send` fails
-/// the coordinator is gone, so logging and returning (not retrying) is correct.
-pub async fn run_synthetic_meter(
+/// A [`HouseProfile`] wired to the battery whose flow it nets out. `battery`
+/// is the device registry's own `Arc`: read-only here, only
+/// [`crate::device`]'s `BatteryController::apply` writes it, so a read sees
+/// whatever the loop last commanded.
+pub struct SyntheticMeter {
     profile: HouseProfile,
     battery: Arc<VirtualBattery>,
-    tx: mpsc::Sender<MqttEvent>,
-) {
-    let mut ticker = tokio::time::interval(Duration::from_secs(1));
+}
 
-    loop {
-        ticker.tick().await;
+impl SyntheticMeter {
+    pub fn new(profile: HouseProfile, battery: Arc<VirtualBattery>) -> Self {
+        SyntheticMeter { profile, battery }
+    }
+}
 
-        let clock = Clock::now(profile.timezone);
-        let flow = battery.flow();
-        let obs = observation(&profile, &clock, flow);
+/// Infallible, and with nothing to capture: there is no wire format between
+/// the house and the reader.
+impl MeterSource for SyntheticMeter {
+    async fn sample(&self) -> Result<MeterSample, PollError> {
+        let clock = Clock::now(self.profile.timezone);
 
-        if tx.send(MqttEvent::Meter(obs)).await.is_err() {
-            tracing::info!("Synthetic meter: coordinator gone, stopping");
-            return;
-        }
+        Ok(MeterSample {
+            observation: observation(&self.profile, &clock, self.battery.flow()),
+            raw: None,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::command::Command;
     use crate::device::BatterySpec;

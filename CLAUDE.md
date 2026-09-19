@@ -47,6 +47,7 @@ crossed a boundary without anyone saying what the conversion meant.
 - `src/cli.rs` — What the binary was asked to do: argument parsing only, no I/O
 - `src/commands.rs` — The offline subcommand handlers (`export`, `analyze`, `replay`, `check-config`), synchronous and device-free
 - `src/run.rs` — The coordinator loop and shutdown
+- `src/scan.rs` — What a scan round costs the requests inside it: the timeout every adapter derives from its period
 - `src/config.rs` — TOML configuration: parsed from `/etc/zendure/config.toml` (or `--config`), unknown keys warn instead of failing, `--check` parses and reports
 - `src/units.rs` — Physical quantities as newtypes: the units and roles the Types section above is about
 - `src/models.rs` — Wire types (MQTT, Zendure API) and control decisions
@@ -65,8 +66,8 @@ crossed a boundary without anyone saying what the conversion meant.
 - `src/backpressure.rs` — Counting what had to be thrown away, without becoming the flood
 - `src/sync.rs` — Takes a poisoned lock rather than panicking through it
 - `src/mqtt/` — The broker: `publisher` (queue + task), `discovery` (wire
-  format), `subscriber` (eventloop + meter feed)
-- `src/source/` — Where a meter reading comes from: one wire format per adapter (`shelly`, `synthetic`), out comes a `MeterObservation`
+  format), `subscriber` (the connection and its eventloop)
+- `src/source/` — Where a meter reading comes from: the `MeterSource` trait, the `Meter` enum over one adapter per wire format (`shelly`, `synthetic`), and the feed task that reads it
 - `src/zendure.rs` — Zendure REST API client
 - `src/journal/` — Append-only SQLite record of events, decisions and outcomes
 - `src/rte.rs` — Round-trip efficiency tracking

@@ -46,7 +46,7 @@ sn = "HEC4NENCN490270"
 poll_interval_secs = 10
 
 [shelly]
-topic = "shellypro3em-a4f00fcfcc18/status/em:0"   # required
+ip = "192.168.1.11"   # required
 # Which meter phase the solar inverter (Huawei Sun2000) feeds into: A, B or C.
 # Solar production is read as the export on that single phase, because the
 # meter's total nets solar export against loads on the other phases.

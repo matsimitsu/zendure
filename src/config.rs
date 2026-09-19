@@ -330,7 +330,7 @@ impl std::fmt::Debug for MqttConfig {
 /// house has no Shelly to configure.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShellyConfig {
-    pub topic: String,
+    pub ip: String,
     pub solar_phase: SolarPhase,
 }
 
@@ -875,7 +875,7 @@ impl Config {
 
         let shelly = if taker.has_table("shelly")? {
             Some(ShellyConfig {
-                topic: taker.required::<String>("shelly.topic")?,
+                ip: taker.required::<String>("shelly.ip")?,
                 solar_phase: taker.lenient::<SolarPhase>("shelly.solar_phase", SolarPhase::A)?,
             })
         } else {
@@ -908,17 +908,9 @@ impl Config {
         // each is a relationship *between* tables rather than a property of
         // one. Both fatal: getting either wrong means the controller cannot
         // talk to the thing it was just told to use.
-        if matches!(meter, MeterConfig::Shelly) && mqtt.is_none() {
-            return Err(
-                "meter is Shelly (the default) but [mqtt] is absent — the Shelly reading \
-                 arrives over MQTT; add [mqtt], or set [meter] kind = \"synthetic\" to run \
-                 without a broker"
-                    .to_string(),
-            );
-        }
         if matches!(meter, MeterConfig::Shelly) && shelly.is_none() {
             return Err(
-                "meter is Shelly (the default) but [shelly] is absent — shelly.topic is \
+                "meter is Shelly (the default) but [shelly] is absent — shelly.ip is \
                  required; add [shelly], or set [meter] kind = \"synthetic\""
                     .to_string(),
             );

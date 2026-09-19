@@ -23,6 +23,7 @@ mod registry;
 mod replay;
 mod rte;
 mod run;
+mod scan;
 mod simulation;
 mod source;
 mod sync;

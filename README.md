@@ -1,10 +1,10 @@
 # Zendure AC 2400+ Controller
 
-Smart controller for the Zendure AC 2400+ home battery. Reads net grid power from a Shelly Pro 3EM via MQTT, decides when to charge or discharge the battery, and publishes decisions to MQTT for HomeAssistant integration.
+Smart controller for the Zendure AC 2400+ home battery. Reads net grid power from a Shelly Pro 3EM over its local HTTP API, decides when to charge or discharge the battery, and publishes decisions to MQTT for HomeAssistant integration.
 
 ## How it works
 
-1. **Subscribes to MQTT** for Shelly Pro 3EM power readings (signed per-phase and total active power, updated every second)
+1. **Polls the Shelly Pro 3EM** at `/rpc/EM.GetStatus?id=0` for power readings (signed per-phase and total active power)
 2. **Polls the Zendure device** via its local REST API for battery state (SOC, power, temperatures, pack data)
 3. **Decides what the battery should do**:
    - **Charge** when there's excess solar being exported to the grid (up to 2400W)
@@ -78,7 +78,7 @@ sn = "HEC4NENCN490270"      # required
 poll_interval_secs = 10     # minimum 3; the request timeout derives from it
 
 [shelly]
-topic = "shellypro3em-XXXX/status/em:0"   # required
+ip = "192.168.1.11"         # required
 solar_phase = "A"           # A, B or C — which phase the solar inverter feeds
 
 # Which meter feeds the engine. Absent means kind = "shelly", i.e. the
@@ -137,7 +137,7 @@ solar_discharge_block_threshold = 0.0
 mqtt_timeout_secs = 60
 ```
 
-**`mqtt.*`, `[[device]]` and `shelly.topic` are fatal if missing or the wrong
+**`mqtt.*`, `[[device]]` and `shelly.ip` are fatal if missing or the wrong
 type** — getting one of those wrong means the controller talks to the wrong
 thing or cannot talk at all. **`web.bind_address` and `web.port` are fatal only
 when present and the wrong type**; it is the `[web]` table's presence that
@@ -150,11 +150,11 @@ holding a battery command. `RUST_LOG`, when set and non-empty, overrides
 `[logging].filter` outright — that's a `tracing` convention applied at the
 point the subscriber is built, not something the config file itself reads.
 
-**`device.poll_interval_secs` paces more than the poll.** The adapter's HTTP
-request timeout is derived from it — half the period, clamped to 2–5 s — so a
-stalled request is always abandoned before the next poll is due, and one
-unresponsive box can hold the control loop for at most 5 s however long the
-period is. Below 3 s, the device's own report refresh, it warns and is raised
+**`device.poll_interval_secs` paces more than the poll.** Every adapter's HTTP
+request timeout is derived from it — the meter's as well as the battery's, half
+the period, clamped to 2–5 s — so a stalled request is always abandoned before
+the next poll is due, and one unresponsive box can hold the control loop for at
+most 5 s however long the period is. Below 3 s, the device's own report refresh, it warns and is raised
 to 3. A `kind = "virtual"` device answers in-process, so neither the floor nor
 the derived timeout applies to it: the key is optional there and defaults to
 1 s, and only zero is refused.
@@ -181,7 +181,7 @@ environment variables set, this table maps each one to its new location:
 | `ZENDURE_IP` | `[[device]] ip` | Now in array; see below |
 | `ZENDURE_SN` | `[[device]] sn` | Now in array; see below |
 | `ZENDURE_POLL_INTERVAL` | `[[device]] poll_interval_secs` | Now in array; unit is already seconds |
-| `SHELLY_TOPIC` | `[shelly] topic` | |
+| `SHELLY_TOPIC` | `[shelly] ip` | The meter is polled over HTTP; give its address, not a topic |
 | `SOLAR_PHASE` | `[shelly] solar_phase` | |
 | `HA_PUBLISH_PREFIX` | `[homeassistant] publish_prefix` | |
 | `TIMEZONE` | `[clock] timezone` | |
@@ -259,9 +259,9 @@ restarting per session, and leaves gaps where a write failed or a prune deleted.
 own events, replayable). The first *foldable* event of every session is a
 `device_update` carrying the startup poll, so the world a replay rebuilds from
 events is the same world the controller decided against from its first reading.
-It is not necessarily the first row: the MQTT subscriber starts a moment earlier
-and writes its raw `shelly` captures from its own task, so one of those often
-lands first. Those are not fold inputs, which is why it does not matter.
+It is not necessarily the first row: the meter feed starts a moment earlier and
+writes its raw `shelly` captures from its own task, so one of those often lands
+first. Those are not fold inputs, which is why it does not matter.
 
 `decisions.kind` is `decision` or `failsafe`, with one
 row per device actuated — one today, more once a second battery or a charger
@@ -420,7 +420,7 @@ cargo run -- --config config.example.virtual.toml
 See that file for what each table means (and why `[mqtt]` and `[shelly]` are
 both absent from it); briefly, `[[device]] kind = "virtual"` picks the
 simulated battery and `[meter] kind = "synthetic"` picks the simulated house,
-in place of `kind = "zendure"` and a real Shelly subscription. With no
+in place of `kind = "zendure"` and a real Shelly to poll. With no
 `[mqtt]`, `run.rs` publishes through a `NullPublisher` instead of a real
 queued sink — decisions and telemetry are made exactly as they would be
 against real hardware, they just have nowhere to go over MQTT.
