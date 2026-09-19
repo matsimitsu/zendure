@@ -67,7 +67,7 @@ crossed a boundary without anyone saying what the conversion meant.
 - `src/sync.rs` — Takes a poisoned lock rather than panicking through it
 - `src/mqtt/` — The broker: `publisher` (queue + task), `discovery` (wire
   format), `connection` (the broker connection and its eventloop)
-- `src/source/` — Where a meter reading comes from: the `MeterSource` trait, the `Meter` enum over one adapter per wire format (`shelly`, `synthetic`), and the feed task that reads it
+- `src/source/` — Where a meter reading comes from: the `Meter` enum over one adapter per wire format (`shelly`, `synthetic`), out comes a `MeterSample`
 - `src/zendure.rs` — Zendure REST API client
 - `src/journal/` — Append-only SQLite record of events, decisions and outcomes
 - `src/rte.rs` — Round-trip efficiency tracking

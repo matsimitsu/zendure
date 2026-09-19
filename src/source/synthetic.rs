@@ -1,6 +1,6 @@
 //! A synthetic house meter, so a brokerless run exercises the controller
 //! instead of proving nothing. It makes a fake house (load, solar curve,
-//! battery) and answers a [`MeterSource`] read from it, so the coordinator
+//! battery) and answers a [`MeterSample`] read from it, so the coordinator
 //! loop cannot tell it apart from a real meter.
 //!
 //! **The feedback term is the entire point.** `grid = load - solar` alone
@@ -20,7 +20,7 @@ use crate::simulation::VirtualBattery;
 use crate::units::{BatteryPower, GridPower, SolarPower, Watts};
 use crate::world::MeterReading;
 
-use super::{MeterObservation, MeterSample, MeterSource};
+use super::{MeterObservation, MeterSample};
 
 /// The house side of the simulation: a constant base load and a solar array
 /// with a rated peak, neither of which knows the battery exists. The battery's
@@ -128,16 +128,14 @@ impl SyntheticMeter {
     pub fn new(profile: HouseProfile, battery: Arc<VirtualBattery>) -> Self {
         SyntheticMeter { profile, battery }
     }
-}
 
-/// Infallible, and with nothing to capture: there is no wire format between
-/// the house and the reader.
-impl MeterSource for SyntheticMeter {
-    fn id(&self) -> &str {
+    pub fn id(&self) -> &str {
         "synthetic meter"
     }
 
-    async fn sample(&self) -> Result<MeterSample, PollError> {
+    /// Infallible, and with nothing to capture: there is no wire format
+    /// between the house and the reader.
+    pub async fn sample(&self) -> Result<MeterSample, PollError> {
         let clock = Clock::now(self.profile.timezone);
 
         Ok(MeterSample {

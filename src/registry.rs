@@ -159,10 +159,9 @@ impl BatteryMonitor for Battery {
     }
 }
 
-/// The battery's half of the scan cycle: one reading per requested round,
-/// through the same `poll` the coordinator used to call inline. The
-/// per-reading line lives here because the loop folds a `BatteryState` and
-/// has no adapter to name.
+/// The battery's half of the scan cycle: one reading per requested round.
+/// The per-reading line lives here because the loop folds a `BatteryState`
+/// and has no adapter to name.
 impl Sampler for Battery {
     type Reading = BatteryReading;
 
@@ -224,11 +223,14 @@ impl Devices {
         self.batteries.get(id).map(|battery| &**battery)
     }
 
-    /// An owned handle to one adapter, for the sampler task that reads it.
-    /// Separate from [`battery`](Self::battery) because a task outlives any
-    /// borrow of this registry.
-    pub fn handle(&self, id: &DeviceId) -> Option<Arc<Battery>> {
-        self.batteries.get(id).cloned()
+    /// Every battery this process drives, as owned handles in id order: a
+    /// sampler task outlives any borrow of this registry, and the inbox must
+    /// hold a slot per device or a tick would command the fleet on one box's
+    /// sample.
+    pub fn handles(&self) -> impl Iterator<Item = (DeviceId, Arc<Battery>)> + '_ {
+        self.batteries
+            .iter()
+            .map(|(id, battery)| (id.clone(), battery.clone()))
     }
 
     /// The lowest id, mirroring `World::battery` so the registry and world agree

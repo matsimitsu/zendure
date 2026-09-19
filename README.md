@@ -5,7 +5,7 @@ Smart controller for the Zendure AC 2400+ home battery. Reads net grid power fro
 ## How it works
 
 1. **Scans every source on one fixed tick** — the Shelly Pro 3EM at `/rpc/EM.GetStatus?id=0` (signed per-phase and total active power) and the Zendure over its local REST API (SOC, power, temperatures, pack data). A round decides only once every source has answered it, so every figure the decision reads is the same age
-2. **Stands the fleet down** when a source stops answering — too many failed rounds in a row, or nothing usable for `[tuning] mqtt_timeout_secs` — and picks back up on its own as soon as one answers again
+2. **Stands the fleet down** when a source has produced nothing usable for `[tuning] mqtt_timeout_secs` — an age bound, so a source that hangs and never reports a failure is caught too — and picks back up on its own as soon as it answers again
 3. **Decides what the battery should do**:
    - **Charge** when there's excess solar being exported to the grid (up to 2400W)
    - **Discharge** to cover grid demand (up to inverter limit), after a configurable idle period to prevent charge/discharge oscillation

@@ -39,7 +39,7 @@ impl Announcer {
             return;
         }
         // The lock is dropped between check and insert, so a `reset` from the
-        // subscriber task can land in between and be undone by the insert below —
+        // broker connection can land in between and be undone by the insert below —
         // benign, since the message is already in the publisher's own queue
         // (survives reconnect) or replayed from rumqttc's `pending` list.
         if publisher.publish(build()) == Accepted::Queued {

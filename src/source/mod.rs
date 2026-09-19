@@ -7,8 +7,6 @@
 pub mod shelly;
 pub mod synthetic;
 
-use std::future::Future;
-
 use crate::config::{Config, MeterConfig};
 use crate::device::{PollError, RawCapture};
 use crate::registry::{Battery, Devices};
@@ -42,36 +40,12 @@ impl Captured for MeterSample {
     }
 }
 
-/// One meter reading, pulled on request. Mirrors
-/// [`crate::device::BatteryMonitor`]'s shape, and is not `dyn`-safe for the
-/// same reason — hence [`Meter`].
-pub trait MeterSource {
-    /// Which meter this is, for the lines an operator reads.
-    fn id(&self) -> &str;
-
-    fn sample(&self) -> impl Future<Output = Result<MeterSample, PollError>> + Send;
-}
-
-/// One meter adapter, in whichever shape it actually is.
+/// One meter adapter, in whichever shape it actually is. Not `dyn`-safe, for
+/// the reason [`crate::registry::Battery`]'s own doc gives: the futures are
+/// `impl Future + Send`.
 pub enum Meter {
     Shelly(shelly::ShellyClient),
     Synthetic(synthetic::SyntheticMeter),
-}
-
-impl MeterSource for Meter {
-    fn id(&self) -> &str {
-        match self {
-            Meter::Shelly(client) => client.id(),
-            Meter::Synthetic(meter) => meter.id(),
-        }
-    }
-
-    async fn sample(&self) -> Result<MeterSample, PollError> {
-        match self {
-            Meter::Shelly(client) => client.sample().await,
-            Meter::Synthetic(meter) => meter.sample().await,
-        }
-    }
 }
 
 /// The meter's half of the scan cycle. The per-reading line lives here
@@ -81,11 +55,17 @@ impl Sampler for Meter {
     type Reading = MeterSample;
 
     fn id(&self) -> &str {
-        MeterSource::id(self)
+        match self {
+            Meter::Shelly(client) => client.id(),
+            Meter::Synthetic(meter) => meter.id(),
+        }
     }
 
     async fn sample(&self) -> Result<MeterSample, PollError> {
-        let sample = MeterSource::sample(self).await?;
+        let sample = match self {
+            Meter::Shelly(client) => client.sample().await?,
+            Meter::Synthetic(meter) => meter.sample().await?,
+        };
 
         let obs = sample.observation;
         tracing::info!(

@@ -9,10 +9,10 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::device::{PollError, RawCapture};
-use crate::scan::request_timeout;
+use crate::scan::http_client;
 use crate::units::validating_deserialize_result;
 
-use super::{MeterObservation, MeterSample, MeterSource};
+use super::{MeterObservation, MeterSample};
 use crate::units::{GridPower, SolarPower};
 use crate::world::MeterReading;
 
@@ -93,16 +93,23 @@ pub struct ShellyClient {
 
 impl ShellyClient {
     pub fn new(ip: &str, solar_phase: SolarPhase, scan_period: Duration) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(request_timeout(scan_period))
-            .build()
-            .expect("failed to create HTTP client");
-
         Self {
-            http,
+            http: http_client(scan_period),
             status_url: format!("http://{ip}/rpc/EM.GetStatus?id=0"),
             solar_phase,
         }
+    }
+
+    pub fn id(&self) -> &str {
+        "shelly meter"
+    }
+
+    pub async fn sample(&self) -> Result<MeterSample, PollError> {
+        let body = self.fetch().await.map_err(|e| PollError {
+            raw: None,
+            error: e.to_string(),
+        })?;
+        capture(body, self.solar_phase)
     }
 
     async fn fetch(&self) -> Result<String, reqwest::Error> {
@@ -113,20 +120,6 @@ impl ShellyClient {
             .error_for_status()?
             .text()
             .await
-    }
-}
-
-impl MeterSource for ShellyClient {
-    fn id(&self) -> &str {
-        "shelly meter"
-    }
-
-    async fn sample(&self) -> Result<MeterSample, PollError> {
-        let body = self.fetch().await.map_err(|e| PollError {
-            raw: None,
-            error: e.to_string(),
-        })?;
-        capture(body, self.solar_phase)
     }
 }
 

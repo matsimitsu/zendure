@@ -14,7 +14,6 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use chrono_tz::Tz;
@@ -49,6 +48,15 @@ pub(crate) fn request_timeout(scan_period: Duration) -> Duration {
     }
 }
 
+/// The HTTP client a polled source reaches its device with, timed out by
+/// [`request_timeout`] so every adapter abandons a request on the same rule.
+pub(crate) fn http_client(scan_period: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(request_timeout(scan_period))
+        .build()
+        .expect("failed to create HTTP client")
+}
+
 /// Which round every source is being asked for. A sample is stamped with the
 /// round it answered, so a tick can tell one taken for it from one that
 /// arrived too late for the round before.
@@ -73,29 +81,6 @@ impl Failures {
     }
 }
 
-/// How many consecutive failures a source may have before the loop stops
-/// trusting it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FailureTolerance(u32);
-
-impl FailureTolerance {
-    /// As many rounds as fit in the window the loop may go blind for. Never
-    /// zero: at a period longer than that window a single failed read would
-    /// otherwise stand the whole fleet down.
-    pub fn over(blind_window: Duration, tick: Duration) -> Self {
-        let rounds = blind_window.as_millis() / tick.as_millis().max(1);
-        FailureTolerance(u32::try_from(rounds).unwrap_or(u32::MAX).max(1))
-    }
-
-    pub fn get(self) -> u32 {
-        self.0
-    }
-
-    fn exceeded_by(self, failures: Failures) -> bool {
-        failures.0 > self.0
-    }
-}
-
 /// A reading that can hand back the bytes it was parsed from. The journal
 /// captures those before anything interprets them.
 pub trait Captured {
@@ -111,38 +96,35 @@ pub trait Sampler: Send + Sync + 'static {
     fn id(&self) -> &str;
 
     fn sample(&self) -> impl Future<Output = Result<Self::Reading, PollError>> + Send;
-
-    /// Consecutive failures this source may have before the loop stops
-    /// trusting it.
-    fn tolerance(&self, loop_default: FailureTolerance) -> FailureTolerance {
-        loop_default
-    }
 }
 
 /// What a tick finds in a slot.
 #[derive(Debug)]
 pub enum Delivery<T> {
-    /// A sample taken since the last read.
+    /// A sample taken for the round this tick asked about.
     Fresh(Clock, T),
-    /// Nothing new, and the source is still within tolerance.
+    /// Nothing taken for this round, and the source is still inside the
+    /// window the loop may go blind for.
     Quiet,
-    /// Failed more often than its tolerance allows, or has gone unanswered
-    /// for longer than the loop may be blind.
+    /// Unanswered for longer than the loop may be blind, with what it had
+    /// failed consecutively by then.
     Down(Failures),
-    /// Never sampled.
-    Cold,
 }
 
 impl<T> Delivery<T> {
-    pub fn is_down(&self) -> bool {
-        matches!(self, Delivery::Down(_))
+    /// What a source that has stopped answering had failed consecutively —
+    /// zero for one that hung, which never reports a failure at all.
+    pub fn down(&self) -> Option<Failures> {
+        match self {
+            Delivery::Down(failures) => Some(*failures),
+            Delivery::Fresh(_, _) | Delivery::Quiet => None,
+        }
     }
 }
 
 /// What one source has most recently produced, and its standing.
 pub struct Slot<T> {
     state: Mutex<SlotState<T>>,
-    tolerance: FailureTolerance,
     blind_window: Elapsed,
 }
 
@@ -152,34 +134,33 @@ struct SlotState<T> {
     /// The last good sample, or the inbox's opening instant while there has
     /// been none — so a source that never comes up still ages out.
     last_good: Timestamp,
-    answered: bool,
 }
 
 impl<T> Slot<T> {
-    fn new(tolerance: FailureTolerance, blind_window: Duration, opened_at: Timestamp) -> Self {
+    fn new(blind_window: Duration, opened_at: Timestamp) -> Self {
         Slot {
             state: Mutex::new(SlotState {
                 pending: None,
                 failures: Failures(0),
                 last_good: opened_at,
-                answered: false,
             }),
-            tolerance,
             blind_window: Elapsed::of(blind_window),
         }
     }
 
-    fn deliver(&self, round: TickSeq, at: Clock, reading: T) {
+    /// Returns what the source had failed consecutively before this sample,
+    /// which is the one count an operator is ever told.
+    fn deliver(&self, round: TickSeq, at: Clock, reading: T) -> Failures {
         let mut state = guard(&self.state);
         state.pending = Some((round, at, reading));
-        state.failures = Failures(0);
         state.last_good = at.now;
-        state.answered = true;
+        std::mem::replace(&mut state.failures, Failures(0))
     }
 
-    fn fail(&self) {
+    fn fail(&self) -> Failures {
         let mut state = guard(&self.state);
         state.failures = Failures(state.failures.0.saturating_add(1));
+        state.failures
     }
 
     /// What this tick may read. Only a sample stamped with `round` is `Fresh`,
@@ -189,16 +170,16 @@ impl<T> Slot<T> {
     pub fn take(&self, round: TickSeq, now: Timestamp) -> Delivery<T> {
         let mut state = guard(&self.state);
 
-        // Failures alone has a hole: a source that hangs never reports one,
-        // so the count would stay at zero through an outage of any length.
-        if self.tolerance.exceeded_by(state.failures) || now - state.last_good > self.blind_window {
+        // Age, not a failure count: a source that hangs never reports a
+        // failure, so a count would stay at zero through an outage of any
+        // length.
+        if now - state.last_good > self.blind_window {
             return Delivery::Down(state.failures);
         }
 
         match state.pending.take() {
             Some((stamp, at, reading)) if stamp == round => Delivery::Fresh(at, reading),
-            _ if state.answered => Delivery::Quiet,
-            _ => Delivery::Cold,
+            _ => Delivery::Quiet,
         }
     }
 }
@@ -210,19 +191,18 @@ pub struct Inbox {
 }
 
 impl Inbox {
+    /// One slot per device the registry holds, so a tick that reads every
+    /// slot has read every box it is about to command.
     pub fn new(
-        meter: FailureTolerance,
-        devices: impl IntoIterator<Item = (DeviceId, FailureTolerance)>,
+        devices: impl IntoIterator<Item = DeviceId>,
         opened_at: Timestamp,
         blind_window: Duration,
     ) -> Self {
         Inbox {
-            meter: Arc::new(Slot::new(meter, blind_window, opened_at)),
+            meter: Arc::new(Slot::new(blind_window, opened_at)),
             devices: devices
                 .into_iter()
-                .map(|(id, tolerance)| {
-                    (id, Arc::new(Slot::new(tolerance, blind_window, opened_at)))
-                })
+                .map(|id| (id, Arc::new(Slot::new(blind_window, opened_at))))
                 .collect(),
         }
     }
@@ -262,8 +242,6 @@ pub async fn sample_loop<S: Sampler>(
     journal: Arc<Journal>,
     timezone: Tz,
 ) {
-    let failures = AtomicU64::new(0);
-
     while requests.changed().await.is_ok() {
         // Read before the request, not after: the round a sample answers is
         // the one that asked for it, and rounds that pass while it is in
@@ -272,20 +250,15 @@ pub async fn sample_loop<S: Sampler>(
 
         match source.sample().await {
             Ok(reading) => {
-                if let Some(raw) = reading.raw() {
-                    journal.raw(raw.kind, &raw.body);
-                }
-                if failures.swap(0, Ordering::Relaxed) > 0 {
+                journal.capture(reading.raw());
+                if slot.deliver(round, Clock::now(timezone), reading) > Failures(0) {
                     tracing::info!("{} is answering again", source.id());
                 }
-                slot.deliver(round, Clock::now(timezone), reading);
             }
             Err(e) => {
-                if let Some(raw) = &e.raw {
-                    journal.raw(raw.kind, &raw.body);
-                }
-                slot.fail();
-                backpressure::tally(&failures, |n| {
+                journal.capture(e.raw.as_ref());
+                let failures = slot.fail();
+                backpressure::report(u64::from(failures.get()), |n| {
                     tracing::warn!("Failed to read {} ({n} in a row): {}", source.id(), e.error);
                 });
             }

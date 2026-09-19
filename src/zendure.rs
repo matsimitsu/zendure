@@ -9,7 +9,7 @@ use crate::device::{
     PollError, RawCapture,
 };
 use crate::models::{PackData, StorageMode, ZendureReport, ZendureWriteRequest};
-use crate::scan::request_timeout;
+use crate::scan::http_client;
 use crate::sync::guard;
 use crate::units::{DeciKelvin, PackTemperature, Setpoint, Soc, WattHours, Watts};
 use crate::world::DeviceId;
@@ -72,13 +72,8 @@ pub const POLL_INTERVAL_FLOOR: Duration = Duration::from_secs(3);
 
 impl ZendureClient {
     pub fn new(ip: &str, sn: String, poll_interval: Duration) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(request_timeout(poll_interval))
-            .build()
-            .expect("failed to create HTTP client");
-
         Self {
-            http,
+            http: http_client(poll_interval),
             base_url: format!("http://{ip}"),
             id: DeviceId::new(sn),
             // The one place the model is named. A second Zendure of a different

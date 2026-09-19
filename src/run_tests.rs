@@ -460,7 +460,7 @@ async fn a_tick_emits_its_device_updates_before_its_meter() {
 /// every command to the last event and make `--verify` pass against a wrong
 /// recording.
 #[tokio::test]
-async fn every_commanded_frame_is_a_meter_or_a_timeout() {
+async fn a_device_update_never_carries_a_command() {
     let dir = tempfile::TempDir::new().unwrap();
     let mut config = virtual_config(&dir, WattHours(1_000.0));
     with_tick(&mut config, Duration::from_millis(50));

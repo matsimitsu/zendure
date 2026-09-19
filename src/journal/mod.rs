@@ -8,7 +8,7 @@ use serde::Serialize;
 use serde::de::IgnoredAny;
 use tokio::sync::mpsc;
 
-use crate::device::{ControlPath, Outcome};
+use crate::device::{ControlPath, Outcome, RawCapture};
 use crate::engine::EngineState;
 use crate::event::Event;
 use crate::models::ControlDecision;
@@ -177,6 +177,14 @@ impl Journal {
             kind,
             payload_json,
         });
+    }
+
+    /// [`raw`](Self::raw) for a caller holding a capture it may or may not
+    /// have — every source that journals its bytes before parsing them.
+    pub fn capture(&self, raw: Option<&RawCapture>) {
+        if let Some(raw) = raw {
+            self.raw(raw.kind, &raw.body);
+        }
     }
 
     /// Records a decision and what it actually did. Called *after* actuation, so
@@ -541,6 +549,12 @@ pub(crate) mod testing {
         writer.await.expect("writer panicked");
     }
 
+    /// A journal that accepts every record and keeps none — and, for a test
+    /// on a paused clock, starts no `spawn_blocking` writer to stall it.
+    pub(crate) fn nowhere() -> Journal {
+        Journal::disabled()
+    }
+
     pub(crate) fn days(n: i64) -> RetentionDays {
         RetentionDays::new(n).unwrap()
     }
@@ -555,7 +569,7 @@ pub(crate) mod testing {
     /// `seq`
     /// alignment depends on. Outcomes come from `registry::actuate` against a recording
     /// double so `command` is filled by production code, and `raw_after` injects a
-    /// pre-parse capture after the nth event, mirroring the subscriber's cross-task
+    /// pre-parse capture after the nth event, mirroring a sampler's cross-task
     /// write that `seq` exists to survive.
     pub(crate) async fn record_with(
         path: &Path,

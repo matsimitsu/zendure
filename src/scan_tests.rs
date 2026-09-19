@@ -1,10 +1,13 @@
 //! Tests for `scan.rs`.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use super::*;
 use crate::battery::BatteryState;
 use crate::config::Config;
 use crate::device::BatteryTelemetry;
-use crate::units::{RetentionDays, Watts};
+use crate::journal::testing::nowhere;
+use crate::units::Watts;
 
 /// Catches a timeout that would leave a request in flight when the next round
 /// starts, and one that would hold a sampler past the fixed ceiling however
@@ -62,8 +65,8 @@ impl Captured for Sample {
     }
 }
 
-fn slot(tolerance: u32) -> Slot<Sample> {
-    Slot::new(FailureTolerance(tolerance), WINDOW, at(0))
+fn slot() -> Slot<Sample> {
+    Slot::new(WINDOW, at(0))
 }
 
 fn at(ms: i64) -> Timestamp {
@@ -75,84 +78,62 @@ fn aged_out() -> Timestamp {
     at(Elapsed::of(WINDOW).as_millis() + 1)
 }
 
-/// A journal that keeps nothing and — crucially for the paused-clock tests
-/// below — starts no `spawn_blocking` writer.
-fn nowhere_journal() -> Arc<Journal> {
-    let (journal, writer) = Journal::open(
-        std::path::Path::new("/dev/null/journal.db"),
-        RetentionDays::new(1).expect("one day is a valid retention"),
-        "0.0.0-test",
-        &(),
-    );
-    assert!(writer.is_none(), "this journal must have no writer task");
-    Arc::new(journal)
-}
-
-/// An intermittent failure costs the round it happened in and nothing else.
+/// The number every operator line reports: consecutive, and reset by a
+/// sample rather than by the round that carried it. Nothing stands a source
+/// down on it, so a count that never reset would only ever misreport.
 #[test]
-fn a_source_that_fails_once_then_succeeds_stays_healthy() {
-    let slot = slot(3);
+fn a_sample_resets_the_consecutive_failure_count() {
+    let slot = slot();
 
-    slot.fail();
-    assert!(matches!(slot.take(ROUND, at(1_000)), Delivery::Cold));
+    assert_eq!(slot.fail().get(), 1);
+    assert_eq!(slot.fail().get(), 2);
 
-    slot.deliver(ROUND, Clock::test_at(2_000), Sample);
-    assert!(matches!(slot.take(ROUND, at(2_000)), Delivery::Fresh(_, _)));
-}
-
-#[test]
-fn failing_past_the_tolerance_takes_a_source_down() {
-    let slot = slot(3);
-
-    for _ in 0..3 {
-        slot.fail();
-    }
-    assert!(
-        !slot.take(ROUND, at(0)).is_down(),
-        "three failures is inside a tolerance of three"
+    assert_eq!(
+        slot.deliver(ROUND, Clock::test_at(1_000), Sample).get(),
+        2,
+        "a delivery reports what the source had failed before it"
     );
-
-    slot.fail();
-    let Delivery::Down(failures) = slot.take(ROUND, at(0)) else {
-        panic!("a fourth failure must exceed a tolerance of three")
-    };
-    assert_eq!(failures.get(), 4);
+    assert_eq!(slot.fail().get(), 1);
 }
 
 /// The self-recovery requirement: nothing supervises a sampler, so a source
 /// that starts answering again has to come back on its own.
 #[test]
 fn one_good_sample_brings_a_down_source_back() {
-    let slot = slot(2);
+    let slot = slot();
 
-    for _ in 0..5 {
-        slot.fail();
-    }
-    assert!(slot.take(ROUND, at(0)).is_down());
+    assert!(slot.take(ROUND, aged_out()).down().is_some());
 
-    slot.deliver(ROUND, Clock::test_at(1_000), Sample);
-    assert!(matches!(slot.take(ROUND, at(1_000)), Delivery::Fresh(_, _)));
+    slot.deliver(ROUND, Clock::test_at(aged_out().as_millis()), Sample);
+    assert!(matches!(
+        slot.take(ROUND, aged_out()),
+        Delivery::Fresh(_, _)
+    ));
 }
 
 /// A source that never comes up at all must still stand the loop down, rather
 /// than staying quiet forever behind a failure count that never rises.
 #[test]
 fn a_slot_that_was_never_sampled_ages_out() {
-    let slot = slot(100);
+    let slot = slot();
 
-    assert!(matches!(slot.take(ROUND, at(0)), Delivery::Cold));
+    assert!(matches!(slot.take(ROUND, at(0)), Delivery::Quiet));
 
-    let Delivery::Down(failures) = slot.take(ROUND, aged_out()) else {
-        panic!("a slot older than the blind window is down")
-    };
+    let failures = slot
+        .take(ROUND, aged_out())
+        .down()
+        .expect("a slot older than the blind window is down");
     assert_eq!(failures.get(), 0, "nothing failed — it never answered");
 }
 
 /// The hole a pure failure count leaves: a request that never returns never
-/// reports a failure, so only the age bound catches it.
+/// reports a failure, so five rounds of asking leave one request outstanding,
+/// nothing delivered and nothing failed — and only the age bound catches it.
 #[tokio::test]
 async fn a_source_that_hangs_goes_down_without_ever_failing() {
-    struct Hanging;
+    struct Hanging {
+        entered: AtomicU64,
+    }
 
     impl Sampler for Hanging {
         type Reading = Sample;
@@ -162,17 +143,21 @@ async fn a_source_that_hangs_goes_down_without_ever_failing() {
         }
 
         async fn sample(&self) -> Result<Sample, PollError> {
+            self.entered.fetch_add(1, Ordering::SeqCst);
             std::future::pending().await
         }
     }
 
-    let slot = Arc::new(slot(100));
+    let source = Arc::new(Hanging {
+        entered: AtomicU64::new(0),
+    });
+    let slot = Arc::new(slot());
     let (requests, _) = watch::channel(TickSeq::FIRST);
     let task = tokio::spawn(sample_loop(
-        Arc::new(Hanging),
+        source.clone(),
         slot.clone(),
         requests.subscribe(),
-        nowhere_journal(),
+        Arc::new(nowhere()),
         chrono_tz::UTC,
     ));
 
@@ -181,9 +166,20 @@ async fn a_source_that_hangs_goes_down_without_ever_failing() {
         tokio::task::yield_now().await;
     }
 
-    let Delivery::Down(failures) = slot.take(ROUND, aged_out()) else {
-        panic!("a source that never answers is down")
-    };
+    assert_eq!(
+        source.entered.load(Ordering::SeqCst),
+        1,
+        "the source has to be in a request that never returned"
+    );
+    assert!(
+        matches!(slot.take(ROUND, at(0)), Delivery::Quiet),
+        "a hung request delivers nothing and fails nothing"
+    );
+
+    let failures = slot
+        .take(ROUND, aged_out())
+        .down()
+        .expect("a source that never answers is down");
     assert_eq!(failures.get(), 0);
 
     task.abort();
@@ -194,7 +190,7 @@ async fn a_source_that_hangs_goes_down_without_ever_failing() {
 /// into the round-trip-efficiency window twice.
 #[test]
 fn a_fresh_sample_is_taken_exactly_once() {
-    let slot = slot(3);
+    let slot = slot();
 
     slot.deliver(ROUND, Clock::test_at(1_000), Sample);
     assert!(matches!(slot.take(ROUND, at(1_000)), Delivery::Fresh(_, _)));
@@ -221,12 +217,7 @@ fn battery_reading() -> BatteryReading {
 #[test]
 fn devices_are_taken_in_id_order_whatever_order_they_answered() {
     let ids = ["zzz", "aaa", "mmm"];
-    let inbox = Inbox::new(
-        FailureTolerance(3),
-        ids.map(|id| (DeviceId::new(id), FailureTolerance(3))),
-        at(0),
-        WINDOW,
-    );
+    let inbox = Inbox::new(ids.map(DeviceId::new), at(0), WINDOW);
 
     for id in ids {
         inbox
@@ -252,12 +243,7 @@ fn devices_are_taken_in_id_order_whatever_order_they_answered() {
 #[test]
 fn a_sample_stamped_with_an_earlier_round_is_not_fresh_for_this_one() {
     let ids = ["early", "ontime"];
-    let inbox = Inbox::new(
-        FailureTolerance(100),
-        ids.map(|id| (DeviceId::new(id), FailureTolerance(100))),
-        at(0),
-        WINDOW,
-    );
+    let inbox = Inbox::new(ids.map(DeviceId::new), at(0), WINDOW);
     let round = TickSeq::FIRST.next();
 
     inbox
@@ -278,23 +264,6 @@ fn a_sample_stamped_with_an_earlier_round_is_not_fresh_for_this_one() {
     assert_eq!(
         taken,
         [("early".to_string(), false), ("ontime".to_string(), true)]
-    );
-}
-
-#[test]
-fn the_tolerance_is_the_rounds_that_fit_the_blind_window() {
-    assert_eq!(
-        FailureTolerance::over(Duration::from_secs(60), Duration::from_secs(3)).get(),
-        20
-    );
-    assert_eq!(
-        FailureTolerance::over(Duration::from_secs(60), Duration::from_secs(150)).get(),
-        1,
-        "a period longer than the window must not stand the fleet down on one failure"
-    );
-    assert_eq!(
-        FailureTolerance::over(Duration::ZERO, Duration::from_secs(3)).get(),
-        1
     );
 }
 
@@ -334,9 +303,9 @@ async fn a_slow_sample_neither_delays_nor_queues_behind_the_requester() {
     let (requests, _) = watch::channel(TickSeq::FIRST);
     let task = tokio::spawn(sample_loop(
         source.clone(),
-        Arc::new(slot(100)),
+        Arc::new(slot()),
         requests.subscribe(),
-        nowhere_journal(),
+        Arc::new(nowhere()),
         chrono_tz::UTC,
     ));
 

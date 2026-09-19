@@ -22,11 +22,11 @@ use crate::mqtt::{self, MqttPublisher, PublisherTask};
 use crate::prediction;
 use crate::publish::{NullPublisher, Publisher};
 use crate::registry::{self, Devices};
-use crate::scan::{self, Delivery, FailureTolerance, Inbox, Sampler, TickSeq};
-use crate::source;
+use crate::scan::{self, Delivery, Failures, Inbox, TickSeq};
+use crate::source::{self, MeterSample};
 use crate::units::{Soc, Timestamp, WattHours};
 use crate::web;
-use crate::world::{Measurement, World};
+use crate::world::{DeviceId, Measurement, World};
 use crate::{controller, rte};
 use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
@@ -85,53 +85,245 @@ pub fn shutdown_signal() -> Result<impl Future<Output = StopReason>, std::io::Er
     })
 }
 
-/// Actuate a decision, record what happened, and report it once. The two callers differ
-/// only in
-/// `ControlPath` (log wording, both status strings, the journal's `kind`). The journal
-/// write
-/// happens after `actuate`, so the recorded outcome reflects whether the write to the
-/// device
-/// actually landed. `engine` is borrowed, not its state passed in, because the state
-/// must be read again after actuation.
-#[allow(clippy::too_many_arguments)]
-async fn apply_decision(
-    devices: &Devices,
-    publisher: &dyn Publisher,
-    journal: &Journal,
-    engine: &Engine,
-    prefix: &str,
-    path: ControlPath,
-    at: Timestamp,
-    decision: &ControlDecision,
-    directives: &[Directive],
-) {
-    // The whole list, not its first element: a step that means "stop one box,
-    // start another" has to reach both devices.
-    let outcomes = registry::actuate(devices, directives, path).await;
-    let failed = outcomes.iter().any(|o| o.applied == Applied::Error);
+/// What every arm of a tick reports through, and the fleet it reaches. None
+/// of it changes while the loop runs, so it is bound once rather than threaded
+/// through each call.
+struct Tick<'a> {
+    devices: &'a Devices,
+    publisher: &'a dyn Publisher,
+    announcer: &'a Announcer,
+    journal: &'a Journal,
+    prefix: &'a str,
+    dashboard: Option<&'a web::DashboardStateSender>,
+    timezone: chrono_tz::Tz,
+    /// How long the loop may go without a usable reading, for the line that
+    /// says so.
+    blind_window: Duration,
+}
 
-    // The engine's state goes in beside the decision so the row carries the
-    // inputs and the history it came from, not just its conclusion.
-    journal.decision(at, path, decision, &engine.state(), &outcomes);
+/// What a tick's device slots said, once every sample taken for its round has
+/// been folded in.
+enum Fleet {
+    /// Every device answered this round.
+    Complete,
+    /// A device's sample is still in flight, or answered an older round.
+    Waiting,
+    /// The devices that have stopped answering, by name.
+    Silent(Vec<(DeviceId, Failures)>),
+}
 
-    // Once after the loop rather than once per command. With one device that is
-    // the same single publish as before; with two it stops the HA status
-    // flapping twice per decision. A failure anywhere takes precedence: the
-    // fleet is degraded even if some of it was commanded successfully.
-    if !directives.is_empty() {
-        let status = if failed {
-            path.err_status()
+/// Which sources a tick found standing down. The event it emits can only say
+/// "mqtt_timeout", so these are the only place an operator learns which box
+/// went quiet.
+struct Silent {
+    meter: Option<Failures>,
+    devices: Vec<(DeviceId, Failures)>,
+}
+
+impl Tick<'_> {
+    /// Folds and publishes every device sample taken for this round, whatever
+    /// the rest of the fleet is doing: a sample is taken once, and dropping it
+    /// because another source went quiet leaves `RteTracker::record`
+    /// integrating one trapezoid across the whole outage.
+    fn fold_devices(
+        &self,
+        engine: &mut Engine,
+        telemetry: &mut PollTelemetry,
+        at: Clock,
+        deliveries: Vec<(DeviceId, Delivery<BatteryReading>)>,
+    ) -> Fleet {
+        let mut fleet = Fleet::Complete;
+        let mut silent = Vec::new();
+
+        for (id, delivery) in deliveries {
+            let (sampled_at, reading) = match delivery {
+                Delivery::Fresh(sampled_at, reading) => (sampled_at, reading),
+                Delivery::Quiet => {
+                    fleet = Fleet::Waiting;
+                    continue;
+                }
+                Delivery::Down(failures) => {
+                    silent.push((id, failures));
+                    continue;
+                }
+            };
+
+            let figures =
+                telemetry.record_and_publish(self.publisher, self.announcer, self.prefix, &reading);
+
+            // The sample's own clock, not the tick's, so `events.ts_ms` says
+            // when the reading was taken.
+            let event = Event::DeviceUpdate {
+                at: sampled_at,
+                id,
+                measurement: Measurement::Battery(reading.state),
+            };
+            self.journal.event(&event);
+            engine.step(&event);
+
+            if let Some(tx) = self.dashboard {
+                let snapshot = engine.state();
+                tx.send_modify(|state| state.poll_tick(&snapshot, figures, at.now));
+            }
+        }
+
+        if silent.is_empty() {
+            fleet
         } else {
-            path.ok_status()
-        };
-        mqtt::publish_status(publisher, prefix, status);
+            Fleet::Silent(silent)
+        }
     }
 
-    mqtt::publish_decision(publisher, prefix, decision);
-    // Published on both paths. The counts do not change on a failsafe idle, but
-    // a consumer that only sees them after an objective decision cannot tell a
-    // quiet hour from a stalled one.
-    mqtt::publish_cycle_counts(publisher, prefix, &engine.cycle_counts());
+    /// Re-asserts idle for the whole fleet. `Step.status` is first-tick-only,
+    /// so the lines naming what stopped answering fire once per outage.
+    async fn stand_down(&self, engine: &mut Engine, at: Clock, silent: Silent) {
+        let event = Event::MqttTimeout { at };
+        self.journal.event(&event);
+        let step = engine.step(&event);
+
+        if step.status.is_some() {
+            tracing::warn!(
+                "No usable meter reading for {}s — forcing idle as safety failsafe",
+                self.blind_window.as_secs(),
+            );
+            if let Some(failures) = silent.meter {
+                tracing::warn!(
+                    "The meter is not answering ({} consecutive failures)",
+                    failures.get(),
+                );
+            }
+            for (id, failures) in &silent.devices {
+                tracing::warn!(
+                    "{id} is not answering ({} consecutive failures)",
+                    failures.get(),
+                );
+            }
+        }
+
+        if let Some(decision) = &step.decision {
+            // Every battery stands down, and one unreachable box does not
+            // leave the others running through the outage.
+            self.apply_decision(
+                engine,
+                ControlPath::Failsafe,
+                at.now,
+                decision,
+                &step.directives,
+            )
+            .await;
+        }
+
+        if let Some(tx) = self.dashboard {
+            let snapshot = engine.state();
+            let decision = step.decision.as_ref().map(|d| (d, at.now));
+            tx.send_modify(|state| state.failsafe_tick(&snapshot, decision, at.now));
+        }
+    }
+
+    /// Folds this round's meter reading and applies whatever the objective
+    /// made of it.
+    async fn decide(&self, engine: &mut Engine, at: Clock, sample: MeterSample) {
+        // Already normalized by the source adapter: whichever meter sent this,
+        // the loop sees a signed total, three phases and a production figure,
+        // and nothing about the wire format.
+        let net_grid_power = sample.observation.grid.total;
+
+        // Bound, not passed inline, so it can be recorded *before* it is
+        // folded in: a crash mid-decision still leaves the input that caused
+        // it on record.
+        let event = Event::Meter {
+            at,
+            grid: sample.observation.grid,
+            solar: sample.observation.solar,
+        };
+        self.journal.event(&event);
+        let step = engine.step(&event);
+
+        if let Some(status) = step.status {
+            tracing::info!("Meter readings resumed");
+            mqtt::publish_status(self.publisher, self.prefix, status);
+        }
+
+        if let Some(decision) = &step.decision {
+            if let Some(battery) = engine.battery() {
+                tracing::info!(
+                    "Decision: {} at {}W — {} (net_grid={:.0}W, battery: SOC={}%, max_charge={}W, max_discharge={}W, current={}W, soc_limit={})",
+                    decision.mode,
+                    decision.power_watts,
+                    decision.reason,
+                    net_grid_power,
+                    battery.soc,
+                    battery.max_charge_power,
+                    battery.max_discharge_power,
+                    battery.current_power,
+                    battery.soc_limit_reached,
+                );
+            }
+
+            self.apply_decision(
+                engine,
+                ControlPath::Objective,
+                at.now,
+                decision,
+                &step.directives,
+            )
+            .await;
+        }
+
+        // The meter is the only tick that extends the sparklines, so their
+        // window stays the meter's own cadence rather than every arm's.
+        if let Some(tx) = self.dashboard {
+            let snapshot = engine.state();
+            let decision = step.decision.as_ref().map(|d| (d, at.now));
+            tx.send_modify(|state| state.meter_tick(&snapshot, decision, &at, self.timezone));
+        }
+    }
+
+    /// Actuate a decision, record what happened, and report it once. The two callers differ
+    /// only in
+    /// `ControlPath` (log wording, both status strings, the journal's `kind`). The journal
+    /// write
+    /// happens after `actuate`, so the recorded outcome reflects whether the write to the
+    /// device
+    /// actually landed. `engine` is borrowed, not its state passed in, because the state
+    /// must be read again after actuation.
+    async fn apply_decision(
+        &self,
+        engine: &Engine,
+        path: ControlPath,
+        at: Timestamp,
+        decision: &ControlDecision,
+        directives: &[Directive],
+    ) {
+        // The whole list, not its first element: a step that means "stop one box,
+        // start another" has to reach both devices.
+        let outcomes = registry::actuate(self.devices, directives, path).await;
+        let failed = outcomes.iter().any(|o| o.applied == Applied::Error);
+
+        // The engine's state goes in beside the decision so the row carries the
+        // inputs and the history it came from, not just its conclusion.
+        self.journal
+            .decision(at, path, decision, &engine.state(), &outcomes);
+
+        // Once after the loop rather than once per command. With one device that is
+        // the same single publish as before; with two it stops the HA status
+        // flapping twice per decision. A failure anywhere takes precedence: the
+        // fleet is degraded even if some of it was commanded successfully.
+        if !directives.is_empty() {
+            let status = if failed {
+                path.err_status()
+            } else {
+                path.ok_status()
+            };
+            mqtt::publish_status(self.publisher, self.prefix, status);
+        }
+
+        mqtt::publish_decision(self.publisher, self.prefix, decision);
+        // Published on both paths. The counts do not change on a failsafe idle, but
+        // a consumer that only sees them after an objective decision cannot tell a
+        // quiet hour from a stalled one.
+        mqtt::publish_cycle_counts(self.publisher, self.prefix, &engine.cycle_counts());
+    }
 }
 
 /// Everything a poll advances and publishes that no decision ever reads: RTE, pack
@@ -260,7 +452,7 @@ fn seed_actual_solar(
 
 /// Starts the journal and whichever combination of broker and meter source `config`
 /// asks for,
-/// then folds events until `stop` resolves or every feeder task goes away. `devices` is
+/// then folds events until `stop` resolves or a source task goes away. `devices` is
 /// handed in
 /// rather than built here — like `stop`, it's a real process edge, and building it
 /// inside `run`
@@ -303,14 +495,10 @@ pub async fn run(
     // The startup handshake, then the first reading — see `BatteryMonitor::prepare`
     // (`zendure.rs`) for the ordering and failure policy.
     let reading = primary.prepare().await.map_err(|e| {
-        if let Some(raw) = &e.raw {
-            journal.raw(raw.kind, &raw.body);
-        }
+        journal.capture(e.raw.as_ref());
         e.error
     })?;
-    if let Some(raw) = &reading.raw {
-        journal.raw(raw.kind, &raw.body);
-    }
+    journal.capture(reading.raw.as_ref());
 
     let BatteryReading {
         state: battery_state,
@@ -406,7 +594,7 @@ pub async fn run(
     engine.step(&startup);
 
     // The loop below breaks for reasons that are not signals — the injected
-    // `stop`, or every feeder going away — and the dashboard has to see all
+    // `stop`, or a source task going away — and the dashboard has to see all
     // of them, so it waits on this rather than on a second signal handler.
     let (web_stop_tx, web_stop_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -415,7 +603,7 @@ pub async fn run(
     // without
     // `[web]` skips reading the journal at startup and cloning snapshots nobody listens
     // to.
-    // Spawned apart from `feeders` (whose death stops the loop, unlike an HTTP
+    // Spawned apart from the source tasks (whose death stops the loop, unlike an HTTP
     // listener); a bind failure just warns and runs without a dashboard, the same way a
     // missing `[mqtt]` runs brokerless.
     let mut dashboard_tx: Option<web::DashboardStateSender> = None;
@@ -441,7 +629,7 @@ pub async fn run(
     }
 
     // The forecast poller: independent of `Event`/`Engine::step` and the
-    // `feeders` vec — the dashboard is its only consumer, so it reaches the
+    // source tasks — the dashboard is its only consumer, so it reaches the
     // `watch` channel directly rather than through the main select loop.
     // Spawned only when both a dashboard and a `[prediction]` backend are
     // configured; absent either, no poller runs and no HTTP call is ever made.
@@ -470,21 +658,14 @@ pub async fn run(
 
     let tick = config.device.poll_interval();
 
-    // Derived once, here at the boundary: as many rounds as fit in the window
-    // the loop is allowed to go blind for, so the stand-down window stays the
-    // one `[tuning] mqtt_timeout_secs` already names.
-    let tolerance = FailureTolerance::over(mqtt_timeout, tick);
-
     let meter = Arc::new(source::from_config(&config, &devices));
-    let battery = devices
-        .handle(&device_id)
-        .expect("the primary device was taken from this registry above");
 
     // Opened before the samplers are asked for anything, so a source that
-    // never answers at all ages out from here.
+    // never answers at all ages out from here. Its device membership comes
+    // from the registry, so every box the fleet is commanded on is one this
+    // tick read.
     let inbox = Inbox::new(
-        meter.tolerance(tolerance),
-        [(device_id.clone(), battery.tolerance(tolerance))],
+        devices.handles().map(|(id, _)| id),
         Clock::now(config.timezone).now,
         mqtt_timeout,
     );
@@ -499,15 +680,17 @@ pub async fn run(
         journal.clone(),
         config.timezone,
     ));
-    sources.spawn(scan::sample_loop(
-        battery,
-        inbox
-            .device_slot(&device_id)
-            .expect("the inbox was just given this device"),
-        requests.subscribe(),
-        journal.clone(),
-        config.timezone,
-    ));
+    for (id, battery) in devices.handles() {
+        sources.spawn(scan::sample_loop(
+            battery,
+            inbox
+                .device_slot(&id)
+                .expect("the inbox was built from these same handles"),
+            requests.subscribe(),
+            journal.clone(),
+            config.timezone,
+        ));
+    }
 
     let mut ticker = tokio::time::interval(tick);
     // `Delay`, not the default `Burst`: the tick body awaits a write to the
@@ -523,18 +706,27 @@ pub async fn run(
     let mut stop = std::pin::pin!(stop);
 
     tracing::info!(
-        "Coordinator running on a {}s tick, standing down after {} failed rounds",
+        "Coordinator running on a {}s tick, standing down after {}s without a usable reading",
         tick.as_secs(),
-        tolerance.get(),
+        mqtt_timeout.as_secs(),
     );
+
+    let tick_context = Tick {
+        devices: &devices,
+        publisher: &*publisher,
+        announcer: &announcer,
+        journal: &journal,
+        prefix: &ha_prefix,
+        dashboard: dashboard_tx.as_ref(),
+        timezone: config.timezone,
+        blind_window: mqtt_timeout,
+    };
 
     // The round every slot is currently answering. A tick reads only the
     // samples stamped with it, so one that arrived too late for the round
-    // before is not served beside one taken for this one.
-    let mut round = TickSeq::FIRST;
-
-    // The first round, so the first tick finds filled slots.
-    round = round.next();
+    // before is not served beside one taken for this one. Asked for ahead of
+    // the first tick, so that tick finds filled slots.
+    let mut round = TickSeq::FIRST.next();
     requests.send_modify(|seq| *seq = round);
 
     loop {
@@ -558,173 +750,33 @@ pub async fn run(
                 // when this tick happened.
                 let at = Clock::now(config.timezone);
 
-                let device_deliveries = inbox.take_devices(round, at.now);
-                let meter_delivery = inbox.take_meter(round, at.now);
+                let fleet = tick_context.fold_devices(
+                    &mut engine,
+                    &mut telemetry,
+                    at,
+                    inbox.take_devices(round, at.now),
+                );
 
-                // Folded whatever the rest of the fleet is doing: a sample is
-                // taken once, and dropping it because another source went
-                // quiet would leave `RteTracker::record` integrating one
-                // trapezoid across the whole outage.
-                let mut every_device_fresh = true;
-                let mut down_devices = Vec::new();
-
-                for (id, delivery) in device_deliveries {
-                    let (sampled_at, reading) = match delivery {
-                        Delivery::Fresh(sampled_at, reading) => (sampled_at, reading),
-                        Delivery::Down(failures) => {
-                            every_device_fresh = false;
-                            down_devices.push((id, failures));
-                            continue;
-                        }
-                        Delivery::Quiet | Delivery::Cold => {
-                            every_device_fresh = false;
-                            continue;
-                        }
-                    };
-
-                    let figures = telemetry.record_and_publish(
-                        &*publisher,
-                        &announcer,
-                        &ha_prefix,
-                        &reading,
-                    );
-
-                    // The sample's own clock, not the tick's, so
-                    // `events.ts_ms` says when the reading was taken.
-                    let event = Event::DeviceUpdate {
-                        at: sampled_at,
-                        id,
-                        measurement: Measurement::Battery(reading.state),
-                    };
-                    journal.event(&event);
-                    engine.step(&event);
-
-                    if let Some(tx) = &dashboard_tx {
-                        let snapshot = engine.state();
-                        tx.send_modify(|state| state.poll_tick(&snapshot, figures, at.now));
+                match (fleet, inbox.take_meter(round, at.now)) {
+                    (Fleet::Silent(down), meter) => {
+                        let silent = Silent { meter: meter.down(), devices: down };
+                        tick_context.stand_down(&mut engine, at, silent).await;
                     }
-                }
-
-                if meter_delivery.is_down() || !down_devices.is_empty() {
-                    let event = Event::MqttTimeout { at };
-                    journal.event(&event);
-                    let step = engine.step(&event);
-
-                    if step.status.is_some() {
-                        tracing::warn!(
-                            "No usable meter reading for {}s — forcing idle as safety failsafe",
-                            mqtt_timeout.as_secs(),
-                        );
-                        // Which source actually stopped answering, since the
-                        // event above can only say "mqtt_timeout".
-                        if let Delivery::Down(failures) = &meter_delivery {
-                            tracing::warn!(
-                                "The meter is not answering ({} consecutive failures)",
-                                failures.get(),
-                            );
-                        }
-                        for (id, failures) in &down_devices {
-                            tracing::warn!(
-                                "{id} is not answering ({} consecutive failures)",
-                                failures.get(),
-                            );
-                        }
+                    (Fleet::Complete | Fleet::Waiting, Delivery::Down(failures)) => {
+                        let silent = Silent { meter: Some(failures), devices: Vec::new() };
+                        tick_context.stand_down(&mut engine, at, silent).await;
                     }
-
-                    if let Some(decision) = &step.decision {
-                        // Every battery stands down, and one unreachable box does
-                        // not leave the others running through the outage.
-                        apply_decision(
-                            &devices,
-                            &*publisher,
-                            &journal,
-                            &engine,
-                            &ha_prefix,
-                            ControlPath::Failsafe,
-                            at.now,
-                            decision,
-                            &step.directives,
-                        )
-                        .await;
+                    (Fleet::Complete, Delivery::Fresh(_, sample)) => {
+                        tick_context.decide(&mut engine, at, sample).await;
                     }
-
-                    if let Some(tx) = &dashboard_tx {
-                        let snapshot = engine.state();
-                        let decision = step.decision.as_ref().map(|d| (d, at.now));
-                        tx.send_modify(|state| state.failsafe_tick(&snapshot, decision, at.now));
-                    }
-                } else {
                     // A setpoint inverts `battery.current_power + (export −
                     // margin)` exactly, which holds only while both terms
-                    // describe the same instant — so a round missing any
+                    // describe the same instant — so a round short of any
                     // source's sample decides nothing and holds the last
                     // command.
-                    match meter_delivery {
-                        Delivery::Fresh(_, sample) if every_device_fresh => {
-                            // Already normalized by the source adapter: whichever
-                            // meter sent this, the loop sees a signed total, three
-                            // phases and a production figure, and nothing about the
-                            // wire format.
-                            let net_grid_power = sample.observation.grid.total;
-
-                            // Bound, not passed inline, so it can be recorded
-                            // *before* it is folded in: a crash mid-decision still
-                            // leaves the input that caused it on record.
-                            let event = Event::Meter {
-                                at,
-                                grid: sample.observation.grid,
-                                solar: sample.observation.solar,
-                            };
-                            journal.event(&event);
-                            let step = engine.step(&event);
-
-                            if let Some(status) = step.status {
-                                tracing::info!("Meter readings resumed");
-                                mqtt::publish_status(&*publisher, &ha_prefix, status);
-                            }
-
-                            if let Some(decision) = &step.decision {
-                                if let Some(battery) = engine.battery() {
-                                    tracing::info!(
-                                        "Decision: {} at {}W — {} (net_grid={:.0}W, battery: SOC={}%, max_charge={}W, max_discharge={}W, current={}W, soc_limit={})",
-                                        decision.mode,
-                                        decision.power_watts,
-                                        decision.reason,
-                                        net_grid_power,
-                                        battery.soc,
-                                        battery.max_charge_power,
-                                        battery.max_discharge_power,
-                                        battery.current_power,
-                                        battery.soc_limit_reached,
-                                    );
-                                }
-
-                                apply_decision(
-                                    &devices,
-                                    &*publisher,
-                                    &journal,
-                                    &engine,
-                                    &ha_prefix,
-                                    ControlPath::Objective,
-                                    at.now,
-                                    decision,
-                                    &step.directives,
-                                )
-                                .await;
-                            }
-
-                            // The meter is the only tick that extends the
-                            // sparklines, so their window stays the meter's own
-                            // cadence rather than every arm's.
-                            if let Some(tx) = &dashboard_tx {
-                                let snapshot = engine.state();
-                                let decision = step.decision.as_ref().map(|d| (d, at.now));
-                                tx.send_modify(|state| {
-                                    state.meter_tick(&snapshot, decision, &at, config.timezone)
-                                });
-                            }
-                        }
-                        _ => tracing::debug!("Skipped a round: not every source had a fresh sample"),
+                    (Fleet::Complete, Delivery::Quiet)
+                    | (Fleet::Waiting, Delivery::Fresh(_, _) | Delivery::Quiet) => {
+                        tracing::debug!("Skipped a round: not every source answered it")
                     }
                 }
 
