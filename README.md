@@ -75,7 +75,7 @@ client_id = "odroid"
 kind = "zendure"
 ip = "192.168.1.253"        # required
 sn = "HEC4NENCN490270"      # required
-poll_interval_secs = 10     # minimum 3; the request timeout derives from it
+poll_interval_secs = 3      # the control tick; minimum 3, timeout derives from it
 
 [shelly]
 ip = "192.168.1.11"         # required
@@ -126,7 +126,7 @@ discharge_margin = 5
 charge_start_threshold = -100.0
 discharge_start_threshold = 0.0
 min_mode_duration_secs = 10
-min_decision_interval_secs = 5
+min_decision_interval_secs = 0
 idle_timeout_secs = 300
 min_idle_before_discharge_secs = 300
 cycle_warn_threshold = 200

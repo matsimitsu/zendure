@@ -42,8 +42,10 @@ client_id = "odroid"
 kind = "zendure"
 ip = "192.168.1.253"
 sn = "HEC4NENCN490270"
-# Minimum 3; the HTTP request timeout derives from this (see README).
-poll_interval_secs = 10
+# The control tick: how often every source is sampled and a decision is made.
+# Minimum 3, the rate the battery refreshes its own report. The HTTP request
+# timeout derives from it too (see README).
+poll_interval_secs = 3
 
 [shelly]
 ip = "192.168.1.11"   # required
@@ -110,7 +112,9 @@ discharge_margin = 5
 charge_start_threshold = -100.0
 discharge_start_threshold = 0.0
 min_mode_duration_secs = 10
-min_decision_interval_secs = 5
+# The scan cycle paces decisions now, so this throttles nothing at 0. Raise it
+# only to decide more slowly than poll_interval_secs samples.
+min_decision_interval_secs = 0
 # Was IDLE_TIMEOUT_MINUTES, in minutes. The name carries the unit now, and it
 # is seconds — the same unit the journal has always recorded it in.
 idle_timeout_secs = 300

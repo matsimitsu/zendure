@@ -502,7 +502,7 @@ fn the_example_config_is_what_production_runs() {
         device: DeviceConfig::Zendure {
             ip: "192.168.1.253".to_string(),
             sn: "HEC4NENCN490270".to_string(),
-            poll_interval: Duration::from_secs(10),
+            poll_interval: Duration::from_secs(3),
         },
         shelly: Some(ShellyConfig {
             ip: "192.168.1.11".to_string(),
@@ -517,7 +517,7 @@ fn the_example_config_is_what_production_runs() {
         charge_start_threshold: GridPower(-100.0),
         discharge_start_threshold: GridPower(0.0),
         min_mode_duration: Duration::from_secs(10),
-        min_decision_interval: Duration::from_secs(5),
+        min_decision_interval: Duration::from_secs(0),
         idle_timeout: Duration::from_secs(300),
         cycle_warn_threshold: 200,
         min_soc: Soc::new(10),

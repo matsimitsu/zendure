@@ -26,13 +26,13 @@ fn a_request_gives_up_before_the_next_poll_and_within_a_fixed_bound() {
 /// Catches a change to the timeout the deployed period derives, which is the
 /// one that reaches the box.
 #[test]
-fn the_shipped_poll_period_derives_a_five_second_timeout() {
+fn the_shipped_scan_period_derives_a_two_second_timeout() {
     let (config, _) = Config::from_toml_str(include_str!("../config.example.toml"))
         .expect("the example config parses");
 
     assert_eq!(
         request_timeout(config.device.poll_interval()),
-        Duration::from_secs(5)
+        Duration::from_secs(2)
     );
 }
 
