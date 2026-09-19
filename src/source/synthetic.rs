@@ -12,6 +12,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{TimeZone, Timelike};
 use chrono_tz::Tz;
 use tokio::sync::mpsc;
 
@@ -30,18 +31,20 @@ use super::MeterObservation;
 pub struct HouseProfile {
     base_load: Watts,
     solar_peak: Watts,
+    timezone: Tz,
 }
 
 impl HouseProfile {
-    pub fn new(base_load: Watts, solar_peak: Watts) -> Self {
+    pub fn new(base_load: Watts, solar_peak: Watts, timezone: Tz) -> Self {
         HouseProfile {
             base_load,
             solar_peak,
+            timezone,
         }
     }
 
-    /// The house's own load and its solar production at this hour, before the
-    /// battery. Solar follows a cosine centred on noon, clamped at zero (not
+    /// The house's own load and its solar production at this instant, before
+    /// the battery. Solar follows a cosine centred on noon, clamped at zero (not
     /// a gaussian, which only approaches zero at the day's edges): `cos(pi *
     /// (hour-12)/12)` is negative before ~06:00 and after ~18:00, and exactly `1.0` at
     /// noon — an exact, reproducible zero/peak rather than an approximation. The load
@@ -50,13 +53,25 @@ impl HouseProfile {
         const PEAK_HOUR: f64 = 12.0;
         const HALF_DAY: f64 = 12.0;
 
-        let hours_from_noon = f64::from(clock.hour) - PEAK_HOUR;
-        let fraction = (std::f64::consts::PI * hours_from_noon / HALF_DAY)
+        let fraction = (std::f64::consts::PI * (self.local_hour(clock) - PEAK_HOUR) / HALF_DAY)
             .cos()
             .max(0.0);
 
         let solar = SolarPower::new(self.solar_peak.as_f64() * fraction);
         (self.base_load, solar)
+    }
+
+    /// The hour of day including its minutes, both in the configured zone: a
+    /// half-hour offset would otherwise step the curve backwards twice an hour.
+    fn local_hour(&self, clock: &Clock) -> f64 {
+        let Some(local) = self
+            .timezone
+            .timestamp_millis_opt(clock.now.as_millis())
+            .single()
+        else {
+            return f64::from(clock.hour);
+        };
+        f64::from(local.hour()) + f64::from(local.minute()) / 60.0
     }
 }
 
@@ -110,7 +125,6 @@ fn observation(profile: &HouseProfile, clock: &Clock, flow: BatteryPower) -> Met
 pub async fn run_synthetic_meter(
     profile: HouseProfile,
     battery: Arc<VirtualBattery>,
-    timezone: Tz,
     tx: mpsc::Sender<MqttEvent>,
 ) {
     let mut ticker = tokio::time::interval(Duration::from_secs(1));
@@ -118,7 +132,7 @@ pub async fn run_synthetic_meter(
     loop {
         ticker.tick().await;
 
-        let clock = Clock::now(timezone);
+        let clock = Clock::now(profile.timezone);
         let flow = battery.flow();
         let obs = observation(&profile, &clock, flow);
 
@@ -134,16 +148,33 @@ mod tests {
     use super::*;
     use crate::command::Command;
     use crate::device::BatterySpec;
-    use crate::units::{Efficiency, PowerCap, Setpoint, Soc, WattHours};
+    use crate::units::{Efficiency, PowerCap, Setpoint, Soc, Timestamp, WattHours};
     use crate::world::DeviceId;
 
     fn profile() -> HouseProfile {
-        HouseProfile::new(Watts(500), Watts(3_000))
+        profile_in(chrono_tz::UTC)
+    }
+
+    fn profile_in(timezone: Tz) -> HouseProfile {
+        HouseProfile::new(Watts(500), Watts(3_000), timezone)
     }
 
     fn clock_at(hour: u32) -> Clock {
+        clock_at_minute(hour, 0)
+    }
+
+    fn clock_at_minute(hour: u32, minute: u32) -> Clock {
+        clock_in(chrono_tz::UTC, hour, minute)
+    }
+
+    /// `at` reads the timestamp, in the profile's zone; `hour` only agrees with it.
+    fn clock_in(timezone: Tz, hour: u32, minute: u32) -> Clock {
+        let local = timezone
+            .with_ymd_and_hms(2026, 6, 15, hour, minute, 0)
+            .unwrap();
         Clock {
             hour,
+            now: Timestamp::from(local),
             ..Clock::test_at(0)
         }
     }
@@ -160,6 +191,58 @@ mod tests {
         // Exactly the rated peak: `cos(0) == 1.0` precisely, not merely close
         // to it, so this asserts equality rather than a tolerance.
         assert_eq!(solar, SolarPower::new(3_000.0));
+    }
+
+    /// The failure this catches: solar keyed off the integer hour, a staircase
+    /// no smooth ramp can be simulated against.
+    #[test]
+    fn solar_climbs_within_the_hour_rather_than_stepping_at_it() {
+        let house = profile();
+        let readings: Vec<f64> = [0, 15, 30, 45]
+            .iter()
+            .map(|m| house.at(&clock_at_minute(9, *m)).1.get())
+            .collect();
+
+        for pair in readings.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "solar stalled across a quarter-hour: {readings:?}",
+            );
+        }
+        assert!(
+            *readings.last().unwrap() < house.at(&clock_at(10)).1.get(),
+            "the last quarter of 09:00 overshot 10:00: {readings:?}",
+        );
+    }
+
+    /// The failure this catches: a curve that approaches its peak and its
+    /// zeroes rather than landing on them exactly.
+    #[test]
+    fn the_curve_keeps_its_exact_peak_and_its_exact_zeroes() {
+        let house = profile();
+
+        assert_eq!(house.at(&clock_at(12)).1, SolarPower::new(3_000.0));
+        assert!(house.at(&clock_at_minute(11, 59)).1 < SolarPower::new(3_000.0));
+        assert!(house.at(&clock_at_minute(12, 1)).1 < SolarPower::new(3_000.0));
+
+        assert_eq!(house.at(&clock_at_minute(5, 59)).1, SolarPower::ZERO);
+        assert_eq!(house.at(&clock_at_minute(18, 1)).1, SolarPower::ZERO);
+    }
+
+    /// The failure this catches: a local hour mixed with a UTC sub-hour
+    /// fraction, which in a half-hour-offset zone misses local noon.
+    #[test]
+    fn a_half_hour_offset_zone_peaks_at_its_own_noon() {
+        let tz = chrono_tz::Asia::Kolkata;
+        let house = profile_in(tz);
+
+        assert_eq!(house.at(&clock_in(tz, 12, 0)).1, SolarPower::new(3_000.0));
+        let readings: Vec<f64> = (0..60)
+            .map(|m| house.at(&clock_in(tz, 9, m)).1.get())
+            .collect();
+        for pair in readings.windows(2) {
+            assert!(pair[1] > pair[0], "solar stepped backwards: {readings:?}");
+        }
     }
 
     #[test]
@@ -226,23 +309,21 @@ mod tests {
         let clock = clock_at(9); // some solar, but not the whole story here
         let house = profile();
 
+        // The pack slews, so each flow is read once it has arrived.
+        let t0 = tokio::time::Instant::now();
+        let arrived = t0 + Duration::from_secs(3);
+
         let idle = battery(Soc::new(50));
-        idle.apply_at(tokio::time::Instant::now(), &Command::SetIdle);
-        let idle_reading = observation(&house, &clock, idle.flow());
+        idle.apply_at(t0, &Command::SetIdle);
+        let idle_reading = observation(&house, &clock, idle.flow_at(arrived));
 
         let charging = battery(Soc::new(50));
-        charging.apply_at(
-            tokio::time::Instant::now(),
-            &Command::SetCharge(Setpoint::new(1_000)),
-        );
-        let charging_reading = observation(&house, &clock, charging.flow());
+        charging.apply_at(t0, &Command::SetCharge(Setpoint::new(1_000)));
+        let charging_reading = observation(&house, &clock, charging.flow_at(arrived));
 
         let discharging = battery(Soc::new(50));
-        discharging.apply_at(
-            tokio::time::Instant::now(),
-            &Command::SetDischarge(Setpoint::new(1_000)),
-        );
-        let discharging_reading = observation(&house, &clock, discharging.flow());
+        discharging.apply_at(t0, &Command::SetDischarge(Setpoint::new(1_000)));
+        let discharging_reading = observation(&house, &clock, discharging.flow_at(arrived));
 
         assert!(
             charging_reading.grid.total.get() > idle_reading.grid.total.get(),

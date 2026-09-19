@@ -419,12 +419,11 @@ pub async fn run(
                 "Config::from_toml_str requires a virtual device when the meter is synthetic"
             ),
         };
-        let profile = source::synthetic::HouseProfile::new(*base_load, *solar_peak);
+        let profile =
+            source::synthetic::HouseProfile::new(*base_load, *solar_peak, config.timezone);
         let feed_tx = tx.clone();
-        let timezone = config.timezone;
         feeders.push(tokio::spawn(async move {
-            source::synthetic::run_synthetic_meter(profile, virtual_battery, timezone, feed_tx)
-                .await;
+            source::synthetic::run_synthetic_meter(profile, virtual_battery, feed_tx).await;
         }));
     }
 

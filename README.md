@@ -397,8 +397,12 @@ cargo run -- --config ./config.example.toml
 No Zendure, no Shelly, no MQTT broker — `config.example.virtual.toml` runs
 the whole controller against a `VirtualBattery` (a real integrating energy
 model, not a stub that agrees with whatever it's told) fed by a synthetic
-house meter that folds the battery's own flow back into its readings. It
-works from a fresh clone with no setup:
+house meter that folds the battery's own flow back into its readings. The
+simulated pack closes on a commanded setpoint at 800 W/s — the ~3 s response
+time Zendure publishes — rather than arriving at it instantly, and the
+synthetic solar curve moves continuously through the day rather than in
+hourly steps, so what the loop is tuned against is not kinder than the
+hardware. It works from a fresh clone with no setup:
 
 ```bash
 cargo run -- --config config.example.virtual.toml
