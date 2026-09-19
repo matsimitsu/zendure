@@ -1278,6 +1278,49 @@ fn discharge_converges_to_house_consumption() {
     );
 }
 
+/// The failure this catches: a battery report one decision older than the
+/// meter destabilising a loop that converges when the two are the same age.
+#[test]
+#[ignore = "specification for the control-law fix; diverges under today's law"]
+fn a_lagged_battery_report_still_converges() {
+    let mut ctrl = controller_no_cooldown();
+    let house = 150.0_f64;
+
+    // What the meter already reflects, and what the last poll reported — one
+    // decision older. Both start at zero: the battery is idle.
+    let mut actual = 0_i32;
+    let mut reported = 0_i32;
+
+    let mut setpoints = Vec::new();
+    for _ in 0..12 {
+        let net = house - f64::from(actual);
+        let bat = battery_discharging(80, reported);
+        let decision = decide_at(
+            &mut ctrl,
+            &world(GridPower(net), SolarPower::new(0.0), &bat),
+            &clock(12),
+        );
+        reported = actual;
+        actual = decision.power_watts.get();
+        setpoints.push(actual);
+    }
+
+    let reversals = setpoints
+        .windows(3)
+        .filter(|w| (w[2] - w[1]).signum() * (w[1] - w[0]).signum() < 0)
+        .count();
+    let final_net = house - f64::from(*setpoints.last().expect("12 decisions"));
+
+    assert!(
+        final_net.abs() < 20.0,
+        "the loop settled {final_net:.0}W off a steady house: {setpoints:?}"
+    );
+    assert!(
+        reversals <= 2,
+        "{reversals} direction reversals against a load that never moved: {setpoints:?}"
+    );
+}
+
 // --- Solar discharge block tests ---
 
 #[test]
