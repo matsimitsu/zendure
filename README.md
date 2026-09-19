@@ -153,12 +153,18 @@ point the subscriber is built, not something the config file itself reads.
 **`device.poll_interval_secs` is the control tick.** It paces every source's
 sample, and one decision is made per round. Every adapter's HTTP request
 timeout is derived from it — the meter's as well as the battery's, half the
-period, clamped to 2–5 s — so a stalled request is always abandoned before the
-next round is due, and one unresponsive box never holds the tick at all: its
-sampler runs in its own task and simply leaves its slot with nothing new. Below 3 s, the device's own report refresh, it warns and is raised
-to 3. A `kind = "virtual"` device answers in-process, so neither the floor nor
-the derived timeout applies to it: the key is optional there and defaults to
-1 s, and only zero is refused.
+period, raised to 2 s and capped at 5 s wherever that still leaves it under the
+period — so a stalled request is always abandoned before the next round is due,
+and one unresponsive box never holds the tick at all: its sampler runs in its
+own task and simply leaves its slot with nothing new. Below 3 s, the device's
+own report refresh, it warns and is raised to 3. A `kind = "virtual"` device
+answers in-process, so the floor does not apply to it: the key is optional there
+and defaults to 1 s, and only zero is refused.
+
+`[tuning] mqtt_timeout_secs` is measured against the same tick, so it must
+outlast several rounds of it: a healthy source is one tick old when a tick reads
+it, and a window inside that would stand the fleet down with everything
+answering. Anything at or under three ticks warns and is raised to three.
 
 `zendure --check --config <path>` runs the same parse, but strictly: a parse
 error is fatal exactly as it is for the daemon, and **any warning is promoted

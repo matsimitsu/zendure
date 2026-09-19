@@ -29,22 +29,29 @@ use crate::sync::guard;
 use crate::units::{Elapsed, Timestamp};
 use crate::world::DeviceId;
 
-/// What [`request_timeout`] derives within: the ceiling bounds how long one
-/// unresponsive device can hold the loop, and the floor stays under the
-/// shortest period configuration allows, so a request is abandoned before the
-/// next round is due.
+/// What [`request_timeout`] derives within: the floor keeps a request from
+/// being abandoned faster than either box answers, and the ceiling bounds how
+/// long a sampler waits on an unresponsive source before it may try again.
 pub(crate) const MIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const MAX_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Half the period the caller scans at, bounded: a request still in flight
-/// when the next round goes out overlaps it, which the Zendure firmware
-/// answers with delayed replies and `ECONNRESET`.
+/// Half the period the caller scans at, bounded — and raised to
+/// [`MIN_REQUEST_TIMEOUT`] only where that still leaves it under the period. A
+/// request still in flight when the next round goes out overlaps it, which the
+/// Zendure firmware answers with delayed replies and `ECONNRESET`.
 pub(crate) fn request_timeout(scan_period: Duration) -> Duration {
-    (scan_period / 2).clamp(MIN_REQUEST_TIMEOUT, MAX_REQUEST_TIMEOUT)
+    let half = scan_period / 2;
+
+    if MIN_REQUEST_TIMEOUT < scan_period {
+        half.clamp(MIN_REQUEST_TIMEOUT, MAX_REQUEST_TIMEOUT)
+    } else {
+        half
+    }
 }
 
-/// Which round every source is being asked for. Only ever compared for
-/// change, so rounds a busy source slept through coalesce into one request.
+/// Which round every source is being asked for. A sample is stamped with the
+/// round it answered, so a tick can tell one taken for it from one that
+/// arrived too late for the round before.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TickSeq(u64);
 
@@ -140,7 +147,7 @@ pub struct Slot<T> {
 }
 
 struct SlotState<T> {
-    pending: Option<(Clock, T)>,
+    pending: Option<(TickSeq, Clock, T)>,
     failures: Failures,
     /// The last good sample, or the inbox's opening instant while there has
     /// been none — so a source that never comes up still ages out.
@@ -162,9 +169,9 @@ impl<T> Slot<T> {
         }
     }
 
-    fn deliver(&self, at: Clock, reading: T) {
+    fn deliver(&self, round: TickSeq, at: Clock, reading: T) {
         let mut state = guard(&self.state);
-        state.pending = Some((at, reading));
+        state.pending = Some((round, at, reading));
         state.failures = Failures(0);
         state.last_good = at.now;
         state.answered = true;
@@ -175,11 +182,11 @@ impl<T> Slot<T> {
         state.failures = Failures(state.failures.0.saturating_add(1));
     }
 
-    /// What this tick may read. `Fresh` is handed out once: a sample an
-    /// earlier tick already decided on would date the decision's inputs
-    /// differently from each other, and `RteTracker::record` integrates
+    /// What this tick may read. Only a sample stamped with `round` is `Fresh`,
+    /// and only once: one taken for an earlier round would date the decision's
+    /// inputs differently from each other, and `RteTracker::record` integrates
     /// between calls, so re-recording one counts the same joules twice.
-    pub fn take(&self, now: Timestamp) -> Delivery<T> {
+    pub fn take(&self, round: TickSeq, now: Timestamp) -> Delivery<T> {
         let mut state = guard(&self.state);
 
         // Failures alone has a hole: a source that hangs never reports one,
@@ -189,9 +196,9 @@ impl<T> Slot<T> {
         }
 
         match state.pending.take() {
-            Some((at, reading)) => Delivery::Fresh(at, reading),
-            None if state.answered => Delivery::Quiet,
-            None => Delivery::Cold,
+            Some((stamp, at, reading)) if stamp == round => Delivery::Fresh(at, reading),
+            _ if state.answered => Delivery::Quiet,
+            _ => Delivery::Cold,
         }
     }
 }
@@ -228,16 +235,20 @@ impl Inbox {
         self.devices.get(id).cloned()
     }
 
-    pub fn take_meter(&self, now: Timestamp) -> Delivery<MeterSample> {
-        self.meter.take(now)
+    pub fn take_meter(&self, round: TickSeq, now: Timestamp) -> Delivery<MeterSample> {
+        self.meter.take(round, now)
     }
 
     /// Every device slot, in id order, so a tick folds two batteries the same
     /// way twice running whichever answered first.
-    pub fn take_devices(&self, now: Timestamp) -> Vec<(DeviceId, Delivery<BatteryReading>)> {
+    pub fn take_devices(
+        &self,
+        round: TickSeq,
+        now: Timestamp,
+    ) -> Vec<(DeviceId, Delivery<BatteryReading>)> {
         self.devices
             .iter()
-            .map(|(id, slot)| (id.clone(), slot.take(now)))
+            .map(|(id, slot)| (id.clone(), slot.take(round, now)))
             .collect()
     }
 }
@@ -254,6 +265,11 @@ pub async fn sample_loop<S: Sampler>(
     let failures = AtomicU64::new(0);
 
     while requests.changed().await.is_ok() {
+        // Read before the request, not after: the round a sample answers is
+        // the one that asked for it, and rounds that pass while it is in
+        // flight coalesce into the next `changed()`.
+        let round = *requests.borrow_and_update();
+
         match source.sample().await {
             Ok(reading) => {
                 if let Some(raw) = reading.raw() {
@@ -262,7 +278,7 @@ pub async fn sample_loop<S: Sampler>(
                 if failures.swap(0, Ordering::Relaxed) > 0 {
                     tracing::info!("{} is answering again", source.id());
                 }
-                slot.deliver(Clock::now(timezone), reading);
+                slot.deliver(round, Clock::now(timezone), reading);
             }
             Err(e) => {
                 if let Some(raw) = &e.raw {
@@ -274,10 +290,6 @@ pub async fn sample_loop<S: Sampler>(
                 });
             }
         }
-
-        // A sample that outlived its round answers the next request, not the
-        // rounds it slept through.
-        requests.borrow_and_update();
     }
 }
 

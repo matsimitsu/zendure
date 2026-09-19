@@ -7,12 +7,23 @@ use crate::device::BatteryTelemetry;
 use crate::units::{RetentionDays, Watts};
 
 /// Catches a timeout that would leave a request in flight when the next round
-/// starts, and one that would hold the loop for longer than the fixed ceiling
-/// however long the period grows.
+/// starts, and one that would hold a sampler past the fixed ceiling however
+/// long the period grows. The domain reaches down to the shortest period a
+/// virtual device can be given, since the floor does not apply there.
 #[test]
 fn a_request_gives_up_before_the_next_poll_and_within_a_fixed_bound() {
-    for secs in [3, 4, 5, 9, 10, 11, 60, 150, 3_600, 86_400] {
-        let period = Duration::from_secs(secs);
+    let periods = [
+        50, 250, 500, 1_000, 2_000, 2_500, 3_000, 4_000, 5_000, 9_000,
+    ]
+    .into_iter()
+    .map(Duration::from_millis)
+    .chain(
+        [10, 11, 60, 150, 3_600, 86_400]
+            .into_iter()
+            .map(Duration::from_secs),
+    );
+
+    for period in periods {
         let timeout = request_timeout(period);
 
         assert!(timeout < period, "{period:?} derived {timeout:?}");
@@ -38,6 +49,9 @@ fn the_shipped_scan_period_derives_a_two_second_timeout() {
 
 /// How long the loop may go without a usable reading before it stands down.
 const WINDOW: Duration = Duration::from_secs(60);
+
+/// The round a test asks for and answers, where it only needs one.
+const ROUND: TickSeq = TickSeq::FIRST;
 
 /// A reading with no wire format behind it, which is all these tests need.
 struct Sample;
@@ -80,10 +94,10 @@ fn a_source_that_fails_once_then_succeeds_stays_healthy() {
     let slot = slot(3);
 
     slot.fail();
-    assert!(matches!(slot.take(at(1_000)), Delivery::Cold));
+    assert!(matches!(slot.take(ROUND, at(1_000)), Delivery::Cold));
 
-    slot.deliver(Clock::test_at(2_000), Sample);
-    assert!(matches!(slot.take(at(2_000)), Delivery::Fresh(_, _)));
+    slot.deliver(ROUND, Clock::test_at(2_000), Sample);
+    assert!(matches!(slot.take(ROUND, at(2_000)), Delivery::Fresh(_, _)));
 }
 
 #[test]
@@ -94,12 +108,12 @@ fn failing_past_the_tolerance_takes_a_source_down() {
         slot.fail();
     }
     assert!(
-        !slot.take(at(0)).is_down(),
+        !slot.take(ROUND, at(0)).is_down(),
         "three failures is inside a tolerance of three"
     );
 
     slot.fail();
-    let Delivery::Down(failures) = slot.take(at(0)) else {
+    let Delivery::Down(failures) = slot.take(ROUND, at(0)) else {
         panic!("a fourth failure must exceed a tolerance of three")
     };
     assert_eq!(failures.get(), 4);
@@ -114,10 +128,10 @@ fn one_good_sample_brings_a_down_source_back() {
     for _ in 0..5 {
         slot.fail();
     }
-    assert!(slot.take(at(0)).is_down());
+    assert!(slot.take(ROUND, at(0)).is_down());
 
-    slot.deliver(Clock::test_at(1_000), Sample);
-    assert!(matches!(slot.take(at(1_000)), Delivery::Fresh(_, _)));
+    slot.deliver(ROUND, Clock::test_at(1_000), Sample);
+    assert!(matches!(slot.take(ROUND, at(1_000)), Delivery::Fresh(_, _)));
 }
 
 /// A source that never comes up at all must still stand the loop down, rather
@@ -126,9 +140,9 @@ fn one_good_sample_brings_a_down_source_back() {
 fn a_slot_that_was_never_sampled_ages_out() {
     let slot = slot(100);
 
-    assert!(matches!(slot.take(at(0)), Delivery::Cold));
+    assert!(matches!(slot.take(ROUND, at(0)), Delivery::Cold));
 
-    let Delivery::Down(failures) = slot.take(aged_out()) else {
+    let Delivery::Down(failures) = slot.take(ROUND, aged_out()) else {
         panic!("a slot older than the blind window is down")
     };
     assert_eq!(failures.get(), 0, "nothing failed — it never answered");
@@ -167,7 +181,7 @@ async fn a_source_that_hangs_goes_down_without_ever_failing() {
         tokio::task::yield_now().await;
     }
 
-    let Delivery::Down(failures) = slot.take(aged_out()) else {
+    let Delivery::Down(failures) = slot.take(ROUND, aged_out()) else {
         panic!("a source that never answers is down")
     };
     assert_eq!(failures.get(), 0);
@@ -182,9 +196,9 @@ async fn a_source_that_hangs_goes_down_without_ever_failing() {
 fn a_fresh_sample_is_taken_exactly_once() {
     let slot = slot(3);
 
-    slot.deliver(Clock::test_at(1_000), Sample);
-    assert!(matches!(slot.take(at(1_000)), Delivery::Fresh(_, _)));
-    assert!(matches!(slot.take(at(1_000)), Delivery::Quiet));
+    slot.deliver(ROUND, Clock::test_at(1_000), Sample);
+    assert!(matches!(slot.take(ROUND, at(1_000)), Delivery::Fresh(_, _)));
+    assert!(matches!(slot.take(ROUND, at(1_000)), Delivery::Quiet));
 }
 
 fn battery_reading() -> BatteryReading {
@@ -218,10 +232,10 @@ fn devices_are_taken_in_id_order_whatever_order_they_answered() {
         inbox
             .device_slot(&DeviceId::new(id))
             .expect("every id was registered")
-            .deliver(Clock::test_at(1_000), battery_reading());
+            .deliver(ROUND, Clock::test_at(1_000), battery_reading());
     }
 
-    let taken = inbox.take_devices(at(1_000));
+    let taken = inbox.take_devices(ROUND, at(1_000));
     let order: Vec<String> = taken.iter().map(|(id, _)| id.to_string()).collect();
 
     assert_eq!(order, ["aaa", "mmm", "zzz"]);
@@ -229,6 +243,41 @@ fn devices_are_taken_in_id_order_whatever_order_they_answered() {
         taken
             .iter()
             .all(|(_, delivery)| matches!(delivery, Delivery::Fresh(_, _)))
+    );
+}
+
+/// The matched-age invariant at its narrowest: a sample that arrived too late
+/// for its round must not be served beside one taken for the round that just
+/// completed, or the two terms a setpoint subtracts are a tick apart.
+#[test]
+fn a_sample_stamped_with_an_earlier_round_is_not_fresh_for_this_one() {
+    let ids = ["early", "ontime"];
+    let inbox = Inbox::new(
+        FailureTolerance(100),
+        ids.map(|id| (DeviceId::new(id), FailureTolerance(100))),
+        at(0),
+        WINDOW,
+    );
+    let round = TickSeq::FIRST.next();
+
+    inbox
+        .device_slot(&DeviceId::new("early"))
+        .expect("every id was registered")
+        .deliver(TickSeq::FIRST, Clock::test_at(0), battery_reading());
+    inbox
+        .device_slot(&DeviceId::new("ontime"))
+        .expect("every id was registered")
+        .deliver(round, Clock::test_at(3_000), battery_reading());
+
+    let taken: Vec<_> = inbox
+        .take_devices(round, at(3_000))
+        .into_iter()
+        .map(|(id, delivery)| (id.to_string(), matches!(delivery, Delivery::Fresh(_, _))))
+        .collect();
+
+    assert_eq!(
+        taken,
+        [("early".to_string(), false), ("ontime".to_string(), true)]
     );
 }
 

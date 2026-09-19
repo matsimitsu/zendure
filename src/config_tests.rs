@@ -302,6 +302,50 @@ fn a_poll_interval_under_the_floor_warns_and_is_raised() {
     );
 }
 
+/// A healthy source is one tick old when a tick reads it, so a window at or
+/// inside the tick pins the controller in the failsafe with everything
+/// answering.
+#[test]
+fn a_blind_window_inside_three_scan_rounds_warns_and_is_raised() {
+    let toml = format!("{}\n[tuning]\nmqtt_timeout_secs = 10\n", minimal_toml());
+
+    let (config, warnings) = Config::from_toml_str(&toml).unwrap();
+
+    assert_eq!(config.mqtt_timeout, Duration::from_secs(30));
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("tuning.mqtt_timeout_secs")),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn the_shipped_tick_and_blind_window_are_left_alone() {
+    let toml = minimal_toml().replace("poll_interval_secs = 10", "poll_interval_secs = 3");
+
+    let (config, warnings) = Config::from_toml_str(&toml).unwrap();
+
+    assert_eq!(config.mqtt_timeout, Duration::from_secs(60));
+    assert_eq!(warnings, Vec::<String>::new(), "{warnings:?}");
+}
+
+/// `Engine`'s failsafe and the inbox's blind window read `Config`, while a
+/// replay reads `SessionConfig` — a raise that reached only one of them would
+/// make every recorded session verify against a window it never ran with.
+#[test]
+fn a_raised_blind_window_is_the_one_the_journal_records() {
+    let toml = format!("{}\n[tuning]\nmqtt_timeout_secs = 10\n", minimal_toml());
+
+    let (config, _) = Config::from_toml_str(&toml).unwrap();
+
+    assert_eq!(config.session().mqtt_timeout_secs, 30);
+    assert_eq!(
+        config.session().mqtt_timeout_secs,
+        config.mqtt_timeout.as_secs()
+    );
+}
+
 #[test]
 fn a_wrong_typed_connection_setting_is_fatal() {
     let toml = r#"

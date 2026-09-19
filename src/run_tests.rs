@@ -298,6 +298,61 @@ async fn an_open_dashboard_stream_does_not_hold_shutdown_to_the_deadline() {
     );
 }
 
+/// A run whose meter is a closed port: the connection is refused every round
+/// instantly — a failure, not a hang — while the virtual battery keeps
+/// answering, so the meter alone is what stands the fleet down.
+fn unreachable_meter_config(dir: &tempfile::TempDir) -> Config {
+    let mut config = virtual_config(dir, WattHours(1_000.0));
+    with_tick(&mut config, Duration::from_millis(50));
+    config.mqtt_timeout = Duration::from_millis(300);
+    config.meter = MeterConfig::Shelly;
+    config.shelly = Some(ShellyConfig {
+        // Bound and released, so the port is closed and the connection is
+        // refused rather than hanging until the request timeout.
+        ip: format!("127.0.0.1:{}", a_free_port()),
+        solar_phase: SolarPhase::A,
+    });
+    config
+}
+
+/// A round that stands the fleet down still folds the samples it already
+/// took. `RteTracker::record` integrates between calls, so a battery reading
+/// dropped because the meter died is charged to the first call after the
+/// outage as one trapezoid spanning the whole of it.
+#[tokio::test]
+async fn a_dead_meter_does_not_stop_the_battery_being_recorded() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let config = unreachable_meter_config(&dir);
+    let journal_path = config.journal_path.clone();
+    let (devices, _battery) = virtual_devices(&config);
+
+    run(config, devices, stop_after(Duration::from_millis(800)))
+        .await
+        .expect("run must exit cleanly");
+
+    let conn = rusqlite::Connection::open(&journal_path).unwrap();
+    let outage_began: i64 = conn
+        .query_row(
+            "SELECT MIN(seq) FROM events WHERE kind = 'mqtt_timeout'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("a meter that never answers must stand the fleet down");
+    let count_since = |kind: &str| {
+        journal::testing::count(
+            &conn,
+            &format!("SELECT COUNT(*) FROM events WHERE kind = '{kind}' AND seq > {outage_began}"),
+        )
+    };
+
+    let timeouts = count_since("mqtt_timeout");
+    assert!(timeouts > 0, "the outage has to span several ticks");
+    assert!(
+        count_since("device_update") >= timeouts,
+        "every failsafe round threw away the battery sample it had already taken"
+    );
+}
+
 /// Nothing re-arms the failsafe any more, so the only thing that can stand the
 /// fleet down is a source that stops answering — and the tick that notices has
 /// to be an otherwise healthy one. A Shelly pointed at a closed port refuses
@@ -308,16 +363,7 @@ async fn an_open_dashboard_stream_does_not_hold_shutdown_to_the_deadline() {
 #[tokio::test]
 async fn the_failsafe_fires_while_the_tick_is_healthy() {
     let dir = tempfile::TempDir::new().unwrap();
-    let mut config = virtual_config(&dir, WattHours(1_000.0));
-    with_tick(&mut config, Duration::from_millis(50));
-    config.mqtt_timeout = Duration::from_millis(300);
-    config.meter = MeterConfig::Shelly;
-    config.shelly = Some(ShellyConfig {
-        // Bound and released, so the port is closed and the connection is
-        // refused rather than hanging until the request timeout.
-        ip: format!("127.0.0.1:{}", a_free_port()),
-        solar_phase: SolarPhase::A,
-    });
+    let config = unreachable_meter_config(&dir);
     let journal_path = config.journal_path.clone();
     let (devices, _battery) = virtual_devices(&config);
 

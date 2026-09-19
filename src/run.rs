@@ -528,8 +528,14 @@ pub async fn run(
         tolerance.get(),
     );
 
+    // The round every slot is currently answering. A tick reads only the
+    // samples stamped with it, so one that arrived too late for the round
+    // before is not served beside one taken for this one.
+    let mut round = TickSeq::FIRST;
+
     // The first round, so the first tick finds filled slots.
-    requests.send_modify(|seq| *seq = seq.next());
+    round = round.next();
+    requests.send_modify(|seq| *seq = round);
 
     loop {
         tokio::select! {
@@ -552,12 +558,54 @@ pub async fn run(
                 // when this tick happened.
                 let at = Clock::now(config.timezone);
 
-                let device_deliveries = inbox.take_devices(at.now);
-                let meter_delivery = inbox.take_meter(at.now);
+                let device_deliveries = inbox.take_devices(round, at.now);
+                let meter_delivery = inbox.take_meter(round, at.now);
 
-                if meter_delivery.is_down()
-                    || device_deliveries.iter().any(|(_, d)| d.is_down())
-                {
+                // Folded whatever the rest of the fleet is doing: a sample is
+                // taken once, and dropping it because another source went
+                // quiet would leave `RteTracker::record` integrating one
+                // trapezoid across the whole outage.
+                let mut every_device_fresh = true;
+                let mut down_devices = Vec::new();
+
+                for (id, delivery) in device_deliveries {
+                    let (sampled_at, reading) = match delivery {
+                        Delivery::Fresh(sampled_at, reading) => (sampled_at, reading),
+                        Delivery::Down(failures) => {
+                            every_device_fresh = false;
+                            down_devices.push((id, failures));
+                            continue;
+                        }
+                        Delivery::Quiet | Delivery::Cold => {
+                            every_device_fresh = false;
+                            continue;
+                        }
+                    };
+
+                    let figures = telemetry.record_and_publish(
+                        &*publisher,
+                        &announcer,
+                        &ha_prefix,
+                        &reading,
+                    );
+
+                    // The sample's own clock, not the tick's, so
+                    // `events.ts_ms` says when the reading was taken.
+                    let event = Event::DeviceUpdate {
+                        at: sampled_at,
+                        id,
+                        measurement: Measurement::Battery(reading.state),
+                    };
+                    journal.event(&event);
+                    engine.step(&event);
+
+                    if let Some(tx) = &dashboard_tx {
+                        let snapshot = engine.state();
+                        tx.send_modify(|state| state.poll_tick(&snapshot, figures, at.now));
+                    }
+                }
+
+                if meter_delivery.is_down() || !down_devices.is_empty() {
                     let event = Event::MqttTimeout { at };
                     journal.event(&event);
                     let step = engine.step(&event);
@@ -575,13 +623,11 @@ pub async fn run(
                                 failures.get(),
                             );
                         }
-                        for (id, delivery) in &device_deliveries {
-                            if let Delivery::Down(failures) = delivery {
-                                tracing::warn!(
-                                    "{id} is not answering ({} consecutive failures)",
-                                    failures.get(),
-                                );
-                            }
+                        for (id, failures) in &down_devices {
+                            tracing::warn!(
+                                "{id} is not answering ({} consecutive failures)",
+                                failures.get(),
+                            );
                         }
                     }
 
@@ -608,37 +654,6 @@ pub async fn run(
                         tx.send_modify(|state| state.failsafe_tick(&snapshot, decision, at.now));
                     }
                 } else {
-                    let mut every_device_fresh = true;
-
-                    for (id, delivery) in device_deliveries {
-                        let Delivery::Fresh(sampled_at, reading) = delivery else {
-                            every_device_fresh = false;
-                            continue;
-                        };
-
-                        let figures = telemetry.record_and_publish(
-                            &*publisher,
-                            &announcer,
-                            &ha_prefix,
-                            &reading,
-                        );
-
-                        // The sample's own clock, not the tick's, so
-                        // `events.ts_ms` says when the reading was taken.
-                        let event = Event::DeviceUpdate {
-                            at: sampled_at,
-                            id,
-                            measurement: Measurement::Battery(reading.state),
-                        };
-                        journal.event(&event);
-                        engine.step(&event);
-
-                        if let Some(tx) = &dashboard_tx {
-                            let snapshot = engine.state();
-                            tx.send_modify(|state| state.poll_tick(&snapshot, figures, at.now));
-                        }
-                    }
-
                     // A setpoint inverts `battery.current_power + (export −
                     // margin)` exactly, which holds only while both terms
                     // describe the same instant — so a round missing any
@@ -715,7 +730,8 @@ pub async fn run(
 
                 // Asked for after this round's writes have landed, so every
                 // sample the next tick reads is one round old.
-                requests.send_modify(|seq| *seq = seq.next());
+                round = round.next();
+                requests.send_modify(|seq| *seq = round);
             }
         }
     }

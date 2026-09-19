@@ -523,6 +523,37 @@ fn take_zendure_poll_interval(
     Ok(configured)
 }
 
+/// How many scan rounds must fit inside the blind window. A healthy source is
+/// one tick old when a tick reads it, so a window at or under the tick stands
+/// the fleet down forever with every source answering.
+const MIN_BLIND_ROUNDS: u32 = 3;
+
+/// The failsafe window, never short enough to fire on a source that is
+/// answering. Warns and raises rather than rejecting, the policy every
+/// `[tuning]` key follows — and `--check` promotes the warning to a failure, so
+/// a rendered config still fails its deploy.
+fn take_mqtt_timeout(
+    taker: &mut Taker,
+    tick: Duration,
+    warnings: &mut Vec<String>,
+) -> Result<Duration, String> {
+    let configured = Duration::from_secs(taker.lenient::<u64>("tuning.mqtt_timeout_secs", 60)?);
+    let floor = tick * MIN_BLIND_ROUNDS;
+
+    if configured <= floor {
+        warnings.push(format!(
+            "tuning.mqtt_timeout_secs = {} is not more than {MIN_BLIND_ROUNDS} scan rounds of \
+             {} s; standing down after {} s instead",
+            configured.as_secs(),
+            tick.as_secs(),
+            floor.as_secs(),
+        ));
+        return Ok(floor);
+    }
+
+    Ok(configured)
+}
+
 /// [`POLL_INTERVAL_FLOOR`] is the Zendure firmware's report-refresh rate, so it
 /// says nothing about a simulator and is not applied here. Zero is refused
 /// because `tokio::time::interval` panics on it.
@@ -1027,8 +1058,7 @@ impl Config {
             .0;
         let solar_discharge_block_threshold = taker
             .lenient::<SolarPower>("tuning.solar_discharge_block_threshold", SolarPower::ZERO)?;
-        let mqtt_timeout =
-            Duration::from_secs(taker.lenient::<u64>("tuning.mqtt_timeout_secs", 60)?);
+        let mqtt_timeout = take_mqtt_timeout(&mut taker, device.poll_interval(), &mut warnings)?;
 
         warnings.extend(taker.finish());
 
