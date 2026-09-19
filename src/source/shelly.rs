@@ -117,6 +117,10 @@ impl ShellyClient {
 }
 
 impl MeterSource for ShellyClient {
+    fn id(&self) -> &str {
+        "shelly meter"
+    }
+
     async fn sample(&self) -> Result<MeterSample, PollError> {
         let body = self.fetch().await.map_err(|e| PollError {
             raw: None,

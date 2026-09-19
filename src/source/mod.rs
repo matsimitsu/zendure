@@ -8,16 +8,11 @@ pub mod shelly;
 pub mod synthetic;
 
 use std::future::Future;
-use std::sync::Arc;
-use std::time::Duration;
-
-use tokio::sync::mpsc;
 
 use crate::config::{Config, MeterConfig};
 use crate::device::{PollError, RawCapture};
-use crate::journal::Journal;
-use crate::mqtt::MqttEvent;
 use crate::registry::{Battery, Devices};
+use crate::scan::{Captured, Sampler};
 use crate::units::SolarPower;
 use crate::world::MeterReading;
 
@@ -41,10 +36,19 @@ pub struct MeterSample {
     pub raw: Option<RawCapture>,
 }
 
+impl Captured for MeterSample {
+    fn raw(&self) -> Option<&RawCapture> {
+        self.raw.as_ref()
+    }
+}
+
 /// One meter reading, pulled on request. Mirrors
 /// [`crate::device::BatteryMonitor`]'s shape, and is not `dyn`-safe for the
 /// same reason — hence [`Meter`].
 pub trait MeterSource {
+    /// Which meter this is, for the lines an operator reads.
+    fn id(&self) -> &str;
+
     fn sample(&self) -> impl Future<Output = Result<MeterSample, PollError>> + Send;
 }
 
@@ -55,11 +59,45 @@ pub enum Meter {
 }
 
 impl MeterSource for Meter {
+    fn id(&self) -> &str {
+        match self {
+            Meter::Shelly(client) => client.id(),
+            Meter::Synthetic(meter) => meter.id(),
+        }
+    }
+
     async fn sample(&self) -> Result<MeterSample, PollError> {
         match self {
             Meter::Shelly(client) => client.sample().await,
             Meter::Synthetic(meter) => meter.sample().await,
         }
+    }
+}
+
+/// The meter's half of the scan cycle. The per-reading line lives here
+/// rather than in the loop: the loop folds a `MeterObservation` and knows
+/// nothing about phases.
+impl Sampler for Meter {
+    type Reading = MeterSample;
+
+    fn id(&self) -> &str {
+        MeterSource::id(self)
+    }
+
+    async fn sample(&self) -> Result<MeterSample, PollError> {
+        let sample = MeterSource::sample(self).await?;
+
+        let obs = sample.observation;
+        tracing::info!(
+            "Meter: total={:.0}W (A={:.0} B={:.0} C={:.0}), solar={:.0}W",
+            obs.grid.total,
+            obs.grid.phases[0],
+            obs.grid.phases[1],
+            obs.grid.phases[2],
+            obs.solar,
+        );
+
+        Ok(sample)
     }
 }
 
@@ -95,54 +133,6 @@ pub fn from_config(config: &Config, devices: &Devices) -> Meter {
                 synthetic::HouseProfile::new(*base_load, *solar_peak, config.timezone),
                 battery,
             ))
-        }
-    }
-}
-
-/// How often the meter is read. The Shelly refreshes its own registers at
-/// about this rate, so a faster pull re-reads a figure that has not moved.
-const SAMPLE_PERIOD: Duration = Duration::from_secs(1);
-
-/// Reads `meter` on [`SAMPLE_PERIOD`] and offers each observation to the
-/// coordinator. A failed read is journalled, logged and skipped: the loop's
-/// own failsafe is what a meter that stays down trips, and a task that
-/// returned on the first timeout would never see it come back. If `tx.send`
-/// fails the coordinator is gone, so there is nothing left to feed.
-pub async fn run_meter_feed(meter: Meter, tx: mpsc::Sender<MqttEvent>, journal: Arc<Journal>) {
-    let mut ticker = tokio::time::interval(SAMPLE_PERIOD);
-
-    loop {
-        ticker.tick().await;
-
-        // Captured whichever way the read went: a reading that failed to
-        // decode is exactly the one worth having on record.
-        match meter.sample().await {
-            Ok(sample) => {
-                if let Some(raw) = &sample.raw {
-                    journal.raw(raw.kind, &raw.body);
-                }
-
-                let obs = sample.observation;
-                tracing::info!(
-                    "Meter: total={:.0}W (A={:.0} B={:.0} C={:.0}), solar={:.0}W",
-                    obs.grid.total,
-                    obs.grid.phases[0],
-                    obs.grid.phases[1],
-                    obs.grid.phases[2],
-                    obs.solar,
-                );
-
-                if tx.send(MqttEvent::Meter(obs)).await.is_err() {
-                    tracing::info!("Meter feed: coordinator gone, stopping");
-                    return;
-                }
-            }
-            Err(e) => {
-                if let Some(raw) = &e.raw {
-                    journal.raw(raw.kind, &raw.body);
-                }
-                tracing::warn!("Failed to read the meter: {}", e.error);
-            }
         }
     }
 }

@@ -4,8 +4,8 @@ Smart controller for the Zendure AC 2400+ home battery. Reads net grid power fro
 
 ## How it works
 
-1. **Polls the Shelly Pro 3EM** at `/rpc/EM.GetStatus?id=0` for power readings (signed per-phase and total active power)
-2. **Polls the Zendure device** via its local REST API for battery state (SOC, power, temperatures, pack data)
+1. **Scans every source on one fixed tick** — the Shelly Pro 3EM at `/rpc/EM.GetStatus?id=0` (signed per-phase and total active power) and the Zendure over its local REST API (SOC, power, temperatures, pack data). A round decides only once every source has answered it, so every figure the decision reads is the same age
+2. **Stands the fleet down** when a source stops answering — too many failed rounds in a row, or nothing usable for `[tuning] mqtt_timeout_secs` — and picks back up on its own as soon as one answers again
 3. **Decides what the battery should do**:
    - **Charge** when there's excess solar being exported to the grid (up to 2400W)
    - **Discharge** to cover grid demand (up to inverter limit), after a configurable idle period to prevent charge/discharge oscillation
@@ -150,11 +150,12 @@ holding a battery command. `RUST_LOG`, when set and non-empty, overrides
 `[logging].filter` outright — that's a `tracing` convention applied at the
 point the subscriber is built, not something the config file itself reads.
 
-**`device.poll_interval_secs` paces more than the poll.** Every adapter's HTTP
-request timeout is derived from it — the meter's as well as the battery's, half
-the period, clamped to 2–5 s — so a stalled request is always abandoned before
-the next poll is due, and one unresponsive box can hold the control loop for at
-most 5 s however long the period is. Below 3 s, the device's own report refresh, it warns and is raised
+**`device.poll_interval_secs` is the control tick.** It paces every source's
+sample, and one decision is made per round. Every adapter's HTTP request
+timeout is derived from it — the meter's as well as the battery's, half the
+period, clamped to 2–5 s — so a stalled request is always abandoned before the
+next round is due, and one unresponsive box never holds the tick at all: its
+sampler runs in its own task and simply leaves its slot with nothing new. Below 3 s, the device's own report refresh, it warns and is raised
 to 3. A `kind = "virtual"` device answers in-process, so neither the floor nor
 the derived timeout applies to it: the key is optional there and defaults to
 1 s, and only zero is refused.
@@ -259,9 +260,9 @@ restarting per session, and leaves gaps where a write failed or a prune deleted.
 own events, replayable). The first *foldable* event of every session is a
 `device_update` carrying the startup poll, so the world a replay rebuilds from
 events is the same world the controller decided against from its first reading.
-It is not necessarily the first row: the meter feed starts a moment earlier and
-writes its raw `shelly` captures from its own task, so one of those often lands
-first. Those are not fold inputs, which is why it does not matter.
+It is not necessarily the first row: the startup handshake captures its raw
+`zendure_poll` body before anything parses it, so that one lands first. Those
+are not fold inputs, which is why it does not matter.
 
 `decisions.kind` is `decision` or `failsafe`, with one
 row per device actuated — one today, more once a second battery or a charger
@@ -338,9 +339,9 @@ Figures that depend on the battery (`unstored`, `>cap`, `charged`, `discharged`)
 are absent rather than zero before the range's first `device_update`: with no
 poll yet there is no way to know whether the battery was taking the surplus, and
 reading "unknown" as "idle" would inflate exactly the number being asked for.
-Battery telemetry also arrives once per `poll_interval_secs` against the meter's
-1 Hz, so every battery figure is up to one poll stale — fine for energy over a
-day, wrong for anything about a single ramp.
+Battery telemetry arrives on the same tick as the meter reading it is decided
+against, so the two are the same age; both are up to one tick old against the
+instant the decision reaches the device.
 
 ## Replay
 
@@ -457,8 +458,8 @@ and a bind failure warns and runs without the dashboard rather than failing
 startup.
 
 Every section of the page is live, including the status badge — it reads
-`Meter offline` once the MQTT timeout has fired and the controller has stood
-the battery down, so a frozen page cannot keep claiming `Operational`.
+`Meter offline` once a source has stopped answering and the controller has
+stood the battery down, so a frozen page cannot keep claiming `Operational`.
 
 The decision log is seeded from the journal at startup, so it survives a
 restart. Rows from an earlier day are dated; the battery's mode badge is not

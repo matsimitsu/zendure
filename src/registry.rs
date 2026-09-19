@@ -21,6 +21,7 @@ use crate::device::{
     AC2400_PLUS, Applied, BatteryController, BatteryMonitor, BatteryReading, BatterySpec,
     ControlPath, Outcome, PollError,
 };
+use crate::scan::Sampler;
 use crate::simulation::VirtualBattery;
 use crate::world::DeviceId;
 use crate::zendure::ZendureClient;
@@ -158,6 +159,30 @@ impl BatteryMonitor for Battery {
     }
 }
 
+/// The battery's half of the scan cycle: one reading per requested round,
+/// through the same `poll` the coordinator used to call inline. The
+/// per-reading line lives here because the loop folds a `BatteryState` and
+/// has no adapter to name.
+impl Sampler for Battery {
+    type Reading = BatteryReading;
+
+    fn id(&self) -> &str {
+        BatteryMonitor::id(self).as_str()
+    }
+
+    async fn sample(&self) -> Result<BatteryReading, PollError> {
+        let reading = BatteryMonitor::poll(self).await?;
+
+        tracing::debug!(
+            "Battery poll: SOC={}%, current_power={}W",
+            reading.state.soc,
+            reading.state.current_power,
+        );
+
+        Ok(reading)
+    }
+}
+
 /// The error a `RecordingBattery` reports for either read call — reachable
 /// only if a test asks a write-only double for a reading. An `Err`, not a
 /// panic: consistent with the registry's rule that a nameable misuse stays a
@@ -175,7 +200,7 @@ fn unreadable(id: &DeviceId) -> PollError {
 /// order the journal replay and `allocate` rely on, and a lookup by
 /// `DeviceId` should be real, not a linear scan.
 pub struct Devices {
-    batteries: BTreeMap<DeviceId, Battery>,
+    batteries: BTreeMap<DeviceId, Arc<Battery>>,
 }
 
 impl Devices {
@@ -187,7 +212,7 @@ impl Devices {
         Devices {
             batteries: batteries
                 .into_iter()
-                .map(|battery| (BatteryController::id(&battery).clone(), battery))
+                .map(|battery| (BatteryController::id(&battery).clone(), Arc::new(battery)))
                 .collect(),
         }
     }
@@ -196,7 +221,14 @@ impl Devices {
     /// it. The genuine routing failure `actuate` below reports as an error
     /// outcome rather than a panic or a silent no-op.
     pub fn battery(&self, id: &DeviceId) -> Option<&Battery> {
-        self.batteries.get(id)
+        self.batteries.get(id).map(|battery| &**battery)
+    }
+
+    /// An owned handle to one adapter, for the sampler task that reads it.
+    /// Separate from [`battery`](Self::battery) because a task outlives any
+    /// borrow of this registry.
+    pub fn handle(&self, id: &DeviceId) -> Option<Arc<Battery>> {
+        self.batteries.get(id).cloned()
     }
 
     /// The lowest id, mirroring `World::battery` so the registry and world agree
@@ -204,7 +236,10 @@ impl Devices {
     /// `world.batteries().next()` — if this ever disagreed, the setpoint would
     /// be sized against one box and delivered to another.
     pub fn primary(&self) -> Option<(&DeviceId, &Battery)> {
-        self.batteries.iter().next()
+        self.batteries
+            .iter()
+            .next()
+            .map(|(id, battery)| (id, &**battery))
     }
 }
 

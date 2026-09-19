@@ -67,6 +67,10 @@ impl DeviceId {
     pub fn new(id: impl Into<String>) -> Self {
         DeviceId(id.into())
     }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 forward_display!(DeviceId, str);

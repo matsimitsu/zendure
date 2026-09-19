@@ -101,8 +101,8 @@ min_soc = 10
 max_soc = 100
 balance_weekday = "none"
 solar_discharge_block_threshold = 0.0
-# The failsafe window: how long without a meter reading before the engine
-# forces idle. The synthetic meter feeds a reading every second, same as a
-# real Shelly, so this keeps being re-armed and the failsafe stays quiet on a
-# healthy run — if it fires instead, the synthetic meter's task has died.
+# The failsafe window: how long without a usable reading from any source
+# before the engine forces idle, and — divided by the tick above — how many
+# failed rounds in a row amount to the same thing. The synthetic meter answers
+# every round, so the failsafe stays quiet on a healthy run.
 mqtt_timeout_secs = 60

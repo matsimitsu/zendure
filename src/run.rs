@@ -5,6 +5,7 @@
 //! condition, so the loop runs end to end with no hardware and no broker.
 
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::allocate::Directive;
@@ -17,16 +18,18 @@ use crate::event::Event;
 use crate::journal::Journal;
 use crate::journal::Writer;
 use crate::models::ControlDecision;
-use crate::mqtt::{self, MqttEvent, MqttPublisher, PublisherTask};
+use crate::mqtt::{self, MqttPublisher, PublisherTask};
 use crate::prediction;
 use crate::publish::{NullPublisher, Publisher};
 use crate::registry::{self, Devices};
+use crate::scan::{self, Delivery, FailureTolerance, Inbox, Sampler, TickSeq};
 use crate::source;
 use crate::units::{Soc, Timestamp, WattHours};
 use crate::web;
 use crate::world::{Measurement, World};
 use crate::{controller, rte};
-use tokio::sync::mpsc;
+use tokio::task::JoinSet;
+use tokio::time::MissedTickBehavior;
 
 /// How long each half of a shutdown waits before giving up and saying so.
 /// Bounded: an unbounded wait would only end via systemd's `TimeoutStopSec`
@@ -38,7 +41,7 @@ const DRAIN_DEADLINE: Duration = Duration::from_secs(2);
 /// draining it. `None` in brokerless mode — see `run`'s own construction of
 /// this and `shut_down`'s doc comment for why that half is then skipped
 /// rather than faked.
-type MqttDrain = (std::sync::Arc<MqttPublisher>, PublisherTask);
+type MqttDrain = (Arc<MqttPublisher>, PublisherTask);
 
 /// Why the loop stopped.
 ///
@@ -283,7 +286,7 @@ pub async fn run(
     // always the
     // same string the adapter matches against. Stable across restarts, unlike an index
     // into a list.
-    let device_id = primary.id().clone();
+    let device_id = BatteryMonitor::id(primary).clone();
 
     // On by default: by the time you think to enable logging, the bug you
     // wanted it for has already happened. Any failure here disables the journal
@@ -295,7 +298,7 @@ pub async fn run(
         env!("CARGO_PKG_VERSION"),
         &config.session(),
     );
-    let journal = std::sync::Arc::new(journal);
+    let journal = Arc::new(journal);
 
     // The startup handshake, then the first reading — see `BatteryMonitor::prepare`
     // (`zendure.rs`) for the ordering and failure policy.
@@ -330,68 +333,54 @@ pub async fn run(
         telemetry.pack_count(),
     );
 
-    // What Home Assistant has already been told about. Shared with the
-    // subscriber, which resets it on every ConnAck. Built unconditionally:
+    // What Home Assistant has already been told about. Shared with the broker
+    // connection, which resets it on every ConnAck. Built unconditionally:
     // even a brokerless run announces into a sink that just discards it, and
     // `NullPublisher`'s own doc comment is why that is safe.
-    let announcer = std::sync::Arc::new(Announcer::new());
+    let announcer = Arc::new(Announcer::new());
     let ha_prefix = config.ha_publish_prefix.clone();
 
-    let (tx, mut rx) = mpsc::channel::<MqttEvent>(64);
-    // Every task the loop's life depends on: the meter feed, and the broker
-    // connection when there is one. `rx.recv()` returning `None` below is true
-    // only once every feeder holding a sender has ended.
-    let mut feeders: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    // Every task the loop's life depends on: one sampler per source, and the
+    // broker connection when there is one. Any of them ending is fatal to the
+    // loop — a sampler that returned would leave its slot frozen.
+    let mut sources: JoinSet<()> = JoinSet::new();
 
     // The publisher: a real, queued sink over MQTT if `[mqtt]` is configured,
     // or `NullPublisher` if not. `mqtt_drain` is `Some` only in the first
     // case — it is what `shut_down` drains, and its absence is how a
     // brokerless run skips that half of shutdown entirely.
-    let (publisher, mut mqtt_drain): (std::sync::Arc<dyn Publisher>, Option<MqttDrain>) =
-        match &config.mqtt {
-            Some(mqtt_cfg) => {
-                let (mqtt_client, eventloop) = mqtt::create_mqtt_client(mqtt_cfg);
-                // The sink the decision path publishes through. Its task owns
-                // the only `await` against the broker; nothing below this line
-                // can block on one.
-                let (mqtt_publisher, publisher_task) = MqttPublisher::open(mqtt_client);
-                let publisher: std::sync::Arc<dyn Publisher> = mqtt_publisher.clone();
+    let (publisher, mut mqtt_drain): (Arc<dyn Publisher>, Option<MqttDrain>) = match &config.mqtt {
+        Some(mqtt_cfg) => {
+            let (mqtt_client, eventloop) = mqtt::create_mqtt_client(mqtt_cfg);
+            // The sink the decision path publishes through. Its task owns
+            // the only `await` against the broker; nothing below this line
+            // can block on one.
+            let (mqtt_publisher, publisher_task) = MqttPublisher::open(mqtt_client);
+            let publisher: Arc<dyn Publisher> = mqtt_publisher.clone();
 
-                // Nothing incoming is subscribed to, but this task must still
-                // run: it drives the broker's eventloop, without which nothing
-                // queued ever reaches the socket.
-                let connection_prefix = ha_prefix.clone();
-                let connection_publisher = publisher.clone();
-                let connection_announcer = announcer.clone();
-                feeders.push(tokio::spawn(async move {
-                    mqtt::run_connection(
-                        eventloop,
-                        connection_prefix,
-                        connection_publisher,
-                        connection_announcer,
-                    )
-                    .await;
-                }));
+            // Nothing incoming is subscribed to, but this task must still
+            // run: it drives the broker's eventloop, without which nothing
+            // queued ever reaches the socket.
+            let connection_prefix = ha_prefix.clone();
+            let connection_publisher = publisher.clone();
+            let connection_announcer = announcer.clone();
+            sources.spawn(async move {
+                mqtt::run_connection(
+                    eventloop,
+                    connection_prefix,
+                    connection_publisher,
+                    connection_announcer,
+                )
+                .await;
+            });
 
-                (publisher, Some((mqtt_publisher, publisher_task)))
-            }
-            None => {
-                tracing::info!("No [mqtt] configured — publishing through a null sink");
-                (std::sync::Arc::new(NullPublisher), None)
-            }
-        };
-
-    // The meter, whichever kind `[meter]` selected, read on its own interval
-    // and offered to the loop through the channel above.
-    let meter = source::from_config(&config, &devices);
-    let feed_tx = tx.clone();
-    let feed_journal = journal.clone();
-    feeders.push(tokio::spawn(async move {
-        source::run_meter_feed(meter, feed_tx, feed_journal).await;
-    }));
-
-    // Only the clones handed to the feeders above keep the channel open now.
-    drop(tx);
+            (publisher, Some((mqtt_publisher, publisher_task)))
+        }
+        None => {
+            tracing::info!("No [mqtt] configured — publishing through a null sink");
+            (Arc::new(NullPublisher), None)
+        }
+    };
 
     let mqtt_timeout = config.mqtt_timeout;
     let mut engine = Engine::new(
@@ -479,23 +468,68 @@ pub async fn run(
         }));
     }
 
-    let poll_interval = config.device.poll_interval();
-    let mut poll_timer = tokio::time::interval(poll_interval);
-    // Don't fire immediately — we just polled above
-    poll_timer.tick().await;
+    let tick = config.device.poll_interval();
 
-    // A deadline, not a record of when MQTT was last heard from: both the
-    // reading arm and the timeout arm re-arm it. Derived from a "last update"
-    // stamp only the reading arm advanced, it sits permanently in the past once
-    // a timeout fires and the loop spins for the whole outage.
-    let mut mqtt_deadline = tokio::time::Instant::now() + mqtt_timeout;
+    // Derived once, here at the boundary: as many rounds as fit in the window
+    // the loop is allowed to go blind for, so the stand-down window stays the
+    // one `[tuning] mqtt_timeout_secs` already names.
+    let tolerance = FailureTolerance::over(mqtt_timeout, tick);
+
+    let meter = Arc::new(source::from_config(&config, &devices));
+    let battery = devices
+        .handle(&device_id)
+        .expect("the primary device was taken from this registry above");
+
+    // Opened before the samplers are asked for anything, so a source that
+    // never answers at all ages out from here.
+    let inbox = Inbox::new(
+        meter.tolerance(tolerance),
+        [(device_id.clone(), battery.tolerance(tolerance))],
+        Clock::now(config.timezone).now,
+        mqtt_timeout,
+    );
+
+    // A `watch`, so rounds a busy source slept through coalesce into one
+    // request instead of queueing behind it.
+    let (requests, _) = tokio::sync::watch::channel(TickSeq::FIRST);
+    sources.spawn(scan::sample_loop(
+        meter,
+        inbox.meter_slot(),
+        requests.subscribe(),
+        journal.clone(),
+        config.timezone,
+    ));
+    sources.spawn(scan::sample_loop(
+        battery,
+        inbox
+            .device_slot(&device_id)
+            .expect("the inbox was just given this device"),
+        requests.subscribe(),
+        journal.clone(),
+        config.timezone,
+    ));
+
+    let mut ticker = tokio::time::interval(tick);
+    // `Delay`, not the default `Burst`: the tick body awaits a write to the
+    // device, and a period it overran must not be followed by a catch-up
+    // storm of decisions.
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // Don't fire immediately — nothing has been sampled yet.
+    ticker.tick().await;
 
     // Pinned once, polled by reference in every iteration: the arm has to
     // resume the same future each time round rather than build a fresh one, or
     // a signal that arrived mid-iteration would be dropped.
     let mut stop = std::pin::pin!(stop);
 
-    tracing::info!("Coordinator running, waiting for the first meter reading...");
+    tracing::info!(
+        "Coordinator running on a {}s tick, standing down after {} failed rounds",
+        tick.as_secs(),
+        tolerance.get(),
+    );
+
+    // The first round, so the first tick finds filled slots.
+    requests.send_modify(|seq| *seq = seq.next());
 
     loop {
         tokio::select! {
@@ -503,136 +537,84 @@ pub async fn run(
                 tracing::info!("{reason} — draining the journal and stopping");
                 break;
             }
-            event = rx.recv() => {
-                // A closed channel means the subscriber task is gone, which is
-                // not something this loop can recover from: stop.
-                let Some(event) = event else { break };
+            Some(ended) = sources.join_next() => {
+                // One sampler gone is one permanently frozen slot, and for the
+                // battery nothing downstream would ever say so.
+                match ended {
+                    Ok(()) => tracing::error!("A source task ended — stopping"),
+                    Err(e) => tracing::error!("A source task ended ({e}) — stopping"),
+                }
+                break;
+            }
+            _ = ticker.tick() => {
+                // One call, shared by the meter event, the decision row, the
+                // failsafe and the dashboard — all of which must agree about
+                // when this tick happened.
+                let at = Clock::now(config.timezone);
 
-                // A real match, not a `let else`: this ensures every variant is
-                // handled, rather than falling through to an `else` arm.
-                match event {
-                    MqttEvent::Meter(obs) => {
-                        mqtt_deadline = tokio::time::Instant::now() + mqtt_timeout;
+                let device_deliveries = inbox.take_devices(at.now);
+                let meter_delivery = inbox.take_meter(at.now);
 
-                        // Already normalized by the source adapter: whichever meter
-                        // sent this, the loop sees a signed total, three phases and a
-                        // production figure, and nothing about the wire format.
-                        let net_grid_power = obs.grid.total;
+                if meter_delivery.is_down()
+                    || device_deliveries.iter().any(|(_, d)| d.is_down())
+                {
+                    let event = Event::MqttTimeout { at };
+                    journal.event(&event);
+                    let step = engine.step(&event);
 
-                        let clock = Clock::now(config.timezone);
-                        // Bound, not passed inline, so it can be recorded
-                        // *before* it is folded in: a crash mid-decision still
-                        // leaves the input that caused it on record.
-                        let event = Event::Meter {
-                            at: clock,
-                            grid: obs.grid,
-                            solar: obs.solar,
-                        };
-                        journal.event(&event);
-                        let step = engine.step(&event);
-
-                        if let Some(status) = step.status {
-                            tracing::info!("MQTT updates resumed");
-                            mqtt::publish_status(&*publisher, &ha_prefix, status);
+                    if step.status.is_some() {
+                        tracing::warn!(
+                            "No usable meter reading for {}s — forcing idle as safety failsafe",
+                            mqtt_timeout.as_secs(),
+                        );
+                        // Which source actually stopped answering, since the
+                        // event above can only say "mqtt_timeout".
+                        if let Delivery::Down(failures) = &meter_delivery {
+                            tracing::warn!(
+                                "The meter is not answering ({} consecutive failures)",
+                                failures.get(),
+                            );
                         }
-
-                        if let Some(decision) = &step.decision {
-                            if let Some(battery) = engine.battery() {
-                                tracing::info!(
-                                    "Decision: {} at {}W — {} (net_grid={:.0}W, battery: SOC={}%, max_charge={}W, max_discharge={}W, current={}W, soc_limit={})",
-                                    decision.mode,
-                                    decision.power_watts,
-                                    decision.reason,
-                                    net_grid_power,
-                                    battery.soc,
-                                    battery.max_charge_power,
-                                    battery.max_discharge_power,
-                                    battery.current_power,
-                                    battery.soc_limit_reached,
+                        for (id, delivery) in &device_deliveries {
+                            if let Delivery::Down(failures) = delivery {
+                                tracing::warn!(
+                                    "{id} is not answering ({} consecutive failures)",
+                                    failures.get(),
                                 );
                             }
-
-                            apply_decision(
-                                &devices,
-                                &*publisher,
-                                &journal,
-                                &engine,
-                                &ha_prefix,
-                                ControlPath::Objective,
-                                clock.now,
-                                decision,
-                                &step.directives,
-                            )
-                            .await;
-                        }
-
-                        // The meter is the only tick that extends the
-                        // sparklines, so their window stays the meter's own
-                        // cadence rather than every arm's.
-                        if let Some(tx) = &dashboard_tx {
-                            let snapshot = engine.state();
-                            let decision = step.decision.as_ref().map(|d| (d, clock.now));
-                            tx.send_modify(|state| {
-                                state.meter_tick(&snapshot, decision, &clock, config.timezone)
-                            });
                         }
                     }
-                }
-            }
-            _ = tokio::time::sleep_until(mqtt_deadline) => {
-                mqtt_deadline = tokio::time::Instant::now() + mqtt_timeout;
 
-                let clock = Clock::now(config.timezone);
-                let event = Event::MqttTimeout { at: clock };
-                journal.event(&event);
-                let step = engine.step(&event);
+                    if let Some(decision) = &step.decision {
+                        // Every battery stands down, and one unreachable box does
+                        // not leave the others running through the outage.
+                        apply_decision(
+                            &devices,
+                            &*publisher,
+                            &journal,
+                            &engine,
+                            &ha_prefix,
+                            ControlPath::Failsafe,
+                            at.now,
+                            decision,
+                            &step.directives,
+                        )
+                        .await;
+                    }
 
-                if step.status.is_some() {
-                    tracing::warn!(
-                        "No MQTT updates for {}s — forcing idle as safety failsafe",
-                        mqtt_timeout.as_secs(),
-                    );
-                }
+                    if let Some(tx) = &dashboard_tx {
+                        let snapshot = engine.state();
+                        let decision = step.decision.as_ref().map(|d| (d, at.now));
+                        tx.send_modify(|state| state.failsafe_tick(&snapshot, decision, at.now));
+                    }
+                } else {
+                    let mut every_device_fresh = true;
 
-                if let Some(decision) = &step.decision {
-                    // Every battery stands down, and one unreachable box does
-                    // not leave the others running through the outage.
-                    apply_decision(
-                        &devices,
-                        &*publisher,
-                        &journal,
-                        &engine,
-                        &ha_prefix,
-                        ControlPath::Failsafe,
-                        clock.now,
-                        decision,
-                        &step.directives,
-                    )
-                    .await;
-                }
-
-                if let Some(tx) = &dashboard_tx {
-                    let snapshot = engine.state();
-                    let decision = step.decision.as_ref().map(|d| (d, clock.now));
-                    tx.send_modify(|state| state.failsafe_tick(&snapshot, decision, clock.now));
-                }
-            }
-            _ = poll_timer.tick() => {
-                // The raw capture happens inside `poll` itself, before
-                // parsing — the adapter keeps that ordering, and hands the
-                // bytes back rather than journalling them itself, so this is
-                // still the one place that writes to the journal.
-                match primary.poll().await {
-                    Ok(reading) => {
-                        if let Some(raw) = &reading.raw {
-                            journal.raw(raw.kind, &raw.body);
-                        }
-
-                        tracing::debug!(
-                            "Battery poll: SOC={}%, current_power={}W",
-                            reading.state.soc,
-                            reading.state.current_power,
-                        );
+                    for (id, delivery) in device_deliveries {
+                        let Delivery::Fresh(sampled_at, reading) = delivery else {
+                            every_device_fresh = false;
+                            continue;
+                        };
 
                         let figures = telemetry.record_and_publish(
                             &*publisher,
@@ -641,10 +623,11 @@ pub async fn run(
                             &reading,
                         );
 
-                        let clock = Clock::now(config.timezone);
+                        // The sample's own clock, not the tick's, so
+                        // `events.ts_ms` says when the reading was taken.
                         let event = Event::DeviceUpdate {
-                            at: clock,
-                            id: device_id.clone(),
+                            at: sampled_at,
+                            id,
                             measurement: Measurement::Battery(reading.state),
                         };
                         journal.event(&event);
@@ -652,21 +635,94 @@ pub async fn run(
 
                         if let Some(tx) = &dashboard_tx {
                             let snapshot = engine.state();
-                            tx.send_modify(|state| {
-                                state.poll_tick(&snapshot, figures, clock.now)
-                            });
+                            tx.send_modify(|state| state.poll_tick(&snapshot, figures, at.now));
                         }
                     }
-                    Err(e) => {
-                        if let Some(raw) = &e.raw {
-                            journal.raw(raw.kind, &raw.body);
+
+                    // A setpoint inverts `battery.current_power + (export −
+                    // margin)` exactly, which holds only while both terms
+                    // describe the same instant — so a round missing any
+                    // source's sample decides nothing and holds the last
+                    // command.
+                    match meter_delivery {
+                        Delivery::Fresh(_, sample) if every_device_fresh => {
+                            // Already normalized by the source adapter: whichever
+                            // meter sent this, the loop sees a signed total, three
+                            // phases and a production figure, and nothing about the
+                            // wire format.
+                            let net_grid_power = sample.observation.grid.total;
+
+                            // Bound, not passed inline, so it can be recorded
+                            // *before* it is folded in: a crash mid-decision still
+                            // leaves the input that caused it on record.
+                            let event = Event::Meter {
+                                at,
+                                grid: sample.observation.grid,
+                                solar: sample.observation.solar,
+                            };
+                            journal.event(&event);
+                            let step = engine.step(&event);
+
+                            if let Some(status) = step.status {
+                                tracing::info!("Meter readings resumed");
+                                mqtt::publish_status(&*publisher, &ha_prefix, status);
+                            }
+
+                            if let Some(decision) = &step.decision {
+                                if let Some(battery) = engine.battery() {
+                                    tracing::info!(
+                                        "Decision: {} at {}W — {} (net_grid={:.0}W, battery: SOC={}%, max_charge={}W, max_discharge={}W, current={}W, soc_limit={})",
+                                        decision.mode,
+                                        decision.power_watts,
+                                        decision.reason,
+                                        net_grid_power,
+                                        battery.soc,
+                                        battery.max_charge_power,
+                                        battery.max_discharge_power,
+                                        battery.current_power,
+                                        battery.soc_limit_reached,
+                                    );
+                                }
+
+                                apply_decision(
+                                    &devices,
+                                    &*publisher,
+                                    &journal,
+                                    &engine,
+                                    &ha_prefix,
+                                    ControlPath::Objective,
+                                    at.now,
+                                    decision,
+                                    &step.directives,
+                                )
+                                .await;
+                            }
+
+                            // The meter is the only tick that extends the
+                            // sparklines, so their window stays the meter's own
+                            // cadence rather than every arm's.
+                            if let Some(tx) = &dashboard_tx {
+                                let snapshot = engine.state();
+                                let decision = step.decision.as_ref().map(|d| (d, at.now));
+                                tx.send_modify(|state| {
+                                    state.meter_tick(&snapshot, decision, &at, config.timezone)
+                                });
+                            }
                         }
-                        tracing::warn!("Failed to poll battery state: {}", e.error);
+                        _ => tracing::debug!("Skipped a round: not every source had a fresh sample"),
                     }
                 }
+
+                // Asked for after this round's writes have landed, so every
+                // sample the next tick reads is one round old.
+                requests.send_modify(|seq| *seq = seq.next());
             }
         }
     }
+
+    // Ends every sampler on its own terms, rather than aborting one in the
+    // middle of a request: `changed()` returns `Err` once the sender is gone.
+    drop(requests);
 
     // Fired for whichever reason broke the loop, not only a signal. Dropping
     // the sender is the other half: an SSE body is a `WatchStream` that runs
@@ -680,7 +736,7 @@ pub async fn run(
         mqtt_drain
             .as_mut()
             .map(|(publisher, task)| (&**publisher, task)),
-        feeders,
+        sources,
         journal,
         journal_writer,
     )
@@ -725,21 +781,21 @@ pub async fn run(
 
 /// Stops everything in the order that avoids losing rows or stalling — not the order it
 /// looks like it should be.
-/// The publisher drains first, while feeders still run, because the MQTT feeder owns
-/// the eventloop moving bytes to the broker; aborting it first would stall the drain
-/// for the full deadline. Skipped in brokerless mode.
+/// The publisher drains first, while the source tasks still run, because the broker
+/// connection owns the eventloop moving bytes to the broker; stopping it first would
+/// stall the drain for the full deadline. Skipped in brokerless mode.
 /// Then the journal, unconditionally: its writer stops only once every sender is gone,
-/// each feeder holds one so feeders must finish first, and since `abort` only schedules
-/// cancellation, awaiting it is what guarantees a captured clone is actually gone. Both
-/// drains are bounded — an unbounded wait would otherwise run to systemd's
-/// `TimeoutStopSec` and SIGKILL, losing the rows being protected.
+/// each sampler holds one so the source tasks must finish first, and since `shutdown`
+/// only schedules cancellation, awaiting it is what guarantees a captured clone is
+/// actually gone. Both drains are bounded — an unbounded wait would otherwise run to
+/// systemd's `TimeoutStopSec` and SIGKILL, losing the rows being protected.
 /// The MQTT half is hand-off, not delivery: `publish` returns once queued in rumqttc's
 /// channel, so a tail can still be lost when the eventloop drops — the journal, not the
 /// broker, is the record that has to be right.
 async fn shut_down(
     mqtt: Option<(&MqttPublisher, &mut PublisherTask)>,
-    feeders: Vec<tokio::task::JoinHandle<()>>,
-    journal: std::sync::Arc<Journal>,
+    mut sources: JoinSet<()>,
+    journal: Arc<Journal>,
     journal_writer: Option<Writer>,
 ) {
     if let Some((publisher, publisher_task)) = mqtt {
@@ -774,10 +830,7 @@ async fn shut_down(
         }
     }
 
-    for feeder in feeders {
-        feeder.abort();
-        let _ = feeder.await;
-    }
+    sources.shutdown().await;
     drop(journal);
 
     if let Some(writer) = journal_writer

@@ -38,8 +38,8 @@ impl Clock {
         }
     }
 
-    /// Read the real clock. Called only at the edges — the MQTT handler and the
-    /// failsafe timeout — never below them.
+    /// Read the real clock. Called only at the edges — the scan cycle's tick
+    /// and its samplers — never below them.
     pub fn now(tz: Tz) -> Self {
         let utc = Utc::now();
         let local = utc.with_timezone(&tz);

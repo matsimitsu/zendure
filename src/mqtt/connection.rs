@@ -1,5 +1,4 @@
-//! The broker connection: the eventloop, and the channel the coordinator
-//! hears about the world through.
+//! The broker connection and its eventloop.
 //!
 //! rumqttc only moves queued publishes onto the socket while something drives
 //! its eventloop, so this task runs for the publisher's sake even though
@@ -13,18 +12,8 @@ use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet};
 use crate::announce::Announcer;
 use crate::config::MqttConfig;
 use crate::publish::Publisher;
-use crate::source::MeterObservation;
 
 use super::discovery::publish_ha_discovery;
-
-#[derive(Debug, Clone)]
-pub enum MqttEvent {
-    /// Already normalized, not the meter's own JSON. The undecoded payload is
-    /// captured by the adapter before anything parses it, so pushing the DTO
-    /// down the channel as well would buy nothing — and would cost the
-    /// coordinator loop its ignorance of what a Shelly is.
-    Meter(MeterObservation),
-}
 
 pub fn create_mqtt_client(mqtt: &MqttConfig) -> (AsyncClient, EventLoop) {
     let mut opts = MqttOptions::new(&mqtt.client_id, &mqtt.host, mqtt.port);

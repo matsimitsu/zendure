@@ -80,6 +80,12 @@ pub struct BatteryReading {
     pub raw: Option<RawCapture>,
 }
 
+impl crate::scan::Captured for BatteryReading {
+    fn raw(&self) -> Option<&RawCapture> {
+        self.raw.as_ref()
+    }
+}
+
 /// A failure that still carries whatever bytes arrived: a response that
 /// failed to decode is the one most worth keeping for a human to inspect. A
 /// failure with nothing to show — the request never came back — carries

@@ -101,7 +101,9 @@ filter = "zendure=info"
 # equal, so they cannot drift apart.
 #
 # mqtt_timeout_secs is here and not under [mqtt] on purpose: it is the failsafe
-# window the engine holds and the journal records, not a connection setting.
+# window the engine holds and the journal records, not a connection setting. It
+# is also how many failed rounds a source may have before the loop stops
+# trusting it: as many as fit in that window at poll_interval_secs.
 [tuning]
 charge_margin = 50
 discharge_margin = 5

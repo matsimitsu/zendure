@@ -133,6 +133,10 @@ impl SyntheticMeter {
 /// Infallible, and with nothing to capture: there is no wire format between
 /// the house and the reader.
 impl MeterSource for SyntheticMeter {
+    fn id(&self) -> &str {
+        "synthetic meter"
+    }
+
     async fn sample(&self) -> Result<MeterSample, PollError> {
         let clock = Clock::now(self.profile.timezone);
 
