@@ -262,6 +262,23 @@ fn missing_device_sn_is_fatal() {
     assert!(err.contains("device.sn"), "{err}");
 }
 
+/// Catches a period the device cannot refresh inside reaching the poll timer,
+/// and with it a request timeout derived below anything the hardware answers in.
+#[test]
+fn a_poll_interval_under_the_floor_warns_and_is_raised() {
+    let toml = minimal_toml().replace("poll_interval_secs = 10", "poll_interval_secs = 1");
+
+    let (config, warnings) = Config::from_toml_str(&toml).unwrap();
+
+    assert_eq!(config.device.poll_interval(), POLL_INTERVAL_FLOOR);
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("device.poll_interval_secs")),
+        "{warnings:?}"
+    );
+}
+
 #[test]
 fn a_wrong_typed_connection_setting_is_fatal() {
     let toml = r#"

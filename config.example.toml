@@ -42,6 +42,7 @@ client_id = "odroid"
 kind = "zendure"
 ip = "192.168.1.253"
 sn = "HEC4NENCN490270"
+# Minimum 3; the HTTP request timeout derives from this (see README).
 poll_interval_secs = 10
 
 [shelly]

@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::allocate::Directive;
 use crate::command::Command;
@@ -40,8 +41,8 @@ impl Battery {
     /// the coordinator hands this a host and serial and gets back an opaque
     /// `Battery`, the same way it never sees `ZendureClient` once a directive is
     /// routed through `actuate`.
-    pub fn zendure(ip: &str, sn: String) -> Self {
-        Battery::Zendure(ZendureClient::new(ip, sn))
+    pub fn zendure(ip: &str, sn: String, poll_interval: Duration) -> Self {
+        Battery::Zendure(ZendureClient::new(ip, sn, poll_interval))
     }
 }
 
@@ -52,7 +53,11 @@ impl Battery {
 /// `config::take_device`.
 pub fn from_config(config: &Config) -> Devices {
     let battery = match &config.device {
-        DeviceConfig::Zendure { ip, sn, .. } => Battery::zendure(ip, sn.clone()),
+        DeviceConfig::Zendure {
+            ip,
+            sn,
+            poll_interval,
+        } => Battery::zendure(ip, sn.clone(), *poll_interval),
         DeviceConfig::Virtual {
             id,
             packs,

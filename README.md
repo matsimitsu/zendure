@@ -75,7 +75,7 @@ client_id = "odroid"
 kind = "zendure"
 ip = "192.168.1.253"        # required
 sn = "HEC4NENCN490270"      # required
-poll_interval_secs = 10
+poll_interval_secs = 10     # minimum 3; the request timeout derives from it
 
 [shelly]
 topic = "shellypro3em-XXXX/status/em:0"   # required
@@ -149,6 +149,13 @@ there must never be the reason systemd restart-loops a controller that is
 holding a battery command. `RUST_LOG`, when set and non-empty, overrides
 `[logging].filter` outright — that's a `tracing` convention applied at the
 point the subscriber is built, not something the config file itself reads.
+
+**`device.poll_interval_secs` paces more than the poll.** The adapter's HTTP
+request timeout is derived from it — half the period, clamped to 2–5 s — so a
+stalled request is always abandoned before the next poll is due, and one
+unresponsive box can hold the control loop for at most 5 s however long the
+period is. Below 3 s, the device's own report refresh, it warns and is raised
+to 3.
 
 `zendure --check --config <path>` runs the same parse, but strictly: a parse
 error is fatal exactly as it is for the daemon, and **any warning is promoted

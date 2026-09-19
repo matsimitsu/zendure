@@ -14,6 +14,7 @@ use crate::source::shelly::SolarPhase;
 use crate::units::{
     Efficiency, GridPower, PowerMargin, RetentionDays, Soc, SolarPower, WattHours, Watts,
 };
+use crate::zendure::POLL_INTERVAL_FLOOR;
 
 /// Where the journal lives unless `[journal] path` says otherwise.
 ///
@@ -421,10 +422,11 @@ pub enum MeterConfig {
 
 /// Pulls the required `[[device]]` array out of the root table before
 /// `Taker` ever sees it: an array of tables doesn't fit the dotted-path
-/// model, and every field here is fatal anyway — an unreachable device is
-/// "cannot talk at all", not "decides slightly differently". Exactly one entry, `kind =
-/// "zendure"` or `"virtual"`.
-fn take_device(root: &mut toml::Table) -> Result<DeviceConfig, String> {
+/// model, and a missing or wrong-typed field here is fatal — an unreachable
+/// device is "cannot talk at all", not "decides slightly differently". Exactly
+/// one entry, `kind = "zendure"` or `"virtual"`.
+fn take_device(root: &mut toml::Table) -> Result<(DeviceConfig, Vec<String>), String> {
+    let mut warnings = Vec::new();
     let value = root
         .remove("device")
         .ok_or_else(|| "device is required (at least one [[device]] entry)".to_string())?;
@@ -461,11 +463,12 @@ fn take_device(root: &mut toml::Table) -> Result<DeviceConfig, String> {
         "zendure" => {
             let ip = take_device_field(&mut table, "ip")?;
             let sn = take_device_field(&mut table, "sn")?;
-            let poll_interval_secs = take_device_secs(&mut table, "poll_interval_secs")?;
+            let poll_interval =
+                take_poll_interval(&mut table, "poll_interval_secs", &mut warnings)?;
             DeviceConfig::Zendure {
                 ip,
                 sn,
-                poll_interval: Duration::from_secs(poll_interval_secs),
+                poll_interval,
             }
         }
         "virtual" => {
@@ -493,7 +496,26 @@ fn take_device(root: &mut toml::Table) -> Result<DeviceConfig, String> {
         return Err(format!("device.{key} is not a recognised field"));
     }
 
-    Ok(device)
+    Ok((device, warnings))
+}
+
+fn take_poll_interval(
+    table: &mut toml::Table,
+    key: &str,
+    warnings: &mut Vec<String>,
+) -> Result<Duration, String> {
+    let secs = take_device_secs(table, key)?;
+    let configured = Duration::from_secs(secs);
+
+    if configured < POLL_INTERVAL_FLOOR {
+        let floor = POLL_INTERVAL_FLOOR.as_secs();
+        warnings.push(format!(
+            "device.{key} = {secs} is below the device's {floor} s refresh; polling every {floor} s instead"
+        ));
+        return Ok(POLL_INTERVAL_FLOOR);
+    }
+
+    Ok(configured)
 }
 
 fn take_device_field(table: &mut toml::Table, key: &str) -> Result<String, String> {
@@ -804,7 +826,7 @@ impl Config {
     pub fn from_toml_str(text: &str) -> Result<(Config, Vec<String>), String> {
         let mut root = text.parse::<toml::Table>().map_err(|e| e.to_string())?;
 
-        let device = take_device(&mut root)?;
+        let (device, mut warnings) = take_device(&mut root)?;
 
         let mut taker = Taker::new(root);
 
@@ -991,7 +1013,7 @@ impl Config {
         let mqtt_timeout =
             Duration::from_secs(taker.lenient::<u64>("tuning.mqtt_timeout_secs", 60)?);
 
-        let warnings = taker.finish();
+        warnings.extend(taker.finish());
 
         Ok((
             Config {
