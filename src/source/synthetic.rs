@@ -91,7 +91,11 @@ const PHASE_WEIGHTS: [f64; 3] = [0.4, 0.35, 0.25];
 /// be dropped). A free function taking flow as a plain [`BatteryPower`], not
 /// a method on the battery, so the arithmetic is testable against a chosen flow without
 /// constructing or ticking a real [`VirtualBattery`].
-fn observation(profile: &HouseProfile, clock: &Clock, flow: BatteryPower) -> MeterObservation {
+pub(crate) fn observation(
+    profile: &HouseProfile,
+    clock: &Clock,
+    flow: BatteryPower,
+) -> MeterObservation {
     let (load, solar) = profile.at(clock);
 
     // The load net of the battery, before solar is netted out of one phase.

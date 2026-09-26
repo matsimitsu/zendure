@@ -415,3 +415,7 @@ impl VirtualBattery {
 #[cfg(test)]
 #[path = "simulation_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "scenario_tests.rs"]
+mod scenario_tests;
