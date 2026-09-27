@@ -641,10 +641,12 @@ impl<Tz: chrono::TimeZone> From<chrono::DateTime<Tz>> for Timestamp {
 pub struct Elapsed(i64);
 
 impl Elapsed {
-    /// A `Duration` as whole milliseconds. Config durations are seconds or
-    /// minutes, so the cast can't overflow.
+    /// A `Duration` as whole milliseconds, saturating. Config durations are
+    /// lenient and unbounded, and a wrapping cast turns an absurd window
+    /// negative — already elapsed, so every source reads `Down`. Saturating
+    /// keeps the failure on the side of a window that never closes.
     pub fn of(duration: Duration) -> Self {
-        Elapsed(duration.as_millis() as i64)
+        Elapsed(i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
     }
 
     pub fn as_secs_f64(self) -> f64 {
@@ -656,24 +658,28 @@ impl Elapsed {
     }
 }
 
+/// All three saturating, because `Elapsed::of` saturates: a cooldown stamp
+/// backdated by a saturated window is measured against every later `now`,
+/// and that span is past `i64::MAX` — a panic in a debug build, and in
+/// release a wrap to "not yet elapsed" that holds the cooldown forever.
 impl Sub for Timestamp {
     type Output = Elapsed;
     fn sub(self, rhs: Timestamp) -> Elapsed {
-        Elapsed(self.0 - rhs.0)
+        Elapsed(self.0.saturating_sub(rhs.0))
     }
 }
 
 impl Sub<Elapsed> for Timestamp {
     type Output = Timestamp;
     fn sub(self, rhs: Elapsed) -> Timestamp {
-        Timestamp(self.0 - rhs.0)
+        Timestamp(self.0.saturating_sub(rhs.0))
     }
 }
 
 impl Add<Elapsed> for Timestamp {
     type Output = Timestamp;
     fn add(self, rhs: Elapsed) -> Timestamp {
-        Timestamp(self.0 + rhs.0)
+        Timestamp(self.0.saturating_add(rhs.0))
     }
 }
 
