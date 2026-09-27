@@ -25,18 +25,17 @@ use crate::world::{Measurement, MeterReading};
 ///
 /// The journal drops rows when its write queue is full, deletes them when
 /// retention prunes, and a restart leaves a hole the width of the outage.
-/// Integrating a 1 Hz signal across an hour-long hole invents whatever the two
-/// endpoints happened to be doing, so the interval is skipped and its time goes
-/// uncounted instead — a total that is honestly short, with the coverage to say
-/// so, beats one that is confidently wrong.
+/// A gap beyond this is an outage, not normal cadence — samples arrive every
+/// scan tick — so the interval is skipped and its time goes uncounted instead.
+/// A total that is honestly short, with the coverage to say so, beats one that
+/// is confidently wrong.
 const MAX_SAMPLE_GAP: Duration = Duration::from_secs(30);
 
 /// A meter reading together with the battery state in force when it arrived.
 ///
-/// The two arrive on different cadences — the meter at ~1 Hz, the battery once
-/// per `poll_interval_secs` — so every battery figure here is up to one poll
-/// stale. That is fine for energy over a day and wrong for anything that cares
-/// about a single ramp.
+/// The battery figure is the last one folded before the meter reading beside
+/// it, so it can lag that reading by up to one battery poll. That is fine for
+/// energy over a day and wrong for anything that cares about a single ramp.
 #[derive(Debug, Clone)]
 struct Sample {
     at: Timestamp,
@@ -215,8 +214,8 @@ pub fn daily(events: &[Event]) -> Vec<DayTotals> {
 }
 
 /// Integrate one interval into the day its *earlier* end falls in. An interval
-/// spanning midnight is attributed whole to the day it started in: at 1 Hz that
-/// misplaces at most one second of energy, and splitting it would buy precision
+/// spanning midnight is attributed whole to the day it started in: that
+/// misplaces at most one scan tick of energy, and splitting it would buy precision
 /// this is nowhere near accurate enough to carry.
 fn accumulate(days: &mut BTreeMap<NaiveDate, DayTotals>, previous: &Sample, current: &Sample) {
     let Some(dt) = span(previous.at, current.at) else {

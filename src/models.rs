@@ -192,9 +192,7 @@ pub struct ZendureWriteRequest {
 
 /// Where a written property lands: `Flash` (smartMode 0) commits it to the
 /// device's flash, so Zendure recommends `Ram` (1) for anything written often.
-/// This build never commands `Flash` — it only ever observes the device in it
-/// and wakes out of it, since the wear a commanded flash mode costs is not yet
-/// designed for. Leaving it costs a 5s wake delay.
+/// Leaving `Flash` costs a 5s wake delay.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum StorageMode {
     /// smartMode: 1 — active, and writes stay in RAM: the mode Zendure

@@ -344,9 +344,9 @@ All kWh, bucketed by local calendar day. Two columns carry the argument:
 **`cover` is not decoration.** The journal drops rows when its write queue is
 full, deletes them when retention prunes, and a restart leaves a hole the width
 of the outage. Intervals longer than 30 s are skipped rather than integrated
-across — a 1 Hz signal says nothing about an hour-long gap — so a day under 100%
-is short by whatever happened in the hole, and anything under 95% is called out
-below the tables.
+across — a gap beyond the scan cadence is an outage, not a measurement — so a
+day under 100% is short by whatever happened in the hole, and anything under 95%
+is called out below the tables.
 
 Figures that depend on the battery (`unstored`, `>cap`, `charged`, `discharged`)
 are absent rather than zero before the range's first `device_update`: with no
@@ -463,7 +463,7 @@ The controller publishes MQTT discovery config automatically. These sensors appe
 
 Add `[web]` to run a live browser dashboard (`src/web/`) — solar/home/grid
 stat cards, the battery panel (SOC, mode, RTE, usable energy, capacity), and
-a decision log, all real data, updating roughly once a second over
+a decision log, all real data, updating every scan tick over
 server-sent events. Two routes: `GET /` (the full page) and `GET /events`
 (the SSE stream fragments it swaps in via htmx). No `[web]` table means no
 HTTP listener at all — the same brokerless-by-default rule `[mqtt]` follows —

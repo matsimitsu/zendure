@@ -1220,7 +1220,7 @@ fn discharging_continues_when_own_output_reduces_import() {
     assert_eq!(decision.mode, ControlMode::Discharge);
 }
 
-/// Shelly Pro 3EM gives direct signed grid power every second. House
+/// Shelly Pro 3EM gives direct signed grid power. House
 /// consuming 150W, battery idle long enough: should ramp from idle to
 /// ~150W discharge, converging net grid power to near zero.
 #[test]
