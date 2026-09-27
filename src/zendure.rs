@@ -140,11 +140,12 @@ impl ZendureClient {
 
     /// Fold what a report says about `smartMode` into the tracked mode.
     ///
-    /// The firmware can fall out of RAM mode on its own, and a guard running on
-    /// nothing but our own last write would then believe it is writing to RAM
-    /// while the device commits every one to flash. Trusting each report keeps
-    /// the guard self-healing; a report that omits the field says nothing, so
-    /// it changes nothing.
+    /// A second writer — the Zendure app or cloud — can flip the device out of
+    /// RAM mode independently of this process, and a guard running on nothing
+    /// but our own last write would then believe it is writing to RAM while
+    /// the device commits every one to flash. Trusting each report keeps the
+    /// guard self-healing; a report that omits the field says nothing, so it
+    /// changes nothing.
     fn observe_storage_mode(&self, smart_mode: Option<u32>) {
         match smart_mode {
             Some(1) => self.set_storage_mode(StorageMode::Ram),
@@ -343,8 +344,8 @@ impl BatteryMonitor for ZendureClient {
         // Sync tracked storage mode with the device's actual state: it may be in
         // Flash/standby (e.g. after an idle-timeout before a restart). Without
         // this, `ensure_ram_mode` short-circuits and never wakes the device, so
-        // it keeps reporting chargeMaxLimit=0 / inverseMaxPower=0 and every command
-        // clamps to 0W.
+        // every write after this one commits to flash instead of staying in
+        // RAM — the wear this build otherwise avoids commanding.
         let initial_storage_mode = if initial_report.properties.smart_mode == Some(1) {
             StorageMode::Ram
         } else {
