@@ -85,8 +85,8 @@ impl Ledger {
     }
 
     /// Record what a write actually put on the device. Called after the POST
-    /// returns, never before: a write that failed left the device as it was,
-    /// and tracked state claiming otherwise would suppress the retry.
+    /// returns, never before: tracked state claiming a write that never
+    /// landed would suppress the retry.
     pub fn record_input_limit(&self, limit: Setpoint) {
         *guard(&self.last_input_limit) = Some(limit);
     }
@@ -111,11 +111,26 @@ impl Ledger {
     }
 
     /// Record what a write actually set `acMode` to. Called after the POST
-    /// returns, never before — mirroring `record_input_limit`: a write that
-    /// failed left the device as it was, and recording the mode it was
-    /// attempting would suppress the retry that's needed.
+    /// returns, never before, for the same reason as `record_input_limit`.
     pub fn record_ac_mode(&self, mode: AcMode) {
         *guard(&self.last_ac_mode) = Some(mode);
+    }
+
+    /// A failed write leaves each value it carried unknown, not as it was: a
+    /// POST that timed out may still have landed. Keeping the old value would
+    /// let a later command equal to it be dropped as already satisfied while
+    /// the device holds the one that failed; unknown makes the next command
+    /// write whatever it says.
+    pub fn forget_input_limit(&self) {
+        *guard(&self.last_input_limit) = None;
+    }
+
+    pub fn forget_output_limit(&self) {
+        *guard(&self.last_output_limit) = None;
+    }
+
+    pub fn forget_ac_mode(&self) {
+        *guard(&self.last_ac_mode) = None;
     }
 }
 

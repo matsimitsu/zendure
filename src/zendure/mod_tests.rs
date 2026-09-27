@@ -85,9 +85,8 @@ async fn a_failed_standby_write_does_not_claim_the_device_is_in_standby() {
     ));
 }
 
-/// A failed charge must not claim the `acMode` it was attempting to set —
-/// the same rule `record_input_limit`'s doc already states, now also true
-/// of `record_ac_mode`.
+/// A failed charge must not claim the `acMode` it was attempting to set,
+/// for the same reason a failed write must not claim its limit.
 #[tokio::test]
 async fn a_failed_charge_does_not_record_the_ac_mode_it_attempted() {
     let client = client();
@@ -115,9 +114,8 @@ async fn a_closed_port_is_a_transport_error() {
     assert!(matches!(err, ZendureError::Transport(_)));
 }
 
-/// The bug this ticket exists for: a well-formed body riding on a 500 used
-/// to parse straight through as success, because nothing checked the status
-/// before decoding. `error_for_status` must reject it on the status alone.
+/// A well-formed body riding on a 500 is still a failure: the status must be
+/// checked before the body is decoded, or the error parses as a report.
 #[tokio::test]
 async fn a_bad_status_on_read_is_an_error_even_with_a_well_formed_body() {
     let (client, fake) = ZendureClient::fake("TESTSN");
@@ -131,9 +129,9 @@ async fn a_bad_status_on_read_is_an_error_even_with_a_well_formed_body() {
     assert!(matches!(err, ZendureError::Status(_)));
 }
 
-/// The same bug on the write side: a 500 response to a write used to be
-/// recorded as landed, since a POST that reaches the device at all returns
-/// `Ok` regardless of status.
+/// The write side of the same rule: a POST that reaches the device returns
+/// `Ok` whatever its status, so a 500 must be caught before it is recorded
+/// as landed.
 #[tokio::test]
 async fn a_bad_status_on_write_is_an_error_and_nothing_is_recorded_as_landed() {
     let (client, fake) = ZendureClient::fake("TESTSN");
@@ -311,4 +309,51 @@ fn pack_data_without_pack_num_is_trusted_as_is() {
         reading.telemetry.pack_capacities,
         Some(vec![WattHours(2400.0)])
     );
+}
+
+/// A failed write leaves what it attempted unknown rather than as it was. A
+/// 400 W discharge after a landed 300 W one fails (it may still have landed
+/// on the device), and a 300 W command must then go out again rather than be
+/// dropped as already on the device.
+#[tokio::test]
+async fn a_failed_write_forgets_what_it_attempted() {
+    let (client, fake) = ZendureClient::fake("TESTSN");
+    fake.queue_post(Ok(()));
+    fake.queue_post(Err(status_error(504)));
+
+    client
+        .apply_command(&Command::SetDischarge(Setpoint::new(300)))
+        .await
+        .expect("the first write lands");
+    client
+        .apply_command(&Command::SetDischarge(Setpoint::new(400)))
+        .await
+        .expect_err("the second write fails");
+
+    assert_eq!(client.ledger.tracked_state().output_limit, None);
+    assert!(needs_write(
+        &Command::SetDischarge(Setpoint::new(300)),
+        client.ledger.tracked_state()
+    ));
+}
+
+/// The same for idle: a failed idle may have zeroed the caps, so neither
+/// limit is known afterwards.
+#[tokio::test]
+async fn a_failed_idle_forgets_both_limits() {
+    let (client, fake) = ZendureClient::fake("TESTSN");
+    fake.queue_post(Ok(()));
+    fake.queue_post(Err(status_error(504)));
+
+    client
+        .apply_command(&Command::SetCharge(Setpoint::new(500)))
+        .await
+        .expect("the charge lands");
+    client
+        .apply_command(&Command::SetIdle)
+        .await
+        .expect_err("the idle fails");
+
+    let state = client.ledger.tracked_state();
+    assert_eq!((state.input_limit, state.output_limit), (None, None));
 }

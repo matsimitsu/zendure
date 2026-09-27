@@ -287,7 +287,13 @@ impl ZendureClient {
                 if send_ac_mode {
                     props["acMode"] = serde_json::json!(AcMode::Charge);
                 }
-                self.write_properties(props).await?;
+                if let Err(e) = self.write_properties(props).await {
+                    self.ledger.forget_input_limit();
+                    if send_ac_mode {
+                        self.ledger.forget_ac_mode();
+                    }
+                    return Err(e);
+                }
                 self.ledger.record_input_limit(power_watts);
                 self.ledger.record_ac_mode(AcMode::Charge);
                 Ok(())
@@ -301,7 +307,13 @@ impl ZendureClient {
                 if send_ac_mode {
                     props["acMode"] = serde_json::json!(AcMode::Discharge);
                 }
-                self.write_properties(props).await?;
+                if let Err(e) = self.write_properties(props).await {
+                    self.ledger.forget_output_limit();
+                    if send_ac_mode {
+                        self.ledger.forget_ac_mode();
+                    }
+                    return Err(e);
+                }
                 self.ledger.record_output_limit(power_watts);
                 self.ledger.record_ac_mode(AcMode::Discharge);
                 Ok(())
@@ -311,11 +323,17 @@ impl ZendureClient {
             // flash; until the wear that costs is designed for, it is not
             // commanded, and standby settles for idle's zeroed caps.
             Command::SetIdle | Command::SetStandby => {
-                self.write_properties(serde_json::json!({
-                    "inputLimit": 0,
-                    "outputLimit": 0,
-                }))
-                .await?;
+                let written = self
+                    .write_properties(serde_json::json!({
+                        "inputLimit": 0,
+                        "outputLimit": 0,
+                    }))
+                    .await;
+                if let Err(e) = written {
+                    self.ledger.forget_input_limit();
+                    self.ledger.forget_output_limit();
+                    return Err(e);
+                }
                 self.ledger.record_idle();
                 Ok(())
             }
