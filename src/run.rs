@@ -29,7 +29,7 @@ use crate::web;
 use crate::world::{DeviceId, Measurement, World};
 use crate::{controller, rte};
 use tokio::task::JoinSet;
-use tokio::time::MissedTickBehavior;
+use tokio::time::{Instant, MissedTickBehavior};
 
 /// How long each half of a shutdown waits before giving up and saying so.
 /// Bounded: an unbounded wait would only end via systemd's `TimeoutStopSec`
@@ -670,10 +670,11 @@ pub async fn run(
     // Opened before the samplers are asked for anything, so a source that
     // never answers at all ages out from here. Its device membership comes
     // from the registry, so every box the fleet is commanded on is one this
-    // tick read.
+    // tick read. Monotonic, like every instant a slot ages against — see
+    // `scan::Slot`'s own doc comment for why.
     let inbox = Inbox::new(
         devices.handles().map(|(id, _)| id),
-        Clock::now(config.timezone).now,
+        Instant::now(),
         mqtt_timeout,
     );
 
@@ -756,15 +757,19 @@ pub async fn run(
                 // failsafe and the dashboard — all of which must agree about
                 // when this tick happened.
                 let at = Clock::now(config.timezone);
+                // A source's staleness is read on this, not `at.now`: a wall
+                // clock a tick apart still lets an NTP step land between two
+                // ticks without moving it.
+                let scan_now = Instant::now();
 
                 let fleet = tick_context.fold_devices(
                     &mut engine,
                     &mut telemetry,
                     at,
-                    inbox.take_devices(round, at.now),
+                    inbox.take_devices(round, scan_now),
                 );
 
-                match (fleet, inbox.take_meter(round, at.now)) {
+                match (fleet, inbox.take_meter(round, scan_now)) {
                     (Fleet::Silent(down), meter) => {
                         let silent = Silent { meter: meter.down(), devices: down };
                         tick_context.stand_down(&mut engine, at, silent).await;
