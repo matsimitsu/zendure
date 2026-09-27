@@ -15,6 +15,7 @@ fn distinctive_state() -> ControllerState {
         daily_transitions: 44,
         daily_cooldown_suppressions: 55,
         last_cycle_reset_day: 66,
+        ramp_pending: true,
     }
 }
 
@@ -45,6 +46,17 @@ fn controller_state_round_trips_through_json() {
     let fresh = Controller::test_default(NOW_MS, DAY).state();
     let json = serde_json::to_string(&fresh).unwrap();
     assert_eq!(fresh, serde_json::from_str(&json).unwrap());
+}
+
+/// A row journalled before `ramp_pending` existed still has to restore.
+#[test]
+fn controller_state_without_ramp_pending_still_reads() {
+    let mut json = serde_json::to_value(distinctive_state()).unwrap();
+    json.as_object_mut().unwrap().remove("ramp_pending");
+
+    let state: ControllerState = serde_json::from_value(json).unwrap();
+
+    assert!(!state.ramp_pending);
 }
 
 /// A one-battery world, the shape every test in this module decides against.
@@ -568,6 +580,41 @@ fn ramp_on_discharge_mode_change() {
         &clock(20),
     );
     assert_eq!(d2.power_watts, Setpoint::new(395));
+}
+
+/// A mode change can land on a tick whose caps read zero, so its setpoint is
+/// zero and there is nothing to ramp. The ramp belongs to the first setpoint
+/// that actually moves power, not to that tick.
+#[test]
+fn ramp_waits_for_the_first_positive_setpoint_after_a_mode_change() {
+    let mut ctrl = controller_no_cooldown();
+    let capped = BatteryState {
+        max_discharge_power: PowerCap::new(0),
+        ..battery(50)
+    };
+
+    let d1 = decide_at(
+        &mut ctrl,
+        &world(GridPower(400.0), SolarPower::new(0.0), &capped),
+        &clock(20),
+    );
+    assert_eq!(d1.mode, ControlMode::Discharge);
+    assert_eq!(d1.power_watts, Setpoint::ZERO);
+
+    let d2 = decide_at(
+        &mut ctrl,
+        &world(GridPower(400.0), SolarPower::new(0.0), &battery(50)),
+        &clock(20),
+    );
+    assert_eq!(d2.power_watts, Setpoint::new(296), "{}", d2.reason);
+    assert!(d2.reason.ends_with(" (ramped 75%)"), "{}", d2.reason);
+
+    let d3 = decide_at(
+        &mut ctrl,
+        &world(GridPower(400.0), SolarPower::new(0.0), &battery(50)),
+        &clock(20),
+    );
+    assert_eq!(d3.power_watts, Setpoint::new(395));
 }
 
 // --- Decision interval tests ---

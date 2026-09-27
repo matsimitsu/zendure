@@ -12,8 +12,8 @@ use crate::units::{
 };
 use crate::world::World;
 
-/// How much of the target is commanded on the first decision after a mode
-/// change. Easing into a new direction rather than stepping straight to full
+/// How much of the target is commanded on the first positive setpoint after a
+/// mode change. Easing into a new direction rather than stepping straight to full
 /// power is a battery-safety measure, and the convention most BMS
 /// implementations follow.
 const RAMP_FACTOR: RampFactor = RampFactor::new(75);
@@ -32,6 +32,11 @@ pub struct ControllerState {
     pub daily_transitions: u32,
     pub daily_cooldown_suppressions: u32,
     pub last_cycle_reset_day: u32,
+    /// Set on entering charge or discharge, cleared by the first positive
+    /// setpoint, which is the one ramped: the mode-change tick itself can be
+    /// capped to zero. Defaulted so rows journalled without it still read.
+    #[serde(default)]
+    pub ramp_pending: bool,
 }
 
 /// Reactive self-consumption control. Deliberately free of clock reads: every
@@ -80,6 +85,7 @@ impl Controller {
                 daily_transitions: 0,
                 daily_cooldown_suppressions: 0,
                 last_cycle_reset_day: clock.day_ordinal,
+                ramp_pending: false,
             },
             min_mode_duration,
             min_decision_interval,
@@ -211,6 +217,7 @@ impl Controller {
             self.state.last_mode = ControlMode::Idle;
             self.state.last_mode_change = clock.now;
             self.state.last_idle_start = Some(clock.now);
+            self.state.ramp_pending = false;
         }
     }
 
@@ -348,6 +355,7 @@ impl Controller {
                 self.state.last_mode = ControlMode::Standby;
                 self.state.last_mode_change = clock.now;
                 self.state.last_idle_start = None;
+                self.state.ramp_pending = false;
             }
             return ControlDecision {
                 mode: ControlMode::Standby,
@@ -381,12 +389,13 @@ impl Controller {
             };
         }
 
-        // Track mode changes and apply ramp
-        let (final_power, ramped) = if mode != self.state.last_mode {
+        if mode != self.state.last_mode {
             self.state.daily_transitions += 1;
-            if matches!(mode, ControlMode::Charge | ControlMode::Discharge) {
+            let active = matches!(mode, ControlMode::Charge | ControlMode::Discharge);
+            if active {
                 self.state.last_active_mode = Some(mode);
             }
+            self.state.ramp_pending = active;
             self.state.last_mode = mode;
             self.state.last_mode_change = clock.now;
             self.state.last_idle_start = if mode == ControlMode::Idle {
@@ -394,13 +403,14 @@ impl Controller {
             } else {
                 None
             };
-            if power.is_positive() {
-                (power.ramped(RAMP_FACTOR), true)
-            } else {
-                (power, false)
-            }
+        }
+
+        let ramped = self.state.ramp_pending && power.is_positive();
+        let final_power = if ramped {
+            self.state.ramp_pending = false;
+            power.ramped(RAMP_FACTOR)
         } else {
-            (power, false)
+            power
         };
 
         // Idle timeout → standby
