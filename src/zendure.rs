@@ -14,6 +14,79 @@ use crate::sync::guard;
 use crate::units::{DeciKelvin, PackTemperature, Setpoint, Soc, WattHours, Watts};
 use crate::world::DeviceId;
 
+/// Where a Zendure REST call failed: never reached the device, reached it and
+/// got a status the device itself flagged as an error, or came back 200 with
+/// a body this build cannot decode. A caller — the write guards, the
+/// journal — needs to tell these apart, which one bare `reqwest::Error`
+/// cannot: `reqwest` alone doesn't fail a request just because the status
+/// line says 500.
+#[derive(Debug)]
+pub enum ZendureError {
+    Transport(reqwest::Error),
+    Status(reqwest::Error),
+    Parse(serde_json::Error),
+}
+
+impl std::fmt::Display for ZendureError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ZendureError::Transport(e) => write!(f, "request failed: {e}"),
+            ZendureError::Status(e) => write!(f, "device returned an error status: {e}"),
+            ZendureError::Parse(e) => write!(f, "parse error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ZendureError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ZendureError::Transport(e) | ZendureError::Status(e) => Some(e),
+            ZendureError::Parse(e) => Some(e),
+        }
+    }
+}
+
+/// `reqwest::Error::is_status` is only ever `true` for an error `Response::error_for_status`
+/// produced, so this is the one place that needs to know that — every `?` on a
+/// `reqwest::Error` downstream gets the right variant for free.
+impl From<reqwest::Error> for ZendureError {
+    fn from(e: reqwest::Error) -> Self {
+        if e.is_status() {
+            ZendureError::Status(e)
+        } else {
+            ZendureError::Transport(e)
+        }
+    }
+}
+
+/// The device's `acMode` property. `1`/`2` as bare literals let a Charge write
+/// silently carry a Discharge's mode number (or vice versa) past the compiler;
+/// spelled out, the only way to send the wrong one is to call the wrong
+/// variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcMode {
+    Charge,
+    Discharge,
+}
+
+impl AcMode {
+    fn wire(self) -> u32 {
+        match self {
+            AcMode::Charge => 1,
+            AcMode::Discharge => 2,
+        }
+    }
+}
+
+/// The wire format is a bare `u32`, matching what `ZendureProperties::ac_mode`
+/// already expects on read. `serde(into)` would need `AcMode: Clone +
+/// Into<u32>` on the type itself, so this is spelled out instead.
+impl serde::Serialize for AcMode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u32(self.wire())
+    }
+}
+
 pub struct ZendureClient {
     http: reqwest::Client,
     base_url: String,
@@ -28,7 +101,7 @@ pub struct ZendureClient {
     /// ask it instead of naming a model of its own.
     spec: BatterySpec,
     storage_mode: Mutex<StorageMode>,
-    last_ac_mode: Mutex<Option<u32>>,
+    last_ac_mode: Mutex<Option<AcMode>>,
     /// The limits believed to be on the device, `None` until a write of ours
     /// lands. What the idle and standby guards compare a command against, so
     /// one that would change nothing costs no write.
@@ -100,16 +173,23 @@ impl ZendureClient {
         &self.spec
     }
 
-    pub async fn get_properties(&self) -> Result<ZendureReport, reqwest::Error> {
-        self.http.get(self.report_url()).send().await?.json().await
+    pub async fn get_properties(&self) -> Result<ZendureReport, ZendureError> {
+        let body = self.get_properties_raw().await?;
+        serde_json::from_str(&body).map_err(ZendureError::Parse)
     }
 
     /// The same request returned as text, so the response can be captured
     /// verbatim before parsing. The device's API is undocumented and
     /// `ZendureProperties` is `Deserialize`-only, so round-tripping through our
     /// own types would discard exactly the fields worth keeping.
-    pub async fn get_properties_raw(&self) -> Result<String, reqwest::Error> {
-        self.http.get(self.report_url()).send().await?.text().await
+    pub async fn get_properties_raw(&self) -> Result<String, ZendureError> {
+        let response = self
+            .http
+            .get(self.report_url())
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.text().await?)
     }
 
     fn report_url(&self) -> String {
@@ -119,7 +199,7 @@ impl ZendureClient {
     /// Ensure the device is in RAM mode (smartMode: 1) before sending commands.
     /// If currently in Flash mode, sends the wake command and waits 5 seconds
     /// for the device to transition.
-    pub async fn ensure_ram_mode(&self) -> Result<(), reqwest::Error> {
+    pub async fn ensure_ram_mode(&self) -> Result<(), ZendureError> {
         {
             let mode = guard(&self.storage_mode);
             if *mode == StorageMode::Ram {
@@ -161,6 +241,13 @@ impl ZendureClient {
         *guard(&self.storage_mode)
     }
 
+    /// What the last landed write set `acMode` to. Only `apply_command`
+    /// consults it in production.
+    #[cfg(test)]
+    fn tracked_ac_mode(&self) -> Option<AcMode> {
+        *guard(&self.last_ac_mode)
+    }
+
     /// One consistent snapshot for the write guard to decide on.
     fn tracked_state(&self) -> DeviceState {
         DeviceState {
@@ -192,7 +279,7 @@ impl ZendureClient {
     /// stalling all power flow. Written only at startup, never mid-run — if the
     /// device zeroes a cap while running, the controller stands down rather
     /// than fighting it.
-    pub async fn write_power_caps(&self) -> Result<(), reqwest::Error> {
+    pub async fn write_power_caps(&self) -> Result<(), ZendureError> {
         self.ensure_ram_mode().await?;
         self.write_properties(serde_json::json!({
             "chargeMaxLimit": self.spec.max_charge_power,
@@ -208,7 +295,7 @@ impl ZendureClient {
     /// A command the device already satisfies is dropped here rather than
     /// re-POSTed every decision interval — see [`needs_write`] for what that
     /// costs in standby.
-    pub async fn apply_command(&self, command: &Command) -> Result<(), reqwest::Error> {
+    pub async fn apply_command(&self, command: &Command) -> Result<(), ZendureError> {
         if !needs_write(command, self.tracked_state()) {
             return Ok(());
         }
@@ -218,11 +305,13 @@ impl ZendureClient {
                 let mut props = serde_json::json!({
                     "inputLimit": power_watts,
                 });
-                if self.set_ac_mode(1) {
-                    props["acMode"] = serde_json::json!(1);
+                let send_ac_mode = self.ac_mode_pending(AcMode::Charge);
+                if send_ac_mode {
+                    props["acMode"] = serde_json::json!(AcMode::Charge);
                 }
                 self.write_properties(props).await?;
                 self.record_input_limit(power_watts);
+                self.record_ac_mode(AcMode::Charge);
                 Ok(())
             }
             Command::SetDischarge(power_watts) => {
@@ -230,11 +319,13 @@ impl ZendureClient {
                 let mut props = serde_json::json!({
                     "outputLimit": power_watts,
                 });
-                if self.set_ac_mode(2) {
-                    props["acMode"] = serde_json::json!(2);
+                let send_ac_mode = self.ac_mode_pending(AcMode::Discharge);
+                if send_ac_mode {
+                    props["acMode"] = serde_json::json!(AcMode::Discharge);
                 }
                 self.write_properties(props).await?;
                 self.record_output_limit(power_watts);
+                self.record_ac_mode(AcMode::Discharge);
                 Ok(())
             }
             // One arm, because they are one request. Standby would also write
@@ -253,12 +344,19 @@ impl ZendureClient {
         }
     }
 
-    /// Updates the tracked acMode, returns true if it changed (and should be sent).
-    fn set_ac_mode(&self, mode: u32) -> bool {
-        let mut last = guard(&self.last_ac_mode);
-        let changed = *last != Some(mode);
-        *last = Some(mode);
-        changed
+    /// Whether commanding `mode` would tell the device something it wasn't
+    /// already told, and so must go out in this write at all. Read-only:
+    /// recording waits for the write to land, see `record_ac_mode`.
+    fn ac_mode_pending(&self, mode: AcMode) -> bool {
+        *guard(&self.last_ac_mode) != Some(mode)
+    }
+
+    /// Record what a write actually set `acMode` to. Called after the POST
+    /// returns, never before — mirroring `record_input_limit`: a write that
+    /// failed left the device as it was, and recording the mode it was
+    /// attempting would suppress the retry that's needed.
+    fn record_ac_mode(&self, mode: AcMode) {
+        *guard(&self.last_ac_mode) = Some(mode);
     }
 
     /// Parse one raw report body into a reading, carrying the body along either
@@ -290,13 +388,18 @@ impl ZendureClient {
     pub async fn write_properties(
         &self,
         properties: serde_json::Value,
-    ) -> Result<(), reqwest::Error> {
+    ) -> Result<(), ZendureError> {
         let url = format!("{}/properties/write", self.base_url);
         let body = ZendureWriteRequest {
             sn: self.id.to_string(),
             properties,
         };
-        self.http.post(&url).json(&body).send().await?;
+        self.http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
         Ok(())
     }
 }
@@ -305,13 +408,13 @@ impl ZendureClient {
 /// `apply_command`, which the poll loop and startup path still call directly.
 /// This is the seam `actuate` drives, so the control loop never names a vendor.
 impl BatteryController for ZendureClient {
-    type Error = reqwest::Error;
+    type Error = ZendureError;
 
     fn id(&self) -> &DeviceId {
         &self.id
     }
 
-    async fn apply(&self, command: &Command) -> Result<(), reqwest::Error> {
+    async fn apply(&self, command: &Command) -> Result<(), ZendureError> {
         self.apply_command(command).await
     }
 }
@@ -393,7 +496,7 @@ impl BatteryMonitor for ZendureClient {
     async fn poll(&self) -> Result<BatteryReading, PollError> {
         let body = self.get_properties_raw().await.map_err(|e| PollError {
             raw: None,
-            error: format!("request failed: {e}"),
+            error: e.to_string(),
         })?;
         self.parse_report(body)
     }
@@ -566,6 +669,61 @@ mod tests {
         ZendureClient::new("127.0.0.1:1", "TESTSN".to_string(), POLL_INTERVAL_FLOOR)
     }
 
+    /// Binds an ephemeral port, accepts exactly one connection, and writes
+    /// `status_line`/`body` back as one full HTTP response before closing. A
+    /// real status line is what `error_for_status` needs — the closed port
+    /// `client()` uses can only ever produce a transport failure, never a
+    /// device-shaped 4xx/5xx.
+    async fn respond_once(status_line: &str, body: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = format!(
+            "{status_line}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len(),
+        );
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("127.0.0.1:{}", addr.port())
+    }
+
+    /// A stub device that answers every request 200 with an empty JSON
+    /// object — enough to prove a landed write is recorded, which
+    /// `respond_once`'s single response cannot exercise on its own once a
+    /// command needs more than one round trip (a wake plus a write).
+    async fn always_ok_server() -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = stream.read(&mut buf).await;
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+                        )
+                        .await;
+                });
+            }
+        });
+        format!("127.0.0.1:{}", addr.port())
+    }
+
     /// Standby is re-decided every 5s and repeats the same two zeroes, so once
     /// they have landed the repeat has nothing to say.
     #[test]
@@ -711,6 +869,102 @@ mod tests {
 
         assert_eq!(client.tracked_storage_mode(), StorageMode::Ram);
         assert!(needs_write(&Command::SetStandby, client.tracked_state()));
+    }
+
+    /// A failed charge must not claim the `acMode` it was attempting to set —
+    /// the same rule `record_input_limit`'s doc already states, now also true
+    /// of `record_ac_mode`.
+    #[tokio::test]
+    async fn a_failed_charge_does_not_record_the_ac_mode_it_attempted() {
+        let client = client();
+
+        client
+            .apply_command(&Command::SetCharge(Setpoint::new(500)))
+            .await
+            .expect_err("nothing is listening on port 1");
+
+        assert_eq!(client.tracked_ac_mode(), None);
+    }
+
+    /// Never reaching the device and being refused by it are different
+    /// failures; a caller reading `ZendureError` should be able to tell them
+    /// apart rather than pattern-matching a message string.
+    #[tokio::test]
+    async fn a_closed_port_is_a_transport_error() {
+        let client = client();
+
+        let err = client
+            .get_properties_raw()
+            .await
+            .expect_err("nothing is listening on port 1");
+
+        assert!(matches!(err, ZendureError::Transport(_)));
+    }
+
+    /// The bug this ticket exists for: a well-formed body riding on a 500
+    /// used to parse straight through as success, because nothing checked the
+    /// status before decoding. `error_for_status` must reject it on the
+    /// status alone.
+    #[tokio::test]
+    async fn a_bad_status_on_read_is_an_error_even_with_a_well_formed_body() {
+        let addr = respond_once("HTTP/1.1 500 Internal Server Error", r#"{"properties":{}}"#).await;
+        let client = ZendureClient::new(&addr, "TESTSN".to_string(), POLL_INTERVAL_FLOOR);
+
+        let err = client
+            .get_properties_raw()
+            .await
+            .expect_err("a 500 must not read as success");
+
+        assert!(matches!(err, ZendureError::Status(_)));
+    }
+
+    /// The same bug on the write side: a 500 response to a write used to be
+    /// recorded as landed, since a POST that reaches the device at all
+    /// returns `Ok` regardless of status.
+    #[tokio::test]
+    async fn a_bad_status_on_write_is_an_error_and_nothing_is_recorded_as_landed() {
+        let addr = respond_once("HTTP/1.1 500 Internal Server Error", "").await;
+        let client = ZendureClient::new(&addr, "TESTSN".to_string(), POLL_INTERVAL_FLOOR);
+
+        let err = client
+            .apply_command(&Command::SetCharge(Setpoint::new(500)))
+            .await
+            .expect_err("a 500 must not read as a landed write");
+
+        assert!(matches!(err, ZendureError::Status(_)));
+        assert_eq!(client.tracked_state().input_limit, None);
+        assert_eq!(client.tracked_ac_mode(), None);
+    }
+
+    /// A 200 whose body this build cannot decode is a parse failure, not a
+    /// silent success — `get_properties` shares `get_properties_raw`'s status
+    /// check and adds its own decode on top.
+    #[tokio::test]
+    async fn an_undecodable_body_on_get_properties_is_a_parse_error() {
+        let addr = respond_once("HTTP/1.1 200 OK", "not json").await;
+        let client = ZendureClient::new(&addr, "TESTSN".to_string(), POLL_INTERVAL_FLOOR);
+
+        let err = client.get_properties().await.expect_err("not valid JSON");
+
+        assert!(matches!(err, ZendureError::Parse(_)));
+    }
+
+    /// The other half of `a_failed_charge_does_not_record_the_ac_mode_it_attempted`:
+    /// a charge that actually lands does record the mode it sent, once the
+    /// write is confirmed rather than before.
+    #[tokio::test]
+    async fn a_landed_charge_records_the_ac_mode_only_after_the_write_succeeds() {
+        let addr = always_ok_server().await;
+        let client = ZendureClient::new(&addr, "TESTSN".to_string(), POLL_INTERVAL_FLOOR);
+        assert_eq!(client.tracked_ac_mode(), None);
+
+        client
+            .apply_command(&Command::SetCharge(Setpoint::new(500)))
+            .await
+            .expect("the stub server answers every request 200");
+
+        assert_eq!(client.tracked_ac_mode(), Some(AcMode::Charge));
+        assert_eq!(client.tracked_state().input_limit, Some(Setpoint::new(500)));
     }
 
     #[test]
