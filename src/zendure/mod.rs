@@ -130,9 +130,8 @@ impl Wire {
 }
 
 /// Canned answers for `Wire::Fake`, queued by a test before the call each one
-/// answers. Replaces hand-rolled TCP stubs that had to speak raw HTTP just to
-/// get a real status line past `error_for_status` — `mod_tests.rs`'s
-/// `status_error` builds those without a socket.
+/// answers. Errors are genuine `ZendureError`s — `mod_tests.rs`'s
+/// `status_error` builds a real status error without a socket.
 #[cfg(test)]
 #[derive(Default)]
 struct Fake {
@@ -380,7 +379,7 @@ impl ZendureClient {
 }
 
 /// The adapter side of the capability trait: everything real is already in
-/// `apply_command`, which the poll loop and startup path still call directly.
+/// `apply_command`, which the poll loop and startup path also call directly.
 /// This is the seam `actuate` drives, so the control loop never names a vendor.
 impl BatteryController for ZendureClient {
     type Error = ZendureError;

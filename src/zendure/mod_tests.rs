@@ -14,8 +14,8 @@ fn client() -> ZendureClient {
 
 /// A genuine `ZendureError::Status`, built from a real HTTP status line
 /// without a socket: `http::Response` converts into a `reqwest::Response`,
-/// and `error_for_status` does the rest. Replaces hand-crafting a raw HTTP
-/// response over a real listener just to get a status line past it.
+/// and `error_for_status` does the rest, so no test needs a listener
+/// speaking raw HTTP just to get a status line past it.
 fn status_error(code: u16) -> ZendureError {
     let response: reqwest::Response = http::Response::builder()
         .status(code)
@@ -206,9 +206,8 @@ fn an_unidentified_pack_still_reports_a_capacity() {
     );
 }
 
-/// A pack that reports no `packType` at all used to take the 1920 Wh
-/// default with nothing said about it — the same guess as an unrecognised
-/// type, and it deserves the same warning.
+/// A pack that reports no `packType` at all gets the same 1920 Wh guess as
+/// an unrecognised type, so it gets the same warning.
 #[test]
 fn a_pack_with_no_pack_type_is_also_unidentified() {
     assert_eq!(
