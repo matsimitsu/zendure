@@ -124,7 +124,7 @@ filter = "zendure=info"
 charge_margin = 50
 discharge_margin = 5
 charge_start_threshold = -100.0
-discharge_start_threshold = 0.0
+discharge_start_threshold = 50.0   # > 0: discharge stops at 0 W, so this is the band
 min_mode_duration_secs = 10
 min_decision_interval_secs = 0
 idle_timeout_secs = 300
@@ -165,6 +165,11 @@ and defaults to 1 s, and only zero is refused.
 outlast several rounds of it: a healthy source is one tick old when a tick reads
 it, and a window inside that would stand the fleet down with everything
 answering. Anything at or under three ticks warns and is raised to three.
+
+`[tuning] discharge_start_threshold` is the import that starts a discharge, and
+since only 0 W stops one, it is also the width of the band between idle and
+discharge. At or below 0 there is no band and the mode flips on meter noise, so
+such a value warns and takes the default, 50 W.
 
 `zendure --check --config <path>` runs the same parse, but strictly: a parse
 error is fatal exactly as it is for the daemon, and **any warning is promoted

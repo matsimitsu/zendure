@@ -320,6 +320,31 @@ fn a_blind_window_inside_three_scan_rounds_warns_and_is_raised() {
     );
 }
 
+/// Discharge stops at 0 W, so a start threshold at or below it leaves no band
+/// between the two and idle↔discharge flips on meter noise.
+#[test]
+fn a_discharge_start_threshold_with_no_band_warns_and_takes_the_default() {
+    for value in ["0.0", "-20.0"] {
+        let toml = format!(
+            "{}\n[tuning]\ndischarge_start_threshold = {value}\n",
+            minimal_toml()
+        );
+
+        let (config, warnings) = Config::from_toml_str(&toml).unwrap();
+
+        assert_eq!(
+            config.discharge_start_threshold,
+            DEFAULT_DISCHARGE_START_THRESHOLD
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("tuning.discharge_start_threshold")),
+            "{warnings:?}"
+        );
+    }
+}
+
 #[test]
 fn the_shipped_tick_and_blind_window_are_left_alone() {
     let toml = minimal_toml().replace("poll_interval_secs = 10", "poll_interval_secs = 3");
@@ -559,7 +584,7 @@ fn the_example_config_is_what_production_runs() {
         charge_margin: PowerMargin::new(50),
         discharge_margin: PowerMargin::new(5),
         charge_start_threshold: GridPower(-100.0),
-        discharge_start_threshold: GridPower(0.0),
+        discharge_start_threshold: GridPower(50.0),
         min_mode_duration: Duration::from_secs(10),
         min_decision_interval: Duration::from_secs(0),
         idle_timeout: Duration::from_secs(300),

@@ -43,6 +43,12 @@ pub const DEFAULT_CONFIG_PATH: &str = "/etc/zendure/config.toml";
 /// round trip to pace.
 const DEFAULT_VIRTUAL_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Discharge stops at 0 W, so this is also the width of the idle↔discharge
+/// band. It has to clear the device's power resolution and the meter's noise,
+/// neither yet measured, so it errs wide: too wide only delays a start by the
+/// band's worth of import, because once discharging only 0 W stops it.
+pub const DEFAULT_DISCHARGE_START_THRESHOLD: GridPower = GridPower(50.0);
+
 fn parse_weekday(s: &str) -> Result<Weekday, String> {
     match s.trim().to_ascii_lowercase().as_str() {
         "mon" | "monday" => Ok(Weekday::Mon),
@@ -554,6 +560,28 @@ fn take_mqtt_timeout(
     Ok(configured)
 }
 
+/// A threshold at or below 0 W leaves the band with no width. Warns and takes
+/// the default, the policy every `[tuning]` key follows.
+fn take_discharge_start_threshold(
+    taker: &mut Taker,
+    warnings: &mut Vec<String>,
+) -> Result<GridPower, String> {
+    let configured = taker.lenient::<GridPower>(
+        "tuning.discharge_start_threshold",
+        DEFAULT_DISCHARGE_START_THRESHOLD,
+    )?;
+
+    if configured <= GridPower::ZERO {
+        warnings.push(format!(
+            "tuning.discharge_start_threshold = {configured} leaves no band above the 0 W \
+             discharge stops at; using {DEFAULT_DISCHARGE_START_THRESHOLD} instead",
+        ));
+        return Ok(DEFAULT_DISCHARGE_START_THRESHOLD);
+    }
+
+    Ok(configured)
+}
+
 /// [`POLL_INTERVAL_FLOOR`] is the Zendure firmware's report-refresh rate, so it
 /// says nothing about a simulator and is not applied here. Zero is refused
 /// because `tokio::time::interval` panics on it.
@@ -798,7 +826,7 @@ impl SessionConfig {
             charge_margin: PowerMargin::new(50),
             discharge_margin: PowerMargin::new(5),
             charge_start_threshold: GridPower(-100.0),
-            discharge_start_threshold: GridPower(0.0),
+            discharge_start_threshold: DEFAULT_DISCHARGE_START_THRESHOLD,
             min_mode_duration_secs: 10,
             min_decision_interval_secs: 0,
             idle_timeout_secs: 5 * 60,
@@ -1039,8 +1067,7 @@ impl Config {
             taker.lenient::<PowerMargin>("tuning.discharge_margin", PowerMargin::new(5))?;
         let charge_start_threshold =
             taker.lenient::<GridPower>("tuning.charge_start_threshold", GridPower(-100.0))?;
-        let discharge_start_threshold =
-            taker.lenient::<GridPower>("tuning.discharge_start_threshold", GridPower(0.0))?;
+        let discharge_start_threshold = take_discharge_start_threshold(&mut taker, &mut warnings)?;
         let min_mode_duration =
             Duration::from_secs(taker.lenient::<u64>("tuning.min_mode_duration_secs", 10)?);
         let min_decision_interval =

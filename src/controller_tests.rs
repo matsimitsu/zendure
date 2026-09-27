@@ -290,8 +290,7 @@ fn soc_at_min_can_still_charge() {
 #[test]
 fn idle_within_deadband() {
     let mut ctrl = controller_no_cooldown();
-    // 0W is at discharge_start_threshold (0W) and above charge_start_threshold
-    // (-100W)
+    // 0W is below discharge_start_threshold and above charge_start_threshold
     let decision = decide_at(
         &mut ctrl,
         &world(GridPower(0.0), SolarPower::new(0.0), &battery(50)),
@@ -371,7 +370,7 @@ fn deadband_no_charge_at_minus_80() {
 #[test]
 fn deadband_no_discharge_at_zero() {
     let mut ctrl = controller_no_cooldown();
-    // 0W grid power is not > 0 threshold → idle
+    // 0W is below discharge_start_threshold → idle
     let decision = decide_at(
         &mut ctrl,
         &world(GridPower(0.0), SolarPower::new(0.0), &battery(50)),
@@ -1094,6 +1093,58 @@ fn discharge_hysteresis_boundary_at_zero() {
         &clock(20),
     );
     assert_eq!(decision.mode, ControlMode::Idle);
+}
+
+/// Folds a run of house demands through `ctrl`, the battery reporting exactly
+/// the setpoint it was last given, and returns the mode of every decision.
+fn modes_under_demand(ctrl: &mut Controller, demands: &[f64]) -> Vec<ControlMode> {
+    let mut discharging = 0;
+    demands
+        .iter()
+        .map(|&demand| {
+            let bat = battery_discharging(50, discharging);
+            let grid = GridPower(demand - f64::from(discharging));
+            let decision = decide_at(ctrl, &world(grid, SolarPower::new(0.0), &bat), &clock(20));
+            discharging = match decision.mode {
+                ControlMode::Discharge => decision.power_watts.get(),
+                _ => 0,
+            };
+            decision.mode
+        })
+        .collect()
+}
+
+fn transitions(modes: &[ControlMode]) -> usize {
+    modes.windows(2).filter(|w| w[0] != w[1]).count()
+}
+
+/// Meter noise either side of zero is not demand: nothing should start.
+#[test]
+fn demand_hovering_at_zero_starts_no_discharge() {
+    let mut ctrl = controller_no_cooldown();
+    let demands: Vec<f64> = (0..20)
+        .map(|i| if i % 2 == 0 { 20.0 } else { -20.0 })
+        .collect();
+
+    let modes = modes_under_demand(&mut ctrl, &demands);
+
+    assert!(modes.iter().all(|m| *m == ControlMode::Idle), "{modes:?}");
+}
+
+/// Demand hovering around the start threshold starts one discharge, which the
+/// band then holds rather than handing back to idle every other tick.
+#[test]
+fn demand_hovering_at_the_start_threshold_discharges_once() {
+    let mut ctrl = controller_no_cooldown();
+    let threshold = ctrl.discharge_start_threshold.0;
+    let demands: Vec<f64> = (0..20)
+        .map(|i| threshold + if i % 2 == 0 { 10.0 } else { -10.0 })
+        .collect();
+
+    let modes = modes_under_demand(&mut ctrl, &demands);
+
+    assert_eq!(modes[0], ControlMode::Discharge, "{modes:?}");
+    assert_eq!(transitions(&modes), 0, "{modes:?}");
 }
 
 // --- SOC limit tests ---
