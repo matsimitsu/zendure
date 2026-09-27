@@ -201,16 +201,30 @@ impl Tick<'_> {
         }
 
         if let Some(decision) = &step.decision {
-            // Every battery stands down, and one unreachable box does not
-            // leave the others running through the outage.
-            self.apply_decision(
-                engine,
-                ControlPath::Failsafe,
-                at.now,
-                decision,
-                &step.directives,
-            )
-            .await;
+            // A device found `Down` is written to on the outage's first tick
+            // only. `Down` means its reads stopped, not that it cannot take a
+            // write — a report that fails to parse or an error status ages a
+            // slot out just as a dead box does — so it gets one attempt to
+            // idle. After that, each retry against a box that really is gone
+            // holds the next round's `requests.send_modify` behind the full
+            // request timeout, on every tick. A device that goes `Down` later
+            // in the outage was idled by the ticks it still answered on.
+            let first_tick = step.status.is_some();
+            let directives: Vec<Directive> = step
+                .directives
+                .iter()
+                .filter(|directive| {
+                    first_tick
+                        || !silent
+                            .devices
+                            .iter()
+                            .any(|(down, _)| down == directive.device())
+                })
+                .cloned()
+                .collect();
+
+            self.apply_decision(engine, ControlPath::Failsafe, at.now, decision, &directives)
+                .await;
         }
 
         if let Some(tx) = self.dashboard {
