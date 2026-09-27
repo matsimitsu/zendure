@@ -96,3 +96,33 @@ vary — in control loops, that distinction matters.
   invariants.
 - If you find yourself re-validating inside the loop, the invariant is wrong. Fix
   the type or the entry point, not the loop.
+
+---
+
+## CONTROL-2: Combine only measurements of the same age; never argue with hardware at loop frequency
+
+When two signals are combined arithmetically, their sample ages must match. When
+the hardware disagrees with what was commanded, do not re-send the command every
+tick.
+
+**Why:** The setpoint law adds the battery's reported power back onto the
+meter's total (`u = battery + (export − margin)`). That inversion is exact only
+while both describe the same instant. A stale term at unity gain in a feedback
+path is unstable at *every* gain: `z² + Kz − 1 = 0` has root product −1, so
+lowering `K` slows the oscillation but never removes it. Equally stale inputs are
+fine however old; it's the *mismatch* that diverges. Four patches treated the
+resulting oscillation as a mode-selection problem before the power law was
+looked at. The other half of the rule: re-asserting a command the device won't
+honour turns a disagreement into a write per tick. A budget that counts those
+writes only records what already happened. Only a rule about what may be
+written can bound it.
+
+**How to apply:**
+- Stamp every reading with when it was *taken*, not when it was used. `World`
+  keeps a sample time per reading, so the gap behind any decision is on record.
+- Decide only on a set of samples taken for the same round. A round short of any
+  source's sample holds the last command rather than mixing ages.
+- A test that feeds back the setpoint just commanded, reported instantly, is the
+  zero-lag case: the one provably stable one. Also test with a lagged report.
+- When a device keeps disagreeing with a command, bound what may be written (a
+  rule on the write path), rather than counting how often it was.
