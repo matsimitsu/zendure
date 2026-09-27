@@ -124,6 +124,7 @@ impl Scenario {
             let observed = &samples[meter].1;
             let step = engine.step(&Event::Meter {
                 at: clock(round),
+                sampled_at: Some(clock(meter).now),
                 grid: observed.grid,
                 solar: observed.solar,
             });

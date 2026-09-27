@@ -5,7 +5,7 @@ use super::*;
 
 use crate::battery::BatteryState;
 use crate::fixtures::journey;
-use crate::units::{GridPower, SolarPower};
+use crate::units::{GridPower, SolarPower, Timestamp};
 use crate::world::{DeviceId, Measurement, MeterReading, World};
 
 fn at(secs: i64) -> Timestamp {
@@ -22,9 +22,10 @@ fn tz() -> chrono_tz::Tz {
 
 fn engine_state(grid: GridPower, solar: SolarPower) -> EngineState {
     let mut world = World::new();
-    world.observe_meter(MeterReading::total_only(grid), solar);
+    world.observe_meter(None, MeterReading::total_only(grid), solar);
     world.observe_device(
         DeviceId::new(journey::BATTERY_ID),
+        Timestamp::from_millis(0),
         Measurement::Battery(BatteryState::test_sample()),
     );
 

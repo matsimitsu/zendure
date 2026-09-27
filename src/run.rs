@@ -222,7 +222,13 @@ impl Tick<'_> {
 
     /// Folds this round's meter reading and applies whatever the objective
     /// made of it.
-    async fn decide(&self, engine: &mut Engine, at: Clock, sample: MeterSample) {
+    async fn decide(
+        &self,
+        engine: &mut Engine,
+        at: Clock,
+        sampled_at: Timestamp,
+        sample: MeterSample,
+    ) {
         // Already normalized by the source adapter: whichever meter sent this,
         // the loop sees a signed total, three phases and a production figure,
         // and nothing about the wire format.
@@ -233,6 +239,7 @@ impl Tick<'_> {
         // it on record.
         let event = Event::Meter {
             at,
+            sampled_at: Some(sampled_at),
             grid: sample.observation.grid,
             solar: sample.observation.solar,
         };
@@ -766,8 +773,8 @@ pub async fn run(
                         let silent = Silent { meter: Some(failures), devices: Vec::new() };
                         tick_context.stand_down(&mut engine, at, silent).await;
                     }
-                    (Fleet::Complete, Delivery::Fresh(_, sample)) => {
-                        tick_context.decide(&mut engine, at, sample).await;
+                    (Fleet::Complete, Delivery::Fresh(sampled_at, sample)) => {
+                        tick_context.decide(&mut engine, at, sampled_at.now, sample).await;
                     }
                     // A setpoint inverts `battery.current_power + (export −
                     // margin)` exactly, which holds only while both terms

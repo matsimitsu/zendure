@@ -17,6 +17,7 @@ fn clock(offset_secs: i64, ordinal: u32) -> Clock {
 fn meter_at(offset_secs: i64, ordinal: u32, total: f64, phases: [f64; 3]) -> Event {
     Event::Meter {
         at: clock(offset_secs, ordinal),
+        sampled_at: None,
         grid: MeterReading::new(GridPower(total), phases.map(GridPower)),
         solar: crate::units::SolarPower::new(0.0),
     }

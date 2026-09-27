@@ -11,8 +11,14 @@ use crate::world::{DeviceId, Measurement, MeterReading};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
+    /// `at` is the tick that decided on this reading, and every timer the
+    /// controller keeps runs on it; `sampled_at` is when the meter was read.
+    /// Kept apart so the second can be recorded without moving the first.
     Meter {
         at: Clock,
+        /// `None` only on events journalled before it was recorded.
+        #[serde(default)]
+        sampled_at: Option<Timestamp>,
         grid: MeterReading,
         solar: SolarPower,
     },
@@ -86,6 +92,7 @@ mod tests {
     fn meter() -> Event {
         Event::Meter {
             at: clock(),
+            sampled_at: Some(Timestamp::from_millis(NOW_MS - 1_200)),
             grid: MeterReading::new(
                 GridPower(150.5),
                 [GridPower(10.0), GridPower(-200.0), GridPower(340.5)],
@@ -167,6 +174,24 @@ mod tests {
         for event in every_variant() {
             assert_eq!(event.at(), Timestamp::from_millis(NOW_MS));
         }
+    }
+
+    /// A meter event journalled before `sampled_at` existed still folds,
+    /// with the sample time unknown rather than a decode error that drops it
+    /// from every replay.
+    #[test]
+    fn a_meter_event_without_a_sample_time_still_reads() {
+        let json = r#"{"kind":"meter","at":{"now":1757000000000,"hour":19,"day_ordinal":255,"weekday":"Wed"},"grid":{"total":150.5,"phases":[10.0,-200.0,340.5]},"solar":200.0}"#;
+        let expected = Event::Meter {
+            at: clock(),
+            sampled_at: None,
+            grid: MeterReading::new(
+                GridPower(150.5),
+                [GridPower(10.0), GridPower(-200.0), GridPower(340.5)],
+            ),
+            solar: SolarPower::new(200.0),
+        };
+        assert_eq!(serde_json::from_str::<Event>(json).unwrap(), expected);
     }
 
     /// `Clock` carries a `chrono::Weekday`, which has no serde impl unless

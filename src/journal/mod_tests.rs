@@ -32,10 +32,15 @@ fn battery() -> BatteryState {
 fn world() -> World {
     let mut world = World::new();
     world.observe_meter(
+        None,
         MeterReading::total_only(GridPower(150.5)),
         SolarPower::new(200.0),
     );
-    world.observe_device(DeviceId::new("SN123"), Measurement::Battery(battery()));
+    world.observe_device(
+        DeviceId::new("SN123"),
+        Timestamp::from_millis(0),
+        Measurement::Battery(battery()),
+    );
     world
 }
 
@@ -266,6 +271,7 @@ async fn events_round_trip_through_the_database() {
     let (journal, writer, path) = open(&dir);
     let event = Event::Meter {
         at: clock(),
+        sampled_at: None,
         grid: MeterReading::total_only(GridPower(150.5)),
         solar: SolarPower::new(200.0),
     };

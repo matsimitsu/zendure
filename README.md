@@ -270,6 +270,13 @@ It is not necessarily the first row: the startup handshake captures its raw
 `zendure_poll` body before anything parses it, so that one lands first. Those
 are not fold inputs, which is why it does not matter.
 
+Timestamps say when each reading was taken, not only when it was used. A
+`device_update`'s `at` is when the battery answered. A `meter` event's `at` is
+the tick that decided on it, and its `sampled_at` is when the meter was read.
+The world in `state_json` keeps both under `sampled_at`, so the gap between the
+meter and battery readings behind any decision can be read straight off its
+row. Rows written before these existed read them as unknown (`null` or absent).
+
 `decisions.kind` is `decision` or `failsafe`, with one
 row per device actuated — one today, more once a second battery or a charger
 joins the world. A decision that commanded nothing still gets a row, with a null

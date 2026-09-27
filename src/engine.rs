@@ -8,7 +8,7 @@ use crate::clock::Clock;
 use crate::controller::{Controller, ControllerState};
 use crate::event::Event;
 use crate::models::{ControlDecision, ControlMode, CycleCounts};
-use crate::units::{GridPower, Setpoint, SolarPower};
+use crate::units::{GridPower, Setpoint, SolarPower, Timestamp};
 use crate::world::{MeterReading, World};
 
 /// The event-driven fold at the heart of the controller. Owns exactly the
@@ -93,18 +93,32 @@ impl Engine {
 
     pub fn step(&mut self, event: &Event) -> Step {
         match event {
-            Event::Meter { at, grid, solar } => self.step_meter(at, *grid, *solar),
+            Event::Meter {
+                at,
+                sampled_at,
+                grid,
+                solar,
+            } => self.step_meter(at, *sampled_at, *grid, *solar),
             Event::DeviceUpdate {
-                id, measurement, ..
+                at,
+                id,
+                measurement,
             } => {
-                self.world.observe_device(id.clone(), measurement.clone());
+                self.world
+                    .observe_device(id.clone(), at.now, measurement.clone());
                 Step::default()
             }
             Event::MqttTimeout { .. } => self.step_mqtt_timeout(),
         }
     }
 
-    fn step_meter(&mut self, at: &Clock, grid: MeterReading, solar: SolarPower) -> Step {
+    fn step_meter(
+        &mut self,
+        at: &Clock,
+        sampled_at: Option<Timestamp>,
+        grid: MeterReading,
+        solar: SolarPower,
+    ) -> Step {
         let mut status = None;
         if self.mqtt_timed_out {
             self.mqtt_timed_out = false;
@@ -114,7 +128,7 @@ impl Engine {
         // Fold before deciding, not as an argument to the decision: the meter
         // reading has to outlive this step so a `DeviceUpdate` arriving in
         // between doesn't leave the world with a stale grid figure.
-        self.world.observe_meter(grid, solar);
+        self.world.observe_meter(sampled_at, grid, solar);
 
         let decision = self.controller.decide(&self.world, at);
         // Allocated here rather than by the caller: how many devices a decision
@@ -187,7 +201,11 @@ mod tests {
 
     fn world() -> World {
         let mut world = World::new();
-        world.observe_device(DeviceId::new(BATTERY_ID), Measurement::Battery(battery()));
+        world.observe_device(
+            DeviceId::new(BATTERY_ID),
+            Timestamp::from_millis(0),
+            Measurement::Battery(battery()),
+        );
         world
     }
 
@@ -228,8 +246,16 @@ mod tests {
     #[test]
     fn mqtt_timeout_idles_every_battery() {
         let mut world = World::new();
-        world.observe_device(DeviceId::new("battery-a"), Measurement::Battery(battery()));
-        world.observe_device(DeviceId::new("battery-b"), Measurement::Battery(battery()));
+        world.observe_device(
+            DeviceId::new("battery-a"),
+            Timestamp::from_millis(0),
+            Measurement::Battery(battery()),
+        );
+        world.observe_device(
+            DeviceId::new("battery-b"),
+            Timestamp::from_millis(0),
+            Measurement::Battery(battery()),
+        );
         let mut engine = Engine::new(
             Controller::test_default(NOW_MS, DAY),
             world,
@@ -274,6 +300,7 @@ mod tests {
         engine.step(&Event::MqttTimeout { at: clock() });
         engine.step(&Event::Meter {
             at: clock(),
+            sampled_at: None,
             grid: meter(500.0),
             solar: SolarPower::new(0.0),
         });
@@ -290,6 +317,7 @@ mod tests {
 
         let step = engine.step(&Event::Meter {
             at: clock(),
+            sampled_at: None,
             grid: meter(500.0),
             solar: SolarPower::new(0.0),
         });
@@ -302,6 +330,7 @@ mod tests {
         let mut engine = engine();
         let step = engine.step(&Event::Meter {
             at: clock(),
+            sampled_at: None,
             grid: meter(500.0),
             solar: SolarPower::new(0.0),
         });
@@ -320,6 +349,7 @@ mod tests {
             [
                 Event::Meter {
                     at: clock(),
+                    sampled_at: None,
                     grid: meter(500.0),
                     solar: SolarPower::new(0.0),
                 },
@@ -332,6 +362,7 @@ mod tests {
                 Event::MqttTimeout { at: clock() },
                 Event::Meter {
                     at: clock(),
+                    sampled_at: None,
                     grid: meter(500.0),
                     solar: SolarPower::new(0.0),
                 },
@@ -423,5 +454,34 @@ mod tests {
         assert!(step.decision.is_none());
         assert!(step.status.is_none());
         assert_eq!(engine.battery().unwrap().soc, Soc::new(80));
+    }
+
+    /// Each reading's own sample time reaches the world, not the tick's: the
+    /// battery's from its event clock, the meter's from `sampled_at` while
+    /// `at` stays the tick. Read through the JSON because that is where the
+    /// journal, and anything measuring alignment from it, finds them.
+    #[test]
+    fn the_world_records_when_each_reading_was_taken() {
+        let mut engine = engine();
+        engine.step(&Event::DeviceUpdate {
+            at: journey::clock_at(1),
+            id: DeviceId::new(BATTERY_ID),
+            measurement: Measurement::Battery(battery()),
+        });
+        engine.step(&Event::Meter {
+            at: journey::clock_at(3),
+            sampled_at: Some(journey::clock_at(2).now),
+            grid: meter(500.0),
+            solar: SolarPower::new(0.0),
+        });
+
+        let world = serde_json::to_value(&engine.state().world).unwrap();
+        assert_eq!(
+            world["sampled_at"],
+            serde_json::json!({
+                "meter": NOW_MS + 2_000,
+                "devices": { BATTERY_ID: NOW_MS + 1_000 },
+            })
+        );
     }
 }

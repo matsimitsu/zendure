@@ -1,5 +1,5 @@
 use super::*;
-use crate::units::{BatteryPower, PowerCap};
+use crate::units::{BatteryPower, PowerCap, Timestamp};
 use crate::world::{DeviceId, Measurement, MeterReading};
 
 /// A snapshot whose every field differs from a freshly built controller's,
@@ -52,9 +52,10 @@ fn controller_state_round_trips_through_json() {
 /// approximate: nothing in the objective reads a phase.
 fn world(grid_power: GridPower, solar_power: SolarPower, battery: &BatteryState) -> World {
     let mut world = World::new();
-    world.observe_meter(MeterReading::total_only(grid_power), solar_power);
+    world.observe_meter(None, MeterReading::total_only(grid_power), solar_power);
     world.observe_device(
         DeviceId::new("test-battery"),
+        Timestamp::from_millis(0),
         Measurement::Battery(battery.clone()),
     );
     world
