@@ -8,7 +8,7 @@ use crate::clock::Clock;
 use crate::config::{Config, SessionConfig};
 use crate::models::{ControlDecision, ControlMode, CycleCounts};
 use crate::units::{
-    Elapsed, GridPower, PowerMargin, RampFactor, Setpoint, Soc, SolarPower, Timestamp,
+    Elapsed, GridPower, PowerMargin, RampFactor, Setpoint, Soc, SolarPower, Timestamp, Watts,
 };
 use crate::world::World;
 
@@ -52,6 +52,12 @@ pub struct Controller {
     min_decision_interval: Duration,
     charge_margin: PowerMargin,
     discharge_margin: PowerMargin,
+    /// Below this, a fresh adjustment is dropped rather than committed — the
+    /// grid reading's own noise floor, not the margin above, which exists for
+    /// a different reason (staying on the safe side of the reading, not
+    /// filtering it).
+    charge_deadband: PowerMargin,
+    discharge_deadband: PowerMargin,
     charge_start_threshold: GridPower,
     discharge_start_threshold: GridPower,
     idle_timeout: Duration,
@@ -91,6 +97,8 @@ impl Controller {
             min_decision_interval,
             charge_margin: session.charge_margin,
             discharge_margin: session.discharge_margin,
+            charge_deadband: session.charge_deadband,
+            discharge_deadband: session.discharge_deadband,
             charge_start_threshold: session.charge_start_threshold,
             discharge_start_threshold: session.discharge_start_threshold,
             idle_timeout: Duration::from_secs(session.idle_timeout_secs),
@@ -315,16 +323,32 @@ impl Controller {
     ) -> Setpoint {
         match mode {
             ControlMode::Charge => {
-                let adjustment = grid_power.exporting() - self.charge_margin.watts();
+                let raw = grid_power.exporting() - self.charge_margin.watts();
+                let adjustment = Self::deadbanded(raw, self.charge_deadband);
                 let current_charge = battery.current_power.charging();
                 Setpoint::clamped(current_charge + adjustment, battery.max_charge_power)
             }
             ControlMode::Discharge => {
-                let adjustment = grid_power.importing() - self.discharge_margin.watts();
+                let raw = grid_power.importing() - self.discharge_margin.watts();
+                let adjustment = Self::deadbanded(raw, self.discharge_deadband);
                 let current_discharge = battery.current_power.discharging();
                 Setpoint::clamped(current_discharge + adjustment, battery.max_discharge_power)
             }
             ControlMode::Idle | ControlMode::Standby => Setpoint::ZERO,
+        }
+    }
+
+    /// Below `width`, the grid reading's own tick-to-tick noise moves the
+    /// adjustment more than the house does — passing it through anyway is
+    /// what turned a steady load into a setpoint that reverses direction on
+    /// every other tick (measured live: ~10-30 W of meter jitter against a 5 W
+    /// margin). Dropping it to zero holds the last commanded power steady
+    /// instead of chasing noise.
+    fn deadbanded(raw: Watts, width: PowerMargin) -> Watts {
+        if raw.get().abs() < width.watts().get() {
+            Watts::ZERO
+        } else {
+            raw
         }
     }
 

@@ -1194,6 +1194,87 @@ fn demand_hovering_at_the_start_threshold_discharges_once() {
     assert_eq!(transitions(&modes), 0, "{modes:?}");
 }
 
+// --- power-law deadband: `target_power`'s own dead-zone, distinct from the
+// mode-selection band above --------------------------------------------------
+
+/// Grid noise smaller than `discharge_deadband` (25 W in test tuning) is
+/// dropped rather than committed as a new setpoint: the loop holds the power
+/// it was already commanding instead of chasing every few-watt wiggle.
+#[test]
+fn discharge_holds_steady_within_the_deadband() {
+    let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(600));
+    let bat = battery_discharging(50, 200);
+
+    // discharge_margin = 5, discharge_deadband = 25: dropped while
+    // |import - 5| < 25, i.e. import in (-20, 30).
+    for import in [0.0, 15.0, 5.0, 29.0, 1.0] {
+        let decision = decide_at(
+            &mut ctrl,
+            &world(GridPower(import), SolarPower::new(0.0), &bat),
+            &clock(20),
+        );
+        assert_eq!(
+            decision.power_watts.get(),
+            200,
+            "import={import} should stay within the deadband: {decision:?}"
+        );
+    }
+}
+
+/// Once the error clears the deadband, the setpoint moves — this isn't a
+/// dead battery, just a quiet one.
+#[test]
+fn discharge_moves_once_the_deadband_clears() {
+    let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(600));
+    let bat = battery_discharging(50, 200);
+
+    let decision = decide_at(
+        &mut ctrl,
+        &world(GridPower(40.0), SolarPower::new(0.0), &bat),
+        &clock(20),
+    );
+
+    // raw = 40 - 5 = 35, |35| >= 25: 200 + 35 = 235.
+    assert_eq!(decision.power_watts.get(), 235, "{decision:?}");
+}
+
+/// The same dead-zone applies charging, on the export side.
+#[test]
+fn charge_holds_steady_within_the_deadband() {
+    let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(600));
+    let bat = battery_charging(50, 300);
+
+    // charge_margin = 50, charge_deadband = 25: dropped while
+    // |export - 50| < 25, i.e. export in (25, 75).
+    for export in [50.0, 30.0, 74.0, 26.0] {
+        let decision = decide_at(
+            &mut ctrl,
+            &world(GridPower(-export), SolarPower::new(0.0), &bat),
+            &clock(12),
+        );
+        assert_eq!(
+            decision.power_watts.get(),
+            300,
+            "export={export} should stay within the deadband: {decision:?}"
+        );
+    }
+}
+
+#[test]
+fn charge_moves_once_the_deadband_clears() {
+    let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(600));
+    let bat = battery_charging(50, 300);
+
+    let decision = decide_at(
+        &mut ctrl,
+        &world(GridPower(-100.0), SolarPower::new(0.0), &bat),
+        &clock(12),
+    );
+
+    // raw = 100 - 50 = 50, |50| >= 25: 300 + 50 = 350.
+    assert_eq!(decision.power_watts.get(), 350, "{decision:?}");
+}
+
 // --- SOC limit tests ---
 
 #[test]

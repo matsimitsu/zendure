@@ -112,6 +112,8 @@ fn virtual_config(dir: &tempfile::TempDir, capacity: WattHours) -> Config {
         ha_publish_prefix: "test".to_string(),
         charge_margin: PowerMargin::new(50),
         discharge_margin: PowerMargin::new(5),
+        charge_deadband: PowerMargin::new(25),
+        discharge_deadband: PowerMargin::new(25),
         charge_start_threshold: GridPower(-100.0),
         discharge_start_threshold: GridPower(0.0),
         // No cooldowns: the tuning knobs a real deployment leans on to

@@ -407,7 +407,7 @@ impl RampFactor {
 /// A non-negative safety margin, in watts, subtracted from a setpoint so the
 /// commanded power stays on the safe side of the grid reading it was derived
 /// from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PowerMargin(u32);
 

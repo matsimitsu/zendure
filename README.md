@@ -123,6 +123,8 @@ filter = "zendure=info"
 [tuning]
 charge_margin = 50
 discharge_margin = 5
+charge_deadband = 25        # meter noise floor: adjustments smaller than this are dropped
+discharge_deadband = 25
 charge_start_threshold = -100.0
 discharge_start_threshold = 50.0   # > 0: discharge stops at 0 W, so this is the band
 min_mode_duration_secs = 10
@@ -170,6 +172,15 @@ answering. Anything at or under three ticks warns and is raised to three.
 since only 0 W stops one, it is also the width of the band between idle and
 discharge. At or below 0 there is no band and the mode flips on meter noise, so
 such a value warns and takes the default, 50 W.
+
+`[tuning] charge_deadband`/`discharge_deadband` guard the power law itself,
+not mode selection: below this width, a tick's fresh adjustment is dropped and
+the last commanded power holds steady instead. Unlike the margins above (which
+exist to stay on the safe side of a reading), this exists because the reading
+itself has a noise floor — live measurement put it at 10-30 W in the device's
+reported power — and committing every sub-threshold wiggle as a new setpoint
+is what turns a steady load into one that reverses direction on nearly every
+other tick.
 
 `zendure --check --config <path>` runs the same parse, but strictly: a parse
 error is fatal exactly as it is for the daemon, and **any warning is promoted

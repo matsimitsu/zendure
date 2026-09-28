@@ -90,6 +90,8 @@ filter = "zendure=info"
 [tuning]
 charge_margin = 50
 discharge_margin = 5
+charge_deadband = 25
+discharge_deadband = 25
 charge_start_threshold = -100.0
 discharge_start_threshold = 50.0
 min_mode_duration_secs = 10

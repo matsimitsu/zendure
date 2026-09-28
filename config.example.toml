@@ -109,6 +109,11 @@ filter = "zendure=info"
 [tuning]
 charge_margin = 50
 discharge_margin = 5
+# Below this, a fresh adjustment is dropped rather than committed — the
+# meter's own noise floor, not the margin above. Sized to the ~10-30 W of
+# tick-to-tick jitter measured live in the device's reported power.
+charge_deadband = 25
+discharge_deadband = 25
 charge_start_threshold = -100.0
 # Import (W) above which discharge starts. Discharge stops at 0 W, so this is
 # also the width of the idle/discharge band: at or below 0 there is no band, the

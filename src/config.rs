@@ -707,6 +707,11 @@ pub struct Config {
     pub charge_margin: PowerMargin,
     /// Safety margin subtracted from discharge power
     pub discharge_margin: PowerMargin,
+    /// Below this, a fresh charge adjustment is dropped rather than committed
+    /// — the meter's own noise floor, distinct from `charge_margin` above
+    pub charge_deadband: PowerMargin,
+    /// Below this, a fresh discharge adjustment is dropped rather than committed
+    pub discharge_deadband: PowerMargin,
     /// Grid power below this triggers charging (negative = exporting)
     pub charge_start_threshold: GridPower,
     /// Grid power above this triggers discharging (positive = importing)
@@ -767,6 +772,8 @@ impl std::fmt::Debug for Config {
             .field("ha_publish_prefix", &self.ha_publish_prefix)
             .field("charge_margin", &self.charge_margin)
             .field("discharge_margin", &self.discharge_margin)
+            .field("charge_deadband", &self.charge_deadband)
+            .field("discharge_deadband", &self.discharge_deadband)
             .field("charge_start_threshold", &self.charge_start_threshold)
             .field("discharge_start_threshold", &self.discharge_start_threshold)
             .field("min_mode_duration", &self.min_mode_duration)
@@ -800,6 +807,13 @@ impl std::fmt::Debug for Config {
 pub struct SessionConfig {
     pub charge_margin: PowerMargin,
     pub discharge_margin: PowerMargin,
+    /// Defaulted so a session row journalled before this field existed still
+    /// decodes — `export`/`analyze`/replay read arbitrary historical ranges,
+    /// which cross sessions older than any given build.
+    #[serde(default)]
+    pub charge_deadband: PowerMargin,
+    #[serde(default)]
+    pub discharge_deadband: PowerMargin,
     pub charge_start_threshold: GridPower,
     pub discharge_start_threshold: GridPower,
     pub min_mode_duration_secs: u64,
@@ -825,6 +839,8 @@ impl SessionConfig {
         Self {
             charge_margin: PowerMargin::new(50),
             discharge_margin: PowerMargin::new(5),
+            charge_deadband: PowerMargin::new(25),
+            discharge_deadband: PowerMargin::new(25),
             charge_start_threshold: GridPower(-100.0),
             discharge_start_threshold: DEFAULT_DISCHARGE_START_THRESHOLD,
             min_mode_duration_secs: 10,
@@ -867,6 +883,8 @@ impl Config {
             // The decision knobs.
             charge_margin,
             discharge_margin,
+            charge_deadband,
+            discharge_deadband,
             charge_start_threshold,
             discharge_start_threshold,
             min_mode_duration,
@@ -884,6 +902,8 @@ impl Config {
         SessionConfig {
             charge_margin: *charge_margin,
             discharge_margin: *discharge_margin,
+            charge_deadband: *charge_deadband,
+            discharge_deadband: *discharge_deadband,
             charge_start_threshold: *charge_start_threshold,
             discharge_start_threshold: *discharge_start_threshold,
             min_mode_duration_secs: min_mode_duration.as_secs(),
@@ -1065,6 +1085,10 @@ impl Config {
             taker.lenient::<PowerMargin>("tuning.charge_margin", PowerMargin::new(50))?;
         let discharge_margin =
             taker.lenient::<PowerMargin>("tuning.discharge_margin", PowerMargin::new(5))?;
+        let charge_deadband =
+            taker.lenient::<PowerMargin>("tuning.charge_deadband", PowerMargin::new(25))?;
+        let discharge_deadband =
+            taker.lenient::<PowerMargin>("tuning.discharge_deadband", PowerMargin::new(25))?;
         let charge_start_threshold =
             taker.lenient::<GridPower>("tuning.charge_start_threshold", GridPower(-100.0))?;
         let discharge_start_threshold = take_discharge_start_threshold(&mut taker, &mut warnings)?;
@@ -1100,6 +1124,8 @@ impl Config {
                 ha_publish_prefix,
                 charge_margin,
                 discharge_margin,
+                charge_deadband,
+                discharge_deadband,
                 charge_start_threshold,
                 discharge_start_threshold,
                 min_mode_duration,
