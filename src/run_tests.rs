@@ -5,7 +5,9 @@ use crate::journal;
 use crate::registry::Battery;
 use crate::simulation::VirtualBattery;
 use crate::source::shelly::SolarPhase;
-use crate::units::{Efficiency, GridPower, PowerMargin, RetentionDays, SolarPower, Watts};
+use crate::units::{
+    Efficiency, Gain, GridPower, PowerMargin, RetentionDays, SlewLimit, SolarPower, Watts,
+};
 
 /// The two signal arms became one, so the wording an operator greps for is
 /// now produced by `Display`. Only the name is pinned here: retyping the
@@ -114,6 +116,8 @@ fn virtual_config(dir: &tempfile::TempDir, capacity: WattHours) -> Config {
         discharge_margin: PowerMargin::new(5),
         charge_deadband: PowerMargin::new(25),
         discharge_deadband: PowerMargin::new(25),
+        gain: Gain::new(100),
+        slew_limit: SlewLimit::new(400),
         charge_start_threshold: GridPower(-100.0),
         discharge_start_threshold: GridPower(0.0),
         // No cooldowns: the tuning knobs a real deployment leans on to

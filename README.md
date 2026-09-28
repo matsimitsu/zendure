@@ -125,6 +125,8 @@ charge_margin = 50
 discharge_margin = 5
 charge_deadband = 25        # meter noise floor: adjustments smaller than this are dropped
 discharge_deadband = 25
+gain = 50                   # K: scales the error before it's integrated, 100 = unity
+slew_limit = 400            # max change in commanded power per decision; anti-windup width too
 charge_start_threshold = -100.0
 discharge_start_threshold = 50.0   # > 0: discharge stops at 0 W, so this is the band
 min_mode_duration_secs = 10
@@ -181,6 +183,16 @@ itself has a noise floor — live measurement put it at 10-30 W in the device's
 reported power — and committing every sub-threshold wiggle as a new setpoint
 is what turns a steady load into one that reverses direction on nearly every
 other tick.
+
+`[tuning] gain`/`slew_limit` tune the velocity-form law that reads the
+deadbanded figure above: each decision integrates `gain` (`K`, percent, 100 =
+unity) of the error onto the controller's own last commanded power, then
+`slew_limit` bounds how far that can move in one decision — and, doubling as
+anti-windup, how far the accumulator may run ahead of what the device last
+reported actually achieving, so a battery too empty or full to follow a
+setpoint doesn't wind up chasing one it can never reach. Either at 0 would
+freeze the loop outright, so both warn and take their default the same way
+`discharge_start_threshold` does.
 
 `zendure --check --config <path>` runs the same parse, but strictly: a parse
 error is fatal exactly as it is for the daemon, and **any warning is promoted

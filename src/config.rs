@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::prediction::TimeOfDay;
 use crate::source::shelly::SolarPhase;
 use crate::units::{
-    Efficiency, GridPower, PowerMargin, RetentionDays, Soc, SolarPower, WattHours, Watts,
+    Efficiency, Gain, GridPower, PowerMargin, RetentionDays, SlewLimit, Soc, SolarPower, WattHours,
+    Watts,
 };
 use crate::zendure::POLL_INTERVAL_FLOOR;
 
@@ -560,6 +561,48 @@ fn take_mqtt_timeout(
     Ok(configured)
 }
 
+/// `K` for the velocity-form law. 50%, chosen empirically against
+/// `scenario_tests.rs`: unity (100%) oscillates under a matched-age steady
+/// load (integrating the full error again each tick, before the previous
+/// tick's correction has been felt, rings rather than settling), while 40-60%
+/// all converge cleanly — 50 sits in the middle of that band, not at either
+/// edge of it. Zero would freeze `commanded_power` outright — no error term
+/// would ever move it — so, like every `[tuning]` key, an unsafe value warns
+/// and falls back rather than failing startup.
+const DEFAULT_GAIN: Gain = Gain::new(50);
+
+fn take_gain(taker: &mut Taker, warnings: &mut Vec<String>) -> Result<Gain, String> {
+    let configured = taker.lenient::<Gain>("tuning.gain", DEFAULT_GAIN)?;
+
+    if configured == Gain::new(0) {
+        warnings.push(format!(
+            "tuning.gain = 0 would freeze the control loop's own accumulator; using \
+             {DEFAULT_GAIN} instead",
+        ));
+        return Ok(DEFAULT_GAIN);
+    }
+
+    Ok(configured)
+}
+
+/// A slew limit of 0 W would mean the accumulator can never move at all —
+/// the same failure shape as a zero gain, just reached from the other knob.
+const DEFAULT_SLEW_LIMIT: SlewLimit = SlewLimit::new(400);
+
+fn take_slew_limit(taker: &mut Taker, warnings: &mut Vec<String>) -> Result<SlewLimit, String> {
+    let configured = taker.lenient::<SlewLimit>("tuning.slew_limit", DEFAULT_SLEW_LIMIT)?;
+
+    if configured == SlewLimit::new(0) {
+        warnings.push(format!(
+            "tuning.slew_limit = 0 W would freeze the control loop's own accumulator; using \
+             {DEFAULT_SLEW_LIMIT} instead",
+        ));
+        return Ok(DEFAULT_SLEW_LIMIT);
+    }
+
+    Ok(configured)
+}
+
 /// A threshold at or below 0 W leaves the band with no width. Warns and takes
 /// the default, the policy every `[tuning]` key follows.
 fn take_discharge_start_threshold(
@@ -712,6 +755,12 @@ pub struct Config {
     pub charge_deadband: PowerMargin,
     /// Below this, a fresh discharge adjustment is dropped rather than committed
     pub discharge_deadband: PowerMargin,
+    /// `K`, the velocity-form law's proportional gain. Symmetric across
+    /// charge and discharge.
+    pub gain: Gain,
+    /// Max change in commanded power per decision, and the anti-windup rail's
+    /// width. Symmetric across charge and discharge.
+    pub slew_limit: SlewLimit,
     /// Grid power below this triggers charging (negative = exporting)
     pub charge_start_threshold: GridPower,
     /// Grid power above this triggers discharging (positive = importing)
@@ -774,6 +823,8 @@ impl std::fmt::Debug for Config {
             .field("discharge_margin", &self.discharge_margin)
             .field("charge_deadband", &self.charge_deadband)
             .field("discharge_deadband", &self.discharge_deadband)
+            .field("gain", &self.gain)
+            .field("slew_limit", &self.slew_limit)
             .field("charge_start_threshold", &self.charge_start_threshold)
             .field("discharge_start_threshold", &self.discharge_start_threshold)
             .field("min_mode_duration", &self.min_mode_duration)
@@ -814,6 +865,18 @@ pub struct SessionConfig {
     pub charge_deadband: PowerMargin,
     #[serde(default)]
     pub discharge_deadband: PowerMargin,
+    /// Defaulted to unity (100%) for a session row journalled before `K`
+    /// existed: the pre-A3 absolute-form law applied no gain at all, and
+    /// unity is the velocity-form value that comes closest to reproducing
+    /// that. Deliberately not a derived `Default` (which would be 0% and
+    /// freeze the accumulator outright) — the two zero values in this pair
+    /// mean opposite things, so both get named functions instead.
+    #[serde(default = "unity_gain")]
+    pub gain: Gain,
+    /// Defaulted to effectively unbounded for the same reason: a pre-A3 row
+    /// never had a slew limit, and 0 W would mean the opposite of that.
+    #[serde(default = "unbounded_slew_limit")]
+    pub slew_limit: SlewLimit,
     pub charge_start_threshold: GridPower,
     pub discharge_start_threshold: GridPower,
     pub min_mode_duration_secs: u64,
@@ -826,6 +889,14 @@ pub struct SessionConfig {
     pub balance_weekday: Option<Weekday>,
     pub solar_discharge_block_threshold: SolarPower,
     pub mqtt_timeout_secs: u64,
+}
+
+fn unity_gain() -> Gain {
+    Gain::new(100)
+}
+
+fn unbounded_slew_limit() -> SlewLimit {
+    SlewLimit::new(u32::MAX)
 }
 
 impl SessionConfig {
@@ -841,6 +912,8 @@ impl SessionConfig {
             discharge_margin: PowerMargin::new(5),
             charge_deadband: PowerMargin::new(25),
             discharge_deadband: PowerMargin::new(25),
+            gain: unity_gain(),
+            slew_limit: unbounded_slew_limit(),
             charge_start_threshold: GridPower(-100.0),
             discharge_start_threshold: DEFAULT_DISCHARGE_START_THRESHOLD,
             min_mode_duration_secs: 10,
@@ -885,6 +958,8 @@ impl Config {
             discharge_margin,
             charge_deadband,
             discharge_deadband,
+            gain,
+            slew_limit,
             charge_start_threshold,
             discharge_start_threshold,
             min_mode_duration,
@@ -904,6 +979,8 @@ impl Config {
             discharge_margin: *discharge_margin,
             charge_deadband: *charge_deadband,
             discharge_deadband: *discharge_deadband,
+            gain: *gain,
+            slew_limit: *slew_limit,
             charge_start_threshold: *charge_start_threshold,
             discharge_start_threshold: *discharge_start_threshold,
             min_mode_duration_secs: min_mode_duration.as_secs(),
@@ -1089,6 +1166,8 @@ impl Config {
             taker.lenient::<PowerMargin>("tuning.charge_deadband", PowerMargin::new(25))?;
         let discharge_deadband =
             taker.lenient::<PowerMargin>("tuning.discharge_deadband", PowerMargin::new(25))?;
+        let gain = take_gain(&mut taker, &mut warnings)?;
+        let slew_limit = take_slew_limit(&mut taker, &mut warnings)?;
         let charge_start_threshold =
             taker.lenient::<GridPower>("tuning.charge_start_threshold", GridPower(-100.0))?;
         let discharge_start_threshold = take_discharge_start_threshold(&mut taker, &mut warnings)?;
@@ -1126,6 +1205,8 @@ impl Config {
                 discharge_margin,
                 charge_deadband,
                 discharge_deadband,
+                gain,
+                slew_limit,
                 charge_start_threshold,
                 discharge_start_threshold,
                 min_mode_duration,

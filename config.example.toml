@@ -114,6 +114,11 @@ discharge_margin = 5
 # tick-to-tick jitter measured live in the device's reported power.
 charge_deadband = 25
 discharge_deadband = 25
+# K: scales the deadbanded error before it's integrated onto the velocity-form
+# law's own running commanded power. 100 = unity.
+gain = 50
+# Max change in commanded power per decision; also the anti-windup rail's width.
+slew_limit = 400
 charge_start_threshold = -100.0
 # Import (W) above which discharge starts. Discharge stops at 0 W, so this is
 # also the width of the idle/discharge band: at or below 0 there is no band, the
