@@ -68,7 +68,10 @@ crossed a boundary without anyone saying what the conversion meant.
 - `src/mqtt/` — The broker: `publisher` (queue + task), `discovery` (wire
   format), `connection` (the broker connection and its eventloop)
 - `src/source/` — Where a meter reading comes from: the `Meter` enum over one adapter per wire format (`shelly`, `synthetic`), out comes a `MeterSample`
-- `src/zendure.rs` — Zendure REST API client
+- `src/zendure/` — Zendure REST API client: `mod.rs` (the shell — `Wire`,
+  `ZendureClient`, report parsing), `mode.rs` (the pure fold over commands
+  and reports), `ledger.rs` (the tracked device state those folds run
+  against)
 - `src/journal/` — Append-only SQLite record of events, decisions and outcomes
 - `src/rte.rs` — Round-trip efficiency tracking
 - `src/prediction/` — Solar forecast: `Prediction` trait, `solcast` (real) and

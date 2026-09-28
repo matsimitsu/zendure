@@ -2378,6 +2378,7 @@ dependencies = [
  "chrono-tz",
  "futures-util",
  "grass",
+ "http",
  "maud",
  "mime_guess",
  "reqwest",

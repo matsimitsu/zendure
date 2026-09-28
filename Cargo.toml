@@ -36,6 +36,9 @@ tempfile = "3"
 # (`start_paused`) rather than adding a feature, and resolver 2+ keeps this
 # dev-only addition out of the release binary.
 tokio = { version = "1", features = ["test-util"] }
+# Builds a `reqwest::Response` with a real status line from an `http::Response`,
+# so a test can get a genuine `error_for_status` failure without a socket.
+http = "1"
 
 [build-dependencies]
 grass = { version = "0.13", default-features = false }
