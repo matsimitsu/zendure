@@ -491,7 +491,7 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
         },
         page_header: PageHeaderView {
             last_updated: format!(
-                "As of {} · battery, solar and grid readings update every second.",
+                "As of {} · battery, solar and grid readings update every scan tick.",
                 format_time(state.as_of, timezone)
             ),
         },

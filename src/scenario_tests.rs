@@ -242,19 +242,29 @@ fn matched_ages_settle_a_discharge() {
 
     assert!(discharge.reversal_rate < 0.5, "{discharge:?}");
     assert!(discharge.largest_step < 50, "{discharge:?}");
-    assert_eq!(
-        ticks.last().map(|t| t.setpoint),
-        Some(395),
-        "400 W of load less the 5 W margin"
-    );
+    // 400 W of load less the 5 W margin is the ideal target, but the
+    // velocity-form law's own deadband means it settles once the residual
+    // error is small enough to be dropped, not at a bit-exact zero — unlike
+    // the old absolute-form law, which happened to land exactly there only
+    // because it re-read the device's own (externally, physically
+    // converging) report every tick rather than tracking its own commanded
+    // history. Within the deadband's width of the ideal is the honest bar.
+    let last = ticks
+        .last()
+        .map(|t| t.setpoint)
+        .expect("30 minutes of ticks");
+    assert!((last - 395).abs() < 25, "{last} W, {discharge:?}");
 }
 
-/// What makes the two tests above mean anything: the same scenario with the
-/// device's report one round staler than the meter hunts, so a harness that
-/// passes them can see the defect. Under today's absolute-form law this is
-/// expected to hunt; a law made insensitive to sample age turns it around.
+/// What made the two tests above mean anything under the old absolute-form
+/// law: the same scenario with the device's report one round staler than the
+/// meter used to hunt, so a harness that passed them anyway couldn't see the
+/// defect. The velocity-form law tracks its own commanded history instead of
+/// a report that might be this stale, and is insensitive to it — inverted
+/// from the pre-A3 assertions, per A1's own note that this needs inverting
+/// once the law goes velocity-form.
 #[test]
-fn a_report_one_round_staler_than_the_meter_hunts() {
+fn a_report_one_round_staler_than_the_meter_no_longer_hunts() {
     let stale = Lag {
         meter: 1,
         device: 2,
@@ -262,7 +272,6 @@ fn a_report_one_round_staler_than_the_meter_hunts() {
     let charge = dynamics(&sunny_noon(stale).run(), ControlMode::Charge);
     let discharge = dynamics(&quiet_night(stale).run(), ControlMode::Discharge);
 
-    assert!(charge.reversal_rate > 0.5, "{charge:?}");
-    assert!(charge.largest_step > 1_000, "{charge:?}");
-    assert!(discharge.reversal_rate > 0.5, "{discharge:?}");
+    assert!(charge.reversal_rate < 0.5, "{charge:?}");
+    assert!(discharge.reversal_rate < 0.5, "{discharge:?}");
 }

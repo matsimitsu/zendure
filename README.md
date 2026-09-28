@@ -14,11 +14,12 @@ Smart controller for the Zendure AC 2400+ home battery. Reads net grid power fro
 5. **Safety guards**:
    - **SOC limits** — stops charging at max SOC (default 100%) and discharging at min SOC (default 10%); on the configured `[tuning] balance_weekday` (default Monday), max SOC is raised to 100% whatever `max_soc` says, so a deployment that keeps it lower for longevity (production runs 95) still gets a periodic cell-balancing full charge
    - **Cooldown** — prevents rapid charge/discharge toggling
-   - **Ramp** — starts at 75% power on mode changes to avoid overshooting
+   - **Ramp** — the first non-zero setpoint after a mode change goes out at 75% power, to avoid overshooting
    - **SOC calibration** — idles when the battery reports SOC calibration in progress
    - **Cycle limit** — forces standby when daily mode transitions exceed a threshold
    - **Device fault** — idles when the device reports an error (`isError`); `faultLevel` is ignored since it also goes non-zero for benign conditions like WiFi issues or firmware update checks
    - **Power caps** — the device stores its charge (`chargeMaxLimit`, 2400W) and discharge (`inverseMaxPower`, 800W) limits as setpoints it can reset to 0, which stalls all power flow. The controller writes them **once at startup** and never mid-run. If the device zeroes a cap while running, the controller honors it (that direction stops) rather than overwriting a value the device changed for reasons we can't see — recovery is a deliberate process restart.
+   - **Device charge ceiling (`socSet`)** — the device has its own charge target, separate from anything this controller commands, and stops charging (`socLimit: 1`) at whatever it last held regardless of `[tuning] max_soc`. Written **once at startup** from `max_soc` (best-effort, like the power caps above) so raising `max_soc` actually raises the ceiling instead of silently changing nothing.
 6. **Tracks round-trip efficiency** (RTE) — measures charge vs discharge energy, persisted to disk
 7. **Publishes to MQTT** — HomeAssistant auto-discovers all sensors
 
@@ -123,8 +124,12 @@ filter = "zendure=info"
 [tuning]
 charge_margin = 50
 discharge_margin = 5
+charge_deadband = 25        # meter noise floor: adjustments smaller than this are dropped
+discharge_deadband = 25
+gain = 50                   # K: scales the error before it's integrated, 100 = unity
+slew_limit = 400            # max change in commanded power per decision; anti-windup width too
 charge_start_threshold = -100.0
-discharge_start_threshold = 0.0
+discharge_start_threshold = 50.0   # > 0: discharge stops at 0 W, so this is the band
 min_mode_duration_secs = 10
 min_decision_interval_secs = 0
 idle_timeout_secs = 300
@@ -165,6 +170,30 @@ and defaults to 1 s, and only zero is refused.
 outlast several rounds of it: a healthy source is one tick old when a tick reads
 it, and a window inside that would stand the fleet down with everything
 answering. Anything at or under three ticks warns and is raised to three.
+
+`[tuning] discharge_start_threshold` is the import that starts a discharge, and
+since only 0 W stops one, it is also the width of the band between idle and
+discharge. At or below 0 there is no band and the mode flips on meter noise, so
+such a value warns and takes the default, 50 W.
+
+`[tuning] charge_deadband`/`discharge_deadband` guard the power law itself,
+not mode selection: below this width, a tick's fresh adjustment is dropped and
+the last commanded power holds steady instead. Unlike the margins above (which
+exist to stay on the safe side of a reading), this exists because the reading
+itself has a noise floor — live measurement put it at 10-30 W in the device's
+reported power — and committing every sub-threshold wiggle as a new setpoint
+is what turns a steady load into one that reverses direction on nearly every
+other tick.
+
+`[tuning] gain`/`slew_limit` tune the velocity-form law that reads the
+deadbanded figure above: each decision integrates `gain` (`K`, percent, 100 =
+unity) of the error onto the controller's own last commanded power, then
+`slew_limit` bounds how far that can move in one decision — and, doubling as
+anti-windup, how far the accumulator may run ahead of what the device last
+reported actually achieving, so a battery too empty or full to follow a
+setpoint doesn't wind up chasing one it can never reach. Either at 0 would
+freeze the loop outright, so both warn and take their default the same way
+`discharge_start_threshold` does.
 
 `zendure --check --config <path>` runs the same parse, but strictly: a parse
 error is fatal exactly as it is for the daemon, and **any warning is promoted
@@ -344,9 +373,9 @@ All kWh, bucketed by local calendar day. Two columns carry the argument:
 **`cover` is not decoration.** The journal drops rows when its write queue is
 full, deletes them when retention prunes, and a restart leaves a hole the width
 of the outage. Intervals longer than 30 s are skipped rather than integrated
-across — a 1 Hz signal says nothing about an hour-long gap — so a day under 100%
-is short by whatever happened in the hole, and anything under 95% is called out
-below the tables.
+across — a gap beyond the scan cadence is an outage, not a measurement — so a
+day under 100% is short by whatever happened in the hole, and anything under 95%
+is called out below the tables.
 
 Figures that depend on the battery (`unstored`, `>cap`, `charged`, `discharged`)
 are absent rather than zero before the range's first `device_update`: with no
@@ -463,7 +492,7 @@ The controller publishes MQTT discovery config automatically. These sensors appe
 
 Add `[web]` to run a live browser dashboard (`src/web/`) — solar/home/grid
 stat cards, the battery panel (SOC, mode, RTE, usable energy, capacity), and
-a decision log, all real data, updating roughly once a second over
+a decision log, all real data, updating every scan tick over
 server-sent events. Two routes: `GET /` (the full page) and `GET /events`
 (the SSE stream fragments it swaps in via htmx). No `[web]` table means no
 HTTP listener at all — the same brokerless-by-default rule `[mqtt]` follows —

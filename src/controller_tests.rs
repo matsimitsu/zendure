@@ -1,5 +1,5 @@
 use super::*;
-use crate::units::{BatteryPower, PowerCap, Timestamp};
+use crate::units::{BatteryPower, PowerCap, Timestamp, Watts};
 use crate::world::{DeviceId, Measurement, MeterReading};
 
 /// A snapshot whose every field differs from a freshly built controller's,
@@ -15,6 +15,8 @@ fn distinctive_state() -> ControllerState {
         daily_transitions: 44,
         daily_cooldown_suppressions: 55,
         last_cycle_reset_day: 66,
+        ramp_pending: true,
+        commanded_power: Watts(77),
     }
 }
 
@@ -45,6 +47,17 @@ fn controller_state_round_trips_through_json() {
     let fresh = Controller::test_default(NOW_MS, DAY).state();
     let json = serde_json::to_string(&fresh).unwrap();
     assert_eq!(fresh, serde_json::from_str(&json).unwrap());
+}
+
+/// A row journalled before `ramp_pending` existed still has to restore.
+#[test]
+fn controller_state_without_ramp_pending_still_reads() {
+    let mut json = serde_json::to_value(distinctive_state()).unwrap();
+    json.as_object_mut().unwrap().remove("ramp_pending");
+
+    let state: ControllerState = serde_json::from_value(json).unwrap();
+
+    assert!(!state.ramp_pending);
 }
 
 /// A one-battery world, the shape every test in this module decides against.
@@ -290,8 +303,7 @@ fn soc_at_min_can_still_charge() {
 #[test]
 fn idle_within_deadband() {
     let mut ctrl = controller_no_cooldown();
-    // 0W is at discharge_start_threshold (0W) and above charge_start_threshold
-    // (-100W)
+    // 0W is below discharge_start_threshold and above charge_start_threshold
     let decision = decide_at(
         &mut ctrl,
         &world(GridPower(0.0), SolarPower::new(0.0), &battery(50)),
@@ -371,7 +383,7 @@ fn deadband_no_charge_at_minus_80() {
 #[test]
 fn deadband_no_discharge_at_zero() {
     let mut ctrl = controller_no_cooldown();
-    // 0W grid power is not > 0 threshold → idle
+    // 0W is below discharge_start_threshold → idle
     let decision = decide_at(
         &mut ctrl,
         &world(GridPower(0.0), SolarPower::new(0.0), &battery(50)),
@@ -466,8 +478,9 @@ fn discharge_margin_reduces_power() {
 #[test]
 fn discharge_accounts_for_current_output() {
     let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(60));
-    // Battery already discharging 200W, grid still importing 100W
-    // Need: 200 + (100 - 5) = 295W
+    // Already commanding 200W, device reports the same (no windup rail bite),
+    // grid still importing 100W. Need: 200 + (100 - 5) = 295W.
+    ctrl.state.commanded_power = Watts(200);
     let bat = battery_discharging(50, 200);
     let decision = decide_at(
         &mut ctrl,
@@ -480,8 +493,9 @@ fn discharge_accounts_for_current_output() {
 #[test]
 fn charge_accounts_for_current_input() {
     let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(60));
-    // Battery already charging 200W, grid still exporting 150W
-    // Need: 200 + (150 - 50) = 300W
+    // Already commanding 200W, device reports the same, grid still exporting
+    // 150W. Need: 200 + (150 - 50) = 300W.
+    ctrl.state.commanded_power = Watts(200);
     let bat = battery_charging(50, 200);
     let decision = decide_at(
         &mut ctrl,
@@ -494,10 +508,11 @@ fn charge_accounts_for_current_input() {
 #[test]
 fn discharge_reduces_power_when_overproducing() {
     let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(60));
-    // Battery discharging 400W but grid exporting 50W (overshot).
+    // Commanding 400W but grid exporting 50W (overshot).
     // underlying_grid = -50 + 400 = 350W → real demand still high, stay
     // discharging.
     // Power: 400 + (-50 - 5) = 345W (reduces toward balance).
+    ctrl.state.commanded_power = Watts(400);
     let bat = battery_discharging(50, 400);
     let decision = decide_at(
         &mut ctrl,
@@ -534,15 +549,26 @@ fn first_decision_after_mode_change_uses_75_percent() {
 #[test]
 fn second_decision_in_same_mode_uses_full_power() {
     let mut ctrl = controller_no_cooldown();
-    let _d1 = decide_at(
+    let d1 = decide_at(
         &mut ctrl,
         &world(GridPower(-400.0), SolarPower::new(0.0), &battery(50)),
         &clock(12),
     );
-    // Same mode → full power
+    // Closes the loop: a 400W export capacity, 262W of which the first
+    // decision is now absorbing, leaves 138W still on the meter — the
+    // velocity-form law's own commanded_power (262, carried over) plus
+    // this remaining error lands on the same full 350W the old law reached
+    // in one shot. A fixed -400W on both ticks would instead double-count
+    // the already-commanded 262W, since nothing in that reading ever
+    // reflects the battery having started to close the gap.
+    let charging_now = d1.power_watts.get();
     let d2 = decide_at(
         &mut ctrl,
-        &world(GridPower(-400.0), SolarPower::new(0.0), &battery(50)),
+        &world(
+            GridPower(-400.0 + f64::from(charging_now)),
+            SolarPower::new(0.0),
+            &battery_charging(50, charging_now),
+        ),
         &clock(12),
     );
     assert_eq!(d2.power_watts, Setpoint::new(350)); // (400-50)*1.0
@@ -562,13 +588,63 @@ fn ramp_on_discharge_mode_change() {
     assert_eq!(d1.mode, ControlMode::Discharge);
     assert_eq!(d1.power_watts, Setpoint::new(296));
 
-    // Same mode → full power
+    // Closes the loop, same reasoning as
+    // `second_decision_in_same_mode_uses_full_power`: 400W of import, 296W of
+    // which the ramped first decision now supplies, leaves 104W still
+    // importing.
+    let discharging_now = d1.power_watts.get();
+    let d2 = decide_at(
+        &mut ctrl,
+        &world(
+            GridPower(400.0 - f64::from(discharging_now)),
+            SolarPower::new(0.0),
+            &battery_discharging(50, discharging_now),
+        ),
+        &clock(20),
+    );
+    assert_eq!(d2.power_watts, Setpoint::new(395));
+}
+
+/// A mode change can land on a tick whose caps read zero, so its setpoint is
+/// zero and there is nothing to ramp. The ramp belongs to the first setpoint
+/// that actually moves power, not to that tick.
+#[test]
+fn ramp_waits_for_the_first_positive_setpoint_after_a_mode_change() {
+    let mut ctrl = controller_no_cooldown();
+    let capped = BatteryState {
+        max_discharge_power: PowerCap::new(0),
+        ..battery(50)
+    };
+
+    let d1 = decide_at(
+        &mut ctrl,
+        &world(GridPower(400.0), SolarPower::new(0.0), &capped),
+        &clock(20),
+    );
+    assert_eq!(d1.mode, ControlMode::Discharge);
+    assert_eq!(d1.power_watts, Setpoint::ZERO);
+
     let d2 = decide_at(
         &mut ctrl,
         &world(GridPower(400.0), SolarPower::new(0.0), &battery(50)),
         &clock(20),
     );
-    assert_eq!(d2.power_watts, Setpoint::new(395));
+    assert_eq!(d2.power_watts, Setpoint::new(296), "{}", d2.reason);
+    assert!(d2.reason.ends_with(" (ramped 75%)"), "{}", d2.reason);
+
+    // Closes the loop for the same reason `ramp_on_discharge_mode_change`
+    // does: 296W of the 400W import is now covered by d2.
+    let discharging_now = d2.power_watts.get();
+    let d3 = decide_at(
+        &mut ctrl,
+        &world(
+            GridPower(400.0 - f64::from(discharging_now)),
+            SolarPower::new(0.0),
+            &battery_discharging(50, discharging_now),
+        ),
+        &clock(20),
+    );
+    assert_eq!(d3.power_watts, Setpoint::new(395));
 }
 
 // --- Decision interval tests ---
@@ -1096,6 +1172,172 @@ fn discharge_hysteresis_boundary_at_zero() {
     assert_eq!(decision.mode, ControlMode::Idle);
 }
 
+/// Folds a run of house demands through `ctrl`, the battery reporting exactly
+/// the setpoint it was last given, and returns the mode of every decision.
+fn modes_under_demand(ctrl: &mut Controller, demands: &[f64]) -> Vec<ControlMode> {
+    let mut discharging = 0;
+    demands
+        .iter()
+        .map(|&demand| {
+            let bat = battery_discharging(50, discharging);
+            let grid = GridPower(demand - f64::from(discharging));
+            let decision = decide_at(ctrl, &world(grid, SolarPower::new(0.0), &bat), &clock(20));
+            discharging = match decision.mode {
+                ControlMode::Discharge => decision.power_watts.get(),
+                _ => 0,
+            };
+            decision.mode
+        })
+        .collect()
+}
+
+fn transitions(modes: &[ControlMode]) -> usize {
+    modes.windows(2).filter(|w| w[0] != w[1]).count()
+}
+
+/// Meter noise either side of zero is not demand: nothing should start.
+#[test]
+fn demand_hovering_at_zero_starts_no_discharge() {
+    let mut ctrl = controller_no_cooldown();
+    let demands: Vec<f64> = (0..20)
+        .map(|i| if i % 2 == 0 { 20.0 } else { -20.0 })
+        .collect();
+
+    let modes = modes_under_demand(&mut ctrl, &demands);
+
+    assert!(modes.iter().all(|m| *m == ControlMode::Idle), "{modes:?}");
+}
+
+/// Demand hovering around the start threshold starts one discharge, which the
+/// band then holds rather than handing back to idle every other tick.
+#[test]
+fn demand_hovering_at_the_start_threshold_discharges_once() {
+    let mut ctrl = controller_no_cooldown();
+    let threshold = ctrl.discharge_start_threshold.0;
+    let demands: Vec<f64> = (0..20)
+        .map(|i| threshold + if i % 2 == 0 { 10.0 } else { -10.0 })
+        .collect();
+
+    let modes = modes_under_demand(&mut ctrl, &demands);
+
+    assert_eq!(modes[0], ControlMode::Discharge, "{modes:?}");
+    assert_eq!(transitions(&modes), 0, "{modes:?}");
+}
+
+// --- power-law deadband: `target_power`'s own dead-zone, distinct from the
+// mode-selection band above --------------------------------------------------
+
+/// Grid noise smaller than `discharge_deadband` (25 W in test tuning) is
+/// dropped rather than committed as a new setpoint: the loop holds the power
+/// it was already commanding instead of chasing every few-watt wiggle.
+#[test]
+fn discharge_holds_steady_within_the_deadband() {
+    let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(600));
+    ctrl.state.commanded_power = Watts(200);
+    let bat = battery_discharging(50, 200);
+
+    // discharge_margin = 5, discharge_deadband = 25: dropped while
+    // |import - 5| < 25, i.e. import in (-20, 30).
+    for import in [0.0, 15.0, 5.0, 29.0, 1.0] {
+        let decision = decide_at(
+            &mut ctrl,
+            &world(GridPower(import), SolarPower::new(0.0), &bat),
+            &clock(20),
+        );
+        assert_eq!(
+            decision.power_watts.get(),
+            200,
+            "import={import} should stay within the deadband: {decision:?}"
+        );
+    }
+}
+
+/// Once the error clears the deadband, the setpoint moves — this isn't a
+/// dead battery, just a quiet one.
+#[test]
+fn discharge_moves_once_the_deadband_clears() {
+    let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(600));
+    ctrl.state.commanded_power = Watts(200);
+    let bat = battery_discharging(50, 200);
+
+    let decision = decide_at(
+        &mut ctrl,
+        &world(GridPower(40.0), SolarPower::new(0.0), &bat),
+        &clock(20),
+    );
+
+    // raw = 40 - 5 = 35, |35| >= 25: 200 + 35 = 235.
+    assert_eq!(decision.power_watts.get(), 235, "{decision:?}");
+}
+
+/// The same dead-zone applies charging, on the export side.
+#[test]
+fn charge_holds_steady_within_the_deadband() {
+    let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(600));
+    ctrl.state.commanded_power = Watts(300);
+    let bat = battery_charging(50, 300);
+
+    // charge_margin = 50, charge_deadband = 25: dropped while
+    // |export - 50| < 25, i.e. export in (25, 75).
+    for export in [50.0, 30.0, 74.0, 26.0] {
+        let decision = decide_at(
+            &mut ctrl,
+            &world(GridPower(-export), SolarPower::new(0.0), &bat),
+            &clock(12),
+        );
+        assert_eq!(
+            decision.power_watts.get(),
+            300,
+            "export={export} should stay within the deadband: {decision:?}"
+        );
+    }
+}
+
+#[test]
+fn charge_moves_once_the_deadband_clears() {
+    let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(600));
+    ctrl.state.commanded_power = Watts(300);
+    let bat = battery_charging(50, 300);
+
+    let decision = decide_at(
+        &mut ctrl,
+        &world(GridPower(-100.0), SolarPower::new(0.0), &bat),
+        &clock(12),
+    );
+
+    // raw = 100 - 50 = 50, |50| >= 25: 300 + 50 = 350.
+    assert_eq!(decision.power_watts.get(), 350, "{decision:?}");
+}
+
+/// Anti-windup: a battery stuck well below what's commanded (SOC-limited,
+/// faulted, or just slow) must not let `commanded_power` sail off toward
+/// whatever a persistent, large error would otherwise integrate it to. It
+/// gets pulled back to within one slew step of what the device actually
+/// reports achieving, tick after tick, no matter how long the mismatch lasts.
+#[test]
+fn discharge_anti_windup_tracks_a_stuck_battery_not_the_demand() {
+    let mut ctrl = Controller {
+        slew_limit: SlewLimit::new(50),
+        ..controller_in_mode(ControlMode::Discharge, Duration::from_secs(600))
+    };
+    ctrl.state.commanded_power = Watts(500);
+    // The device reports 100W achieved and never moves — as if SOC-limited —
+    // while the house asks for far more (1000W import) every tick.
+    let bat = battery_discharging(50, 100);
+
+    for tick in 0..5 {
+        let decision = decide_at(
+            &mut ctrl,
+            &world(GridPower(1000.0), SolarPower::new(0.0), &bat),
+            &clock(20),
+        );
+        assert!(
+            decision.power_watts.get() <= 150,
+            "tick {tick}: {decision:?} ran past observed (100W) + the 50W slew limit"
+        );
+    }
+}
+
 // --- SOC limit tests ---
 
 #[test]
@@ -1220,7 +1462,7 @@ fn discharging_continues_when_own_output_reduces_import() {
     assert_eq!(decision.mode, ControlMode::Discharge);
 }
 
-/// Shelly Pro 3EM gives direct signed grid power every second. House
+/// Shelly Pro 3EM gives direct signed grid power. House
 /// consuming 150W, battery idle long enough: should ramp from idle to
 /// ~150W discharge, converging net grid power to near zero.
 #[test]
@@ -1282,7 +1524,6 @@ fn discharge_converges_to_house_consumption() {
 /// The failure this catches: a battery report one decision older than the
 /// meter destabilising a loop that converges when the two are the same age.
 #[test]
-#[ignore = "specification for the control-law fix; diverges under today's law"]
 fn a_lagged_battery_report_still_converges() {
     let mut ctrl = controller_no_cooldown();
     let house = 150.0_f64;

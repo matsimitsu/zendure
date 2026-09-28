@@ -34,6 +34,10 @@ fn config() -> Config {
         ha_publish_prefix: "SECRET-PREFIX".to_string(),
         charge_margin: PowerMargin::new(50),
         discharge_margin: PowerMargin::new(5),
+        charge_deadband: PowerMargin::new(25),
+        discharge_deadband: PowerMargin::new(25),
+        gain: Gain::new(100),
+        slew_limit: SlewLimit::new(400),
         charge_start_threshold: GridPower(-100.0),
         discharge_start_threshold: GridPower(0.0),
         min_mode_duration: Duration::from_secs(10),
@@ -85,7 +89,7 @@ fn the_session_config_carries_no_connection_settings() {
 fn the_session_config_serializes_to_the_exact_pinned_shape() {
     assert_eq!(
         serde_json::to_string(&config().session()).unwrap(),
-        r#"{"charge_margin":50,"discharge_margin":5,"charge_start_threshold":-100.0,"discharge_start_threshold":0.0,"min_mode_duration_secs":10,"min_decision_interval_secs":5,"idle_timeout_secs":300,"min_idle_before_discharge_secs":300,"cycle_warn_threshold":200,"min_soc":10,"max_soc":100,"balance_weekday":"Mon","solar_discharge_block_threshold":0.0,"mqtt_timeout_secs":60}"#
+        r#"{"charge_margin":50,"discharge_margin":5,"charge_deadband":25,"discharge_deadband":25,"gain":100,"slew_limit":400,"charge_start_threshold":-100.0,"discharge_start_threshold":0.0,"min_mode_duration_secs":10,"min_decision_interval_secs":5,"idle_timeout_secs":300,"min_idle_before_discharge_secs":300,"cycle_warn_threshold":200,"min_soc":10,"max_soc":100,"balance_weekday":"Mon","solar_discharge_block_threshold":0.0,"mqtt_timeout_secs":60}"#
     );
 }
 
@@ -98,8 +102,34 @@ fn the_session_config_round_trips() {
     assert_eq!(session, serde_json::from_str(&json).unwrap());
 }
 
+/// A session row journalled before `charge_deadband`/`discharge_deadband`
+/// existed still has to decode — `export`/`analyze`/replay read arbitrary
+/// historical ranges, which cross sessions older than any given build.
+#[test]
+fn a_session_config_journalled_without_deadbands_still_reads() {
+    let without_deadbands = r#"{"charge_margin":50,"discharge_margin":5,"charge_start_threshold":-100.0,"discharge_start_threshold":0.0,"min_mode_duration_secs":10,"min_decision_interval_secs":5,"idle_timeout_secs":300,"min_idle_before_discharge_secs":300,"cycle_warn_threshold":200,"min_soc":10,"max_soc":100,"balance_weekday":"Mon","solar_discharge_block_threshold":0.0,"mqtt_timeout_secs":60}"#;
+
+    let decoded: SessionConfig = serde_json::from_str(without_deadbands).unwrap();
+
+    assert_eq!(decoded.charge_deadband, PowerMargin::default());
+    assert_eq!(decoded.discharge_deadband, PowerMargin::default());
+}
+
+/// Same, for `gain`/`slew_limit`: a pre-A3 row never had `K` or a slew limit
+/// at all, so the historically faithful read is "no gain applied, no limit
+/// enforced" — unity and effectively unbounded, not either type's own zero.
+#[test]
+fn a_session_config_journalled_without_the_velocity_law_still_reads() {
+    let without_the_velocity_law = r#"{"charge_margin":50,"discharge_margin":5,"charge_start_threshold":-100.0,"discharge_start_threshold":0.0,"min_mode_duration_secs":10,"min_decision_interval_secs":5,"idle_timeout_secs":300,"min_idle_before_discharge_secs":300,"cycle_warn_threshold":200,"min_soc":10,"max_soc":100,"balance_weekday":"Mon","solar_discharge_block_threshold":0.0,"mqtt_timeout_secs":60}"#;
+
+    let decoded: SessionConfig = serde_json::from_str(without_the_velocity_law).unwrap();
+
+    assert_eq!(decoded.gain, Gain::new(100));
+    assert_eq!(decoded.slew_limit, SlewLimit::new(u32::MAX));
+}
+
 /// The knobs that reach the controller are the knobs that get recorded.
-/// `Controller::from_config` reads thirteen fields; `SessionConfig` carries
+/// `Controller::from_config` reads seventeen fields; `SessionConfig` carries
 /// those plus `mqtt_timeout`, which `Engine` holds. Stated as a value check
 /// rather than a comment so it cannot quietly stop being true.
 #[test]
@@ -109,6 +139,10 @@ fn the_session_config_matches_what_the_controller_was_built_with() {
 
     assert_eq!(session.charge_margin, config.charge_margin);
     assert_eq!(session.discharge_margin, config.discharge_margin);
+    assert_eq!(session.charge_deadband, config.charge_deadband);
+    assert_eq!(session.discharge_deadband, config.discharge_deadband);
+    assert_eq!(session.gain, config.gain);
+    assert_eq!(session.slew_limit, config.slew_limit);
     assert_eq!(
         session.charge_start_threshold,
         config.charge_start_threshold
@@ -318,6 +352,31 @@ fn a_blind_window_inside_three_scan_rounds_warns_and_is_raised() {
             .any(|w| w.contains("tuning.mqtt_timeout_secs")),
         "{warnings:?}"
     );
+}
+
+/// Discharge stops at 0 W, so a start threshold at or below it leaves no band
+/// between the two and idle↔discharge flips on meter noise.
+#[test]
+fn a_discharge_start_threshold_with_no_band_warns_and_takes_the_default() {
+    for value in ["0.0", "-20.0"] {
+        let toml = format!(
+            "{}\n[tuning]\ndischarge_start_threshold = {value}\n",
+            minimal_toml()
+        );
+
+        let (config, warnings) = Config::from_toml_str(&toml).unwrap();
+
+        assert_eq!(
+            config.discharge_start_threshold,
+            DEFAULT_DISCHARGE_START_THRESHOLD
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("tuning.discharge_start_threshold")),
+            "{warnings:?}"
+        );
+    }
 }
 
 #[test]
@@ -558,8 +617,12 @@ fn the_example_config_is_what_production_runs() {
         ha_publish_prefix: "zendure".to_string(),
         charge_margin: PowerMargin::new(50),
         discharge_margin: PowerMargin::new(5),
+        charge_deadband: PowerMargin::new(25),
+        discharge_deadband: PowerMargin::new(25),
+        gain: Gain::new(50),
+        slew_limit: SlewLimit::new(400),
         charge_start_threshold: GridPower(-100.0),
-        discharge_start_threshold: GridPower(0.0),
+        discharge_start_threshold: GridPower(50.0),
         min_mode_duration: Duration::from_secs(10),
         min_decision_interval: Duration::from_secs(0),
         idle_timeout: Duration::from_secs(300),

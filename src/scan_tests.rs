@@ -66,16 +66,20 @@ impl Captured for Sample {
 }
 
 fn slot() -> Slot<Sample> {
-    Slot::new(WINDOW, at(0))
+    Slot::new(WINDOW, epoch())
 }
 
-fn at(ms: i64) -> Timestamp {
-    Timestamp::from_millis(ms)
+/// One instant every test below measures its timeline from, so an assertion
+/// is about the offsets relative to each other, never about when the test
+/// happened to run.
+fn epoch() -> Instant {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(Instant::now)
 }
 
-/// Past the blind window, measured from the inbox opening.
-fn aged_out() -> Timestamp {
-    at(Elapsed::of(WINDOW).as_millis() + 1)
+/// Past the blind window, measured from `epoch`.
+fn aged_out() -> Instant {
+    epoch() + WINDOW + Duration::from_millis(1)
 }
 
 /// The number every operator line reports: consecutive, and reset by a
@@ -89,7 +93,8 @@ fn a_sample_resets_the_consecutive_failure_count() {
     assert_eq!(slot.fail().get(), 2);
 
     assert_eq!(
-        slot.deliver(ROUND, Clock::test_at(1_000), Sample).get(),
+        slot.deliver(ROUND, Clock::test_at(1_000), epoch(), Sample)
+            .get(),
         2,
         "a delivery reports what the source had failed before it"
     );
@@ -104,7 +109,7 @@ fn one_good_sample_brings_a_down_source_back() {
 
     assert!(slot.take(ROUND, aged_out()).down().is_some());
 
-    slot.deliver(ROUND, Clock::test_at(aged_out().as_millis()), Sample);
+    slot.deliver(ROUND, Clock::test_at(1_000), aged_out(), Sample);
     assert!(matches!(
         slot.take(ROUND, aged_out()),
         Delivery::Fresh(_, _)
@@ -117,13 +122,46 @@ fn one_good_sample_brings_a_down_source_back() {
 fn a_slot_that_was_never_sampled_ages_out() {
     let slot = slot();
 
-    assert!(matches!(slot.take(ROUND, at(0)), Delivery::Quiet));
+    assert!(matches!(slot.take(ROUND, epoch()), Delivery::Quiet));
 
     let failures = slot
         .take(ROUND, aged_out())
         .down()
         .expect("a slot older than the blind window is down");
     assert_eq!(failures.get(), 0, "nothing failed — it never answered");
+}
+
+/// HKJMQB1: a forward NTP step (no RTC correcting the wall clock at boot)
+/// stamps a delivery arbitrarily far in the future. Staleness ages on the
+/// monotonic clock, not that stamp, so a healthy source must not look down.
+#[test]
+fn a_forward_wall_clock_jump_does_not_falsely_age_out_a_healthy_source() {
+    let slot = slot();
+
+    slot.deliver(ROUND, Clock::test_at(i64::MAX / 2), epoch(), Sample);
+
+    assert!(
+        matches!(slot.take(ROUND, epoch()), Delivery::Fresh(_, _)),
+        "a delivery stamped with a wall clock far in the future must not \
+         itself look aged out on the monotonic clock the slot actually ages on"
+    );
+}
+
+/// The mirror case: a backward step (an RTC correcting after boot) stamps a
+/// delivery with a wall clock behind the slot's own opening. The monotonic
+/// age bound must still trip once real time has actually moved past the
+/// blind window — a step must not disable it until the wall clock catches up.
+#[test]
+fn a_backward_wall_clock_jump_does_not_disable_the_age_bound() {
+    let slot = slot();
+
+    slot.deliver(ROUND, Clock::test_at(-1), epoch(), Sample);
+
+    assert!(
+        slot.take(ROUND, aged_out()).down().is_some(),
+        "a wall clock stamped in the past must not stop the monotonic age \
+         bound from tripping once real time has moved past the blind window"
+    );
 }
 
 /// The hole a pure failure count leaves: a request that never returns never
@@ -172,7 +210,7 @@ async fn a_source_that_hangs_goes_down_without_ever_failing() {
         "the source has to be in a request that never returned"
     );
     assert!(
-        matches!(slot.take(ROUND, at(0)), Delivery::Quiet),
+        matches!(slot.take(ROUND, epoch()), Delivery::Quiet),
         "a hung request delivers nothing and fails nothing"
     );
 
@@ -192,9 +230,9 @@ async fn a_source_that_hangs_goes_down_without_ever_failing() {
 fn a_fresh_sample_is_taken_exactly_once() {
     let slot = slot();
 
-    slot.deliver(ROUND, Clock::test_at(1_000), Sample);
-    assert!(matches!(slot.take(ROUND, at(1_000)), Delivery::Fresh(_, _)));
-    assert!(matches!(slot.take(ROUND, at(1_000)), Delivery::Quiet));
+    slot.deliver(ROUND, Clock::test_at(1_000), epoch(), Sample);
+    assert!(matches!(slot.take(ROUND, epoch()), Delivery::Fresh(_, _)));
+    assert!(matches!(slot.take(ROUND, epoch()), Delivery::Quiet));
 }
 
 fn battery_reading() -> BatteryReading {
@@ -217,16 +255,16 @@ fn battery_reading() -> BatteryReading {
 #[test]
 fn devices_are_taken_in_id_order_whatever_order_they_answered() {
     let ids = ["zzz", "aaa", "mmm"];
-    let inbox = Inbox::new(ids.map(DeviceId::new), at(0), WINDOW);
+    let inbox = Inbox::new(ids.map(DeviceId::new), epoch(), WINDOW);
 
     for id in ids {
         inbox
             .device_slot(&DeviceId::new(id))
             .expect("every id was registered")
-            .deliver(ROUND, Clock::test_at(1_000), battery_reading());
+            .deliver(ROUND, Clock::test_at(1_000), epoch(), battery_reading());
     }
 
-    let taken = inbox.take_devices(ROUND, at(1_000));
+    let taken = inbox.take_devices(ROUND, epoch());
     let order: Vec<String> = taken.iter().map(|(id, _)| id.to_string()).collect();
 
     assert_eq!(order, ["aaa", "mmm", "zzz"]);
@@ -243,20 +281,25 @@ fn devices_are_taken_in_id_order_whatever_order_they_answered() {
 #[test]
 fn a_sample_stamped_with_an_earlier_round_is_not_fresh_for_this_one() {
     let ids = ["early", "ontime"];
-    let inbox = Inbox::new(ids.map(DeviceId::new), at(0), WINDOW);
+    let inbox = Inbox::new(ids.map(DeviceId::new), epoch(), WINDOW);
     let round = TickSeq::FIRST.next();
 
     inbox
         .device_slot(&DeviceId::new("early"))
         .expect("every id was registered")
-        .deliver(TickSeq::FIRST, Clock::test_at(0), battery_reading());
+        .deliver(
+            TickSeq::FIRST,
+            Clock::test_at(0),
+            epoch(),
+            battery_reading(),
+        );
     inbox
         .device_slot(&DeviceId::new("ontime"))
         .expect("every id was registered")
-        .deliver(round, Clock::test_at(3_000), battery_reading());
+        .deliver(round, Clock::test_at(3_000), epoch(), battery_reading());
 
     let taken: Vec<_> = inbox
-        .take_devices(round, at(3_000))
+        .take_devices(round, epoch())
         .into_iter()
         .map(|(id, delivery)| (id.to_string(), matches!(delivery, Delivery::Fresh(_, _))))
         .collect();

@@ -99,6 +99,18 @@ async fn a_failed_charge_does_not_record_the_ac_mode_it_attempted() {
     assert_eq!(client.ledger.tracked_ac_mode(), None);
 }
 
+/// Written once at startup, unconditionally — the same policy
+/// `write_power_caps` follows, and the same closed-port contract as every
+/// other write here: attempted, and failed, rather than skipped.
+#[tokio::test]
+async fn write_soc_set_is_attempted_and_fails_against_a_closed_port() {
+    let client = client();
+    client
+        .write_soc_set(Soc::new(95))
+        .await
+        .expect_err("nothing is listening on port 1");
+}
+
 /// Never reaching the device and being refused by it are different
 /// failures; a caller reading `ZendureError` should be able to tell them
 /// apart rather than pattern-matching a message string.

@@ -1,11 +1,17 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use super::*;
+use crate::battery::BatteryState;
 use crate::config::{DeviceConfig, MeterConfig, SessionConfig, ShellyConfig, WebConfig};
+use crate::device::{BatteryTelemetry, PollError, RecordingBattery};
 use crate::fixtures;
 use crate::journal;
 use crate::registry::Battery;
 use crate::simulation::VirtualBattery;
 use crate::source::shelly::SolarPhase;
-use crate::units::{Efficiency, GridPower, PowerMargin, RetentionDays, SolarPower, Watts};
+use crate::units::{
+    Efficiency, Gain, GridPower, PowerMargin, RetentionDays, SlewLimit, SolarPower, Watts,
+};
 
 /// The two signal arms became one, so the wording an operator greps for is
 /// now produced by `Display`. Only the name is pinned here: retyping the
@@ -112,6 +118,10 @@ fn virtual_config(dir: &tempfile::TempDir, capacity: WattHours) -> Config {
         ha_publish_prefix: "test".to_string(),
         charge_margin: PowerMargin::new(50),
         discharge_margin: PowerMargin::new(5),
+        charge_deadband: PowerMargin::new(25),
+        discharge_deadband: PowerMargin::new(25),
+        gain: Gain::new(100),
+        slew_limit: SlewLimit::new(400),
         charge_start_threshold: GridPower(-100.0),
         discharge_start_threshold: GridPower(0.0),
         // No cooldowns: the tuning knobs a real deployment leans on to
@@ -388,6 +398,176 @@ async fn the_failsafe_fires_while_the_tick_is_healthy() {
         ) > 0,
         "the stand-down has to reach the battery, not just the journal"
     );
+}
+
+/// A `Sampler` that answers exactly once and then goes silent — a device that
+/// was reachable long enough to enter `World` and then went dark. That is the
+/// only shape worth testing here: `allocate` only ever addresses a device
+/// `World` has heard from, so one `Down` from its very first tick is already
+/// excluded from `directives` on its own and would prove nothing about the
+/// fix below.
+struct AnsweredOnceThenSilent {
+    id: DeviceId,
+    told: AtomicBool,
+}
+
+impl scan::Sampler for AnsweredOnceThenSilent {
+    type Reading = BatteryReading;
+
+    fn id(&self) -> &str {
+        self.id.as_str()
+    }
+
+    async fn sample(&self) -> Result<BatteryReading, PollError> {
+        if self.told.swap(true, Ordering::SeqCst) {
+            std::future::pending().await
+        } else {
+            Ok(battery_reading())
+        }
+    }
+}
+
+fn battery_reading() -> BatteryReading {
+    BatteryReading {
+        state: BatteryState::test_sample(),
+        telemetry: BatteryTelemetry {
+            charge: Watts::ZERO,
+            discharge: Watts::ZERO,
+            pack_capacities: None,
+            pack_temps: Vec::new(),
+            enclosure_temp: None,
+            min_soc: None,
+        },
+        raw: None,
+    }
+}
+
+/// A device found `Down` gets one idle attempt per outage, not one per tick.
+/// Its reads stopping does not mean it cannot take a write, so the first
+/// tick tries; against a box that really is gone, every retry would burn the
+/// request timeout inside the tick and hold the next round's sample request
+/// behind it.
+#[tokio::test(start_paused = true)]
+async fn a_device_found_down_is_written_to_once_per_outage() {
+    const BLIND_WINDOW: Duration = Duration::from_millis(100);
+    let device_id = DeviceId::new("test-battery");
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut config = virtual_config(&dir, WattHours(1_000.0));
+    config.mqtt_timeout = BLIND_WINDOW;
+
+    let devices = Devices::new([Battery::Recording(RecordingBattery::new("test-battery"))]);
+
+    let source = std::sync::Arc::new(AnsweredOnceThenSilent {
+        id: device_id.clone(),
+        told: AtomicBool::new(false),
+    });
+    let inbox = Inbox::new([device_id.clone()], Instant::now(), BLIND_WINDOW);
+    let (requests, _) = tokio::sync::watch::channel(TickSeq::FIRST);
+    let journal = std::sync::Arc::new(journal::testing::nowhere());
+    let sampler = tokio::spawn(scan::sample_loop(
+        source,
+        inbox
+            .device_slot(&device_id)
+            .expect("the inbox was built with this id"),
+        requests.subscribe(),
+        journal.clone(),
+        config.timezone,
+    ));
+
+    let announcer = Announcer::new();
+    let mut telemetry = PollTelemetry::new(config.rte_state_path.clone(), Vec::new(), Soc::ZERO);
+    let mut engine = Engine::new(
+        controller::Controller::from_config(&config, &Clock::now(config.timezone)),
+        World::new(),
+        config.mqtt_timeout,
+    );
+    let tick = Tick {
+        devices: &devices,
+        publisher: &NullPublisher,
+        announcer: &announcer,
+        journal: &journal,
+        prefix: "test",
+        dashboard: None,
+        timezone: config.timezone,
+        blind_window: config.mqtt_timeout,
+    };
+    let at = Clock::now(config.timezone);
+
+    // Round 1: the device answers and enters `World` — the only way
+    // `allocate` will ever address it.
+    let round = TickSeq::FIRST.next();
+    requests.send_modify(|seq| *seq = round);
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    let fleet = tick.fold_devices(
+        &mut engine,
+        &mut telemetry,
+        at,
+        inbox.take_devices(round, Instant::now()),
+    );
+    assert!(
+        matches!(fleet, Fleet::Complete),
+        "the device must have answered round 1 for this test to mean anything"
+    );
+
+    // Real time passes the blind window with the source parked, answering
+    // nothing further.
+    tokio::time::advance(BLIND_WINDOW + Duration::from_millis(1)).await;
+    let round = round.next();
+    requests.send_modify(|seq| *seq = round);
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    let fleet = tick.fold_devices(
+        &mut engine,
+        &mut telemetry,
+        at,
+        inbox.take_devices(round, Instant::now()),
+    );
+    let Fleet::Silent(down) = fleet else {
+        panic!("the device must be down after the blind window");
+    };
+
+    // The outage's first tick still tries: a slot goes `Down` when its
+    // reads stop, and the box may yet take a write.
+    tick.stand_down(
+        &mut engine,
+        at,
+        Silent {
+            meter: None,
+            devices: down.clone(),
+        },
+    )
+    .await;
+
+    let Some(Battery::Recording(recording)) = devices.battery(&device_id) else {
+        panic!("test-battery must be registered");
+    };
+    assert_eq!(
+        recording.applied().len(),
+        1,
+        "the outage's first failsafe tick must try to idle every device",
+    );
+
+    tick.stand_down(
+        &mut engine,
+        at,
+        Silent {
+            meter: None,
+            devices: down,
+        },
+    )
+    .await;
+    assert_eq!(
+        recording.applied().len(),
+        1,
+        "a later failsafe tick must not retry a device already known down: {:?}",
+        recording.applied(),
+    );
+
+    sampler.abort();
 }
 
 /// Stops the test above from passing because the failsafe fires on every run:
