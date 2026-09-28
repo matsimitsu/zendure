@@ -200,6 +200,21 @@ impl ZendureClient {
         .await
     }
 
+    /// The device's own charge ceiling (`socSet`, tenths of a percent, RW,
+    /// documented range 700-1000) — distinct from `write_power_caps`, which
+    /// writes the model's rated limits. This is an operator choice
+    /// (`[tuning] max_soc`), and raising that config value alone changes
+    /// nothing: the device stops charging and sets `socLimit: 1` from
+    /// whatever `socSet` last held, regardless of what `target_mode` allows.
+    /// Written only at startup, the same policy `write_power_caps` follows.
+    pub async fn write_soc_set(&self, max_soc: Soc) -> Result<(), reqwest::Error> {
+        self.ensure_ram_mode().await?;
+        self.write_properties(serde_json::json!({
+            "socSet": max_soc.get() * 10,
+        }))
+        .await
+    }
+
     /// Apply a command via the Zendure REST API. `acMode` is sent only when
     /// switching between charge and discharge, since writing it resets the
     /// inverter; SetIdle/SetStandby leave it untouched.
@@ -710,6 +725,18 @@ mod tests {
 
         assert_eq!(client.tracked_storage_mode(), StorageMode::Ram);
         assert!(needs_write(&Command::SetStandby, client.tracked_state()));
+    }
+
+    /// Written once at startup, unconditionally — the same policy
+    /// `write_power_caps` follows, and the same closed-port contract as every
+    /// other write here: attempted, and failed, rather than skipped.
+    #[tokio::test]
+    async fn write_soc_set_is_attempted_and_fails_against_a_closed_port() {
+        let client = client();
+        client
+            .write_soc_set(Soc::new(95))
+            .await
+            .expect_err("nothing is listening on port 1");
     }
 
     #[test]
