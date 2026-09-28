@@ -108,6 +108,36 @@ fn timestamp_arithmetic_round_trips() {
     assert_eq!(back + Elapsed::of(Duration::from_secs(60)), now);
 }
 
+/// An absurd configured window saturates rather than wrapping negative. A
+/// wrapped window reads as already elapsed, so every scan slot would go
+/// `Down` and the loop would idle the fleet forever; saturated, the window
+/// simply never closes.
+#[test]
+fn an_absurd_window_never_closes_rather_than_always_having_closed() {
+    let absurd = Elapsed::of(Duration::from_secs(u64::MAX));
+    assert_eq!(absurd.as_millis(), i64::MAX);
+
+    let a_day = Timestamp(86_400_000) - Timestamp(0);
+    let window_closed = a_day > absurd;
+    assert!(!window_closed);
+    assert!(a_day < Duration::from_secs(u64::MAX));
+}
+
+/// `Controller::new` backdates its cooldown stamps by the configured window
+/// and measures every later tick against them, so the span from a stamp
+/// backdated by a saturated window must saturate too — elapsed, not wrapped.
+#[test]
+fn a_stamp_backdated_by_a_saturated_window_reads_as_elapsed() {
+    let absurd = Elapsed::of(Duration::from_secs(u64::MAX));
+    let now = Timestamp(1_757_000_000_000);
+    let backdated = now - absurd;
+
+    let later = Timestamp(now.as_millis() + 3_000);
+    assert_eq!(later - backdated, absurd);
+    assert!(later - backdated >= Duration::from_secs(u64::MAX));
+    assert_eq!((now + absurd).as_millis(), i64::MAX);
+}
+
 // --- Roles: the conversions -----------------------------------------------
 
 #[test]

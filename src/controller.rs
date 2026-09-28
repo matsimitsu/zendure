@@ -8,12 +8,13 @@ use crate::clock::Clock;
 use crate::config::{Config, SessionConfig};
 use crate::models::{ControlDecision, ControlMode, CycleCounts};
 use crate::units::{
-    Elapsed, GridPower, PowerMargin, RampFactor, Setpoint, Soc, SolarPower, Timestamp,
+    Elapsed, Gain, GridPower, PowerMargin, RampFactor, Setpoint, SlewLimit, Soc, SolarPower,
+    Timestamp, Watts,
 };
 use crate::world::World;
 
-/// How much of the target is commanded on the first decision after a mode
-/// change. Easing into a new direction rather than stepping straight to full
+/// How much of the target is commanded on the first positive setpoint after a
+/// mode change. Easing into a new direction rather than stepping straight to full
 /// power is a battery-safety measure, and the convention most BMS
 /// implementations follow.
 const RAMP_FACTOR: RampFactor = RampFactor::new(75);
@@ -32,6 +33,22 @@ pub struct ControllerState {
     pub daily_transitions: u32,
     pub daily_cooldown_suppressions: u32,
     pub last_cycle_reset_day: u32,
+    /// Set on entering charge or discharge, cleared by the first positive
+    /// setpoint, which is the one ramped: the mode-change tick itself can be
+    /// capped to zero. Defaulted so rows journalled without it still read.
+    #[serde(default)]
+    pub ramp_pending: bool,
+    /// The velocity-form law's own running estimate of what was last
+    /// commanded, in the active mode's direction — set from the *final*
+    /// decision (post-ramp, post any cooldown/cycle-limit override) at the
+    /// end of every `apply_guards` call, so it is always what was actually
+    /// sent, not what a candidate briefly proposed. Zero whenever the last
+    /// decision was Idle or Standby. Defaulted so a row journalled under the
+    /// old absolute-form law still reads: there is no historical value to
+    /// recover, and zero is the same clean-slate a fresh mode entry starts
+    /// from anyway.
+    #[serde(default)]
+    pub commanded_power: Watts,
 }
 
 /// Reactive self-consumption control. Deliberately free of clock reads: every
@@ -47,6 +64,21 @@ pub struct Controller {
     min_decision_interval: Duration,
     charge_margin: PowerMargin,
     discharge_margin: PowerMargin,
+    /// Below this, a fresh adjustment is dropped rather than committed — the
+    /// grid reading's own noise floor, not the margin above, which exists for
+    /// a different reason (staying on the safe side of the reading, not
+    /// filtering it).
+    charge_deadband: PowerMargin,
+    discharge_deadband: PowerMargin,
+    /// `K`: scales the deadbanded error before it's integrated onto
+    /// [`ControllerState::commanded_power`]. Symmetric across charge and
+    /// discharge — the law itself is, so there's no asymmetry reason to
+    /// split this the way the margins/deadbands are.
+    gain: Gain,
+    /// Bounds both how far `commanded_power` may move in a single decision
+    /// and, doubling as anti-windup, how far it may run ahead of what the
+    /// device last reported achieving.
+    slew_limit: SlewLimit,
     charge_start_threshold: GridPower,
     discharge_start_threshold: GridPower,
     idle_timeout: Duration,
@@ -80,11 +112,17 @@ impl Controller {
                 daily_transitions: 0,
                 daily_cooldown_suppressions: 0,
                 last_cycle_reset_day: clock.day_ordinal,
+                ramp_pending: false,
+                commanded_power: Watts::ZERO,
             },
             min_mode_duration,
             min_decision_interval,
             charge_margin: session.charge_margin,
             discharge_margin: session.discharge_margin,
+            charge_deadband: session.charge_deadband,
+            discharge_deadband: session.discharge_deadband,
+            gain: session.gain,
+            slew_limit: session.slew_limit,
             charge_start_threshold: session.charge_start_threshold,
             discharge_start_threshold: session.discharge_start_threshold,
             idle_timeout: Duration::from_secs(session.idle_timeout_secs),
@@ -211,6 +249,7 @@ impl Controller {
             self.state.last_mode = ControlMode::Idle;
             self.state.last_mode_change = clock.now;
             self.state.last_idle_start = Some(clock.now);
+            self.state.ramp_pending = false;
         }
     }
 
@@ -298,8 +337,13 @@ impl Controller {
             || solar_power < self.solar_discharge_block_threshold
     }
 
-    /// Calculates the target power for a given mode, accounting for battery
-    /// feedback (what it's already doing) and safety margins.
+    /// Calculates the target power for a given mode: velocity form. Each
+    /// tick integrates the gained, deadbanded error onto the controller's
+    /// *own* last commanded value (`ControllerState::commanded_power`), not
+    /// the device's polled report — anchoring on a report that is a tick
+    /// stale is exactly what made the old absolute-form law hunt (recorded
+    /// in `a_lagged_battery_report_still_converges`). The report still
+    /// matters, but only inside `step`, as an anti-windup rail.
     fn target_power(
         &self,
         mode: ControlMode,
@@ -308,21 +352,88 @@ impl Controller {
     ) -> Setpoint {
         match mode {
             ControlMode::Charge => {
-                let adjustment = grid_power.exporting() - self.charge_margin.watts();
-                let current_charge = battery.current_power.charging();
-                Setpoint::clamped(current_charge + adjustment, battery.max_charge_power)
+                let raw = grid_power.exporting() - self.charge_margin.watts();
+                let error = Self::deadbanded(raw, self.charge_deadband);
+                let observed = battery.current_power.charging();
+                let target = self.step(error, observed);
+                Setpoint::clamped(target, battery.max_charge_power)
             }
             ControlMode::Discharge => {
-                let adjustment = grid_power.importing() - self.discharge_margin.watts();
-                let current_discharge = battery.current_power.discharging();
-                Setpoint::clamped(current_discharge + adjustment, battery.max_discharge_power)
+                let raw = grid_power.importing() - self.discharge_margin.watts();
+                let error = Self::deadbanded(raw, self.discharge_deadband);
+                let observed = battery.current_power.discharging();
+                let target = self.step(error, observed);
+                Setpoint::clamped(target, battery.max_discharge_power)
             }
             ControlMode::Idle | ControlMode::Standby => Setpoint::ZERO,
         }
     }
 
-    /// Applies cooldown, ramp, and standby timeout. All state mutation lives here.
+    /// Below `width`, the grid reading's own tick-to-tick noise moves the
+    /// adjustment more than the house does — passing it through anyway is
+    /// what turned a steady load into a setpoint that reverses direction on
+    /// every other tick (measured live: ~10-30 W of meter jitter against a 5 W
+    /// margin). Dropping it to zero holds the last commanded power steady
+    /// instead of chasing noise.
+    fn deadbanded(raw: Watts, width: PowerMargin) -> Watts {
+        if raw.get().abs() < width.watts().get() {
+            Watts::ZERO
+        } else {
+            raw
+        }
+    }
+
+    /// One velocity-form update: gain the error, integrate it onto the last
+    /// commanded value, slew-limit the movement, then anti-wind-up against
+    /// `observed` — the device's own report of what it actually achieved.
+    /// That second clamp is the whole point of keeping `observed` around at
+    /// all: a battery too empty (or full, or faulted) to follow keeps
+    /// reporting a figure the accumulator can never out-run by more than one
+    /// slew step, rather than climbing unboundedly toward a setpoint it will
+    /// never reach.
+    fn step(&self, error: Watts, observed: Watts) -> Watts {
+        let scaled = self.gain.apply(error);
+        let advanced = Self::clamp_step(
+            self.state.commanded_power + scaled,
+            self.state.commanded_power,
+            self.slew_limit,
+        );
+        Self::clamp_step(advanced, observed, self.slew_limit)
+    }
+
+    fn clamp_step(candidate: Watts, anchor: Watts, limit: SlewLimit) -> Watts {
+        // Via `Watts`'s own saturating `Add`/`Sub`: a limit near `u32::MAX`
+        // (an effectively unbounded `SlewLimit`, as old-journal decoding
+        // uses) added to any positive anchor would overflow plain `i32`
+        // arithmetic before `clamp` ever sees it.
+        let lower = anchor - limit.watts();
+        let upper = anchor + limit.watts();
+        Watts(candidate.get().clamp(lower.get(), upper.get()))
+    }
+
+    /// Applies cooldown, ramp, and standby timeout, then records what was
+    /// actually decided as `commanded_power` — the baseline the next
+    /// decision's `step` integrates onto. Recorded here rather than inside
+    /// `target_power` because only this function knows the *final* answer:
+    /// a candidate that cooldown or the cycle limit overrides to Idle was
+    /// never really commanded, and `commanded_power` must not remember it as
+    /// if it were.
     fn apply_guards(
+        &mut self,
+        mode: ControlMode,
+        power: Setpoint,
+        grid_power: GridPower,
+        clock: &Clock,
+    ) -> ControlDecision {
+        let decision = self.apply_guards_inner(mode, power, grid_power, clock);
+        self.state.commanded_power = match decision.mode {
+            ControlMode::Charge | ControlMode::Discharge => Watts(decision.power_watts.get()),
+            ControlMode::Idle | ControlMode::Standby => Watts::ZERO,
+        };
+        decision
+    }
+
+    fn apply_guards_inner(
         &mut self,
         mode: ControlMode,
         power: Setpoint,
@@ -348,6 +459,7 @@ impl Controller {
                 self.state.last_mode = ControlMode::Standby;
                 self.state.last_mode_change = clock.now;
                 self.state.last_idle_start = None;
+                self.state.ramp_pending = false;
             }
             return ControlDecision {
                 mode: ControlMode::Standby,
@@ -381,12 +493,13 @@ impl Controller {
             };
         }
 
-        // Track mode changes and apply ramp
-        let (final_power, ramped) = if mode != self.state.last_mode {
+        if mode != self.state.last_mode {
             self.state.daily_transitions += 1;
-            if matches!(mode, ControlMode::Charge | ControlMode::Discharge) {
+            let active = matches!(mode, ControlMode::Charge | ControlMode::Discharge);
+            if active {
                 self.state.last_active_mode = Some(mode);
             }
+            self.state.ramp_pending = active;
             self.state.last_mode = mode;
             self.state.last_mode_change = clock.now;
             self.state.last_idle_start = if mode == ControlMode::Idle {
@@ -394,13 +507,14 @@ impl Controller {
             } else {
                 None
             };
-            if power.is_positive() {
-                (power.ramped(RAMP_FACTOR), true)
-            } else {
-                (power, false)
-            }
+        }
+
+        let ramped = self.state.ramp_pending && power.is_positive();
+        let final_power = if ramped {
+            self.state.ramp_pending = false;
+            power.ramped(RAMP_FACTOR)
         } else {
-            (power, false)
+            power
         };
 
         // Idle timeout → standby

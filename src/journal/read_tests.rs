@@ -592,6 +592,7 @@ async fn recent_decisions_of_a_journal_with_none_is_empty() {
 fn meter_event(at_ms: i64, solar: f64) -> Event {
     Event::Meter {
         at: journey::clock_at((at_ms - journey::NOW_MS) / 1000),
+        sampled_at: None,
         grid: MeterReading::total_only(GridPower(0.0)),
         solar: SolarPower::new(solar),
     }

@@ -8,7 +8,7 @@ use crate::battery::BatteryState;
 use crate::engine::EngineState;
 use crate::fixtures::journey;
 use crate::models::ControlDecision;
-use crate::units::{BatteryPower, GridPower, SolarPower, Watts};
+use crate::units::{BatteryPower, GridPower, SolarPower, Timestamp, Watts};
 use crate::web::sse::FRAGMENTS;
 use crate::web::state::DashboardState;
 use crate::web::templates::layout;
@@ -31,11 +31,13 @@ fn clock(secs: i64) -> crate::clock::Clock {
 fn engine_state(battery_power: BatteryPower) -> EngineState {
     let mut world = World::new();
     world.observe_meter(
+        None,
         MeterReading::total_only(GridPower(400.0)),
         SolarPower::new(750.0),
     );
     world.observe_device(
         DeviceId::new(journey::BATTERY_ID),
+        Timestamp::from_millis(0),
         Measurement::Battery(BatteryState {
             current_power: battery_power,
             ..BatteryState::test_sample()
@@ -354,6 +356,7 @@ fn the_grid_card_names_the_direction_its_sign_means() {
 
     let mut exporting_state = state(vec![]);
     exporting_state.engine.world.observe_meter(
+        None,
         MeterReading::total_only(GridPower(-900.0)),
         SolarPower::ZERO,
     );
@@ -365,10 +368,11 @@ fn the_grid_card_names_the_direction_its_sign_means() {
 #[test]
 fn a_sub_watt_grid_reading_reads_as_zero_without_a_sign() {
     let mut drifting = state(vec![]);
-    drifting
-        .engine
-        .world
-        .observe_meter(MeterReading::total_only(GridPower(-0.4)), SolarPower::ZERO);
+    drifting.engine.world.observe_meter(
+        None,
+        MeterReading::total_only(GridPower(-0.4)),
+        SolarPower::ZERO,
+    );
 
     assert_eq!(dashboard_view(&drifting, tz()).stat_cards[2].value, "0");
 }

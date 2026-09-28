@@ -35,6 +35,7 @@ pub mod journey {
     pub fn events() -> Vec<Event> {
         let meter_at = |secs, total| Event::Meter {
             at: clock_at(secs),
+            sampled_at: None,
             grid: MeterReading::total_only(GridPower(total)),
             solar: SolarPower::new(0.0),
         };

@@ -90,7 +90,7 @@ mod tests {
     use super::*;
     use crate::battery::BatteryState;
     use crate::models::ControlMode;
-    use crate::units::{BatteryPower, PowerCap, Setpoint, Soc};
+    use crate::units::{BatteryPower, PowerCap, Setpoint, Soc, Timestamp};
     use crate::world::Measurement;
 
     fn battery() -> BatteryState {
@@ -111,7 +111,11 @@ mod tests {
     fn world_with(ids: &[&str]) -> World {
         let mut world = World::new();
         for id in ids {
-            world.observe_device(DeviceId::new(*id), Measurement::Battery(battery()));
+            world.observe_device(
+                DeviceId::new(*id),
+                Timestamp::from_millis(0),
+                Measurement::Battery(battery()),
+            );
         }
         world
     }

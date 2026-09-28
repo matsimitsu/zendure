@@ -3,3 +3,7 @@
 # Where config.example.virtual.toml points its journal and RTE state — created
 # automatically on first run against the simulator (see that file's comments).
 /local
+
+# [epiq]: local hydrated state is never committed
+.epiq/events/
+.epiq/log/

@@ -107,7 +107,7 @@ pub struct PackTemperature {
 /// in — a working type, not a role, carrying no claim about sign or purpose.
 /// Role types (`Setpoint`, `PowerCap`, `BatteryPower`, `PowerMargin`) convert into and
 /// out of it through named methods, so every meaning change is a call you can grep for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Watts(pub i32);
 
@@ -407,7 +407,7 @@ impl RampFactor {
 /// A non-negative safety margin, in watts, subtracted from a setpoint so the
 /// commanded power stays on the safe side of the grid reading it was derived
 /// from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PowerMargin(u32);
 
@@ -420,6 +420,57 @@ impl PowerMargin {
 
     pub fn watts(self) -> Watts {
         Watts(self.0.min(i32::MAX as u32) as i32)
+    }
+}
+
+/// The maximum a commanded power may move in a single decision — a role, not
+/// a unit: this codebase decides once per scan tick, so "watts per decision"
+/// is the natural rate, not watts per second. Bounds both how fast the
+/// velocity-form law may ratchet its own accumulator and, doubling as
+/// anti-windup, how far that accumulator may run ahead of what the device
+/// last reported achieving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SlewLimit(u32);
+
+forward_display!(SlewLimit, u32);
+
+impl SlewLimit {
+    pub const fn new(watts: u32) -> Self {
+        SlewLimit(watts)
+    }
+
+    pub fn watts(self) -> Watts {
+        Watts(self.0.min(i32::MAX as u32) as i32)
+    }
+}
+
+/// The proportional gain `K` the velocity-form law scales its error term by,
+/// as percent (100 = unity). A role over a fraction, not a bare `f64`: mixing
+/// this with [`Percent`] (round-trip efficiency's unit) would silently change
+/// what a value here means. Clamped 0-200 on construction — a gain above 2x
+/// has no sound justification in this law and is far more likely a typo than
+/// an intended tuning, while a bare `u32` would let one through un-noticed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub struct Gain(u32);
+
+validating_deserialize!(Gain, u32, Gain::new);
+
+forward_display!(Gain, u32);
+
+impl Gain {
+    pub const fn new(percent: u32) -> Self {
+        if percent > 200 {
+            Gain(200)
+        } else {
+            Gain(percent)
+        }
+    }
+
+    /// Scales a raw error term by this gain, rounding to the nearest watt.
+    pub fn apply(self, watts: Watts) -> Watts {
+        Watts((f64::from(watts.get()) * f64::from(self.0) / 100.0).round() as i32)
     }
 }
 
@@ -641,10 +692,12 @@ impl<Tz: chrono::TimeZone> From<chrono::DateTime<Tz>> for Timestamp {
 pub struct Elapsed(i64);
 
 impl Elapsed {
-    /// A `Duration` as whole milliseconds. Config durations are seconds or
-    /// minutes, so the cast can't overflow.
+    /// A `Duration` as whole milliseconds, saturating. Config durations are
+    /// lenient and unbounded, and a wrapping cast turns an absurd window
+    /// negative — already elapsed, so every source reads `Down`. Saturating
+    /// keeps the failure on the side of a window that never closes.
     pub fn of(duration: Duration) -> Self {
-        Elapsed(duration.as_millis() as i64)
+        Elapsed(i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
     }
 
     pub fn as_secs_f64(self) -> f64 {
@@ -656,24 +709,28 @@ impl Elapsed {
     }
 }
 
+/// All three saturating, because `Elapsed::of` saturates: a cooldown stamp
+/// backdated by a saturated window is measured against every later `now`,
+/// and that span is past `i64::MAX` — a panic in a debug build, and in
+/// release a wrap to "not yet elapsed" that holds the cooldown forever.
 impl Sub for Timestamp {
     type Output = Elapsed;
     fn sub(self, rhs: Timestamp) -> Elapsed {
-        Elapsed(self.0 - rhs.0)
+        Elapsed(self.0.saturating_sub(rhs.0))
     }
 }
 
 impl Sub<Elapsed> for Timestamp {
     type Output = Timestamp;
     fn sub(self, rhs: Elapsed) -> Timestamp {
-        Timestamp(self.0 - rhs.0)
+        Timestamp(self.0.saturating_sub(rhs.0))
     }
 }
 
 impl Add<Elapsed> for Timestamp {
     type Output = Timestamp;
     fn add(self, rhs: Elapsed) -> Timestamp {
-        Timestamp(self.0 + rhs.0)
+        Timestamp(self.0.saturating_add(rhs.0))
     }
 }
 

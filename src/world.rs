@@ -11,7 +11,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::battery::BatteryState;
-use crate::units::{BatteryPower, GridPower, SolarPower, Watts, forward_display};
+use crate::units::{BatteryPower, GridPower, SolarPower, Timestamp, Watts, forward_display};
 
 /// One meter observation: signed net total plus each phase. `total` is the
 /// meter's own `total_act_power`, never re-summed from the phases — every
@@ -98,6 +98,24 @@ pub struct World {
     /// controller takes its "no decision this tick" path rather than panicking.
     /// `BTreeMap` because sorted key order keeps two recorded worlds diffable.
     devices: BTreeMap<DeviceId, Measurement>,
+    /// Beside the readings rather than inside them, so `devices` keeps the
+    /// shape every journalled `world_json` already has. Defaulted because
+    /// rows written before it have none.
+    #[serde(default)]
+    sampled_at: SampleTimes,
+}
+
+/// When each reading in a `World` was taken. The setpoint law adds a battery
+/// figure back onto a meter figure, which is only exact while both describe
+/// the same instant — so the gap between these is what a decision's
+/// stability turns on, and the one thing the tick's own clock cannot say.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+struct SampleTimes {
+    /// `None` for a meter event journalled before it carried its sample
+    /// time. Left unknown rather than borrowed from the tick: a guessed
+    /// instant would report exactly the alignment this exists to measure.
+    meter: Option<Timestamp>,
+    devices: BTreeMap<DeviceId, Timestamp>,
 }
 
 /// Hand-written for the same reason as `MeterReading`'s: `SolarPower` has no
@@ -110,6 +128,7 @@ impl Default for World {
             grid: MeterReading::ZERO,
             solar: SolarPower::ZERO,
             devices: BTreeMap::new(),
+            sampled_at: SampleTimes::default(),
         }
     }
 }
@@ -119,12 +138,24 @@ impl World {
         Self::default()
     }
 
-    pub fn observe_meter(&mut self, grid: MeterReading, solar: SolarPower) {
+    pub fn observe_meter(
+        &mut self,
+        sampled_at: Option<Timestamp>,
+        grid: MeterReading,
+        solar: SolarPower,
+    ) {
         self.grid = grid;
         self.solar = solar;
+        self.sampled_at.meter = sampled_at;
     }
 
-    pub fn observe_device(&mut self, id: DeviceId, measurement: Measurement) {
+    pub fn observe_device(
+        &mut self,
+        id: DeviceId,
+        sampled_at: Timestamp,
+        measurement: Measurement,
+    ) {
+        self.sampled_at.devices.insert(id.clone(), sampled_at);
         self.devices.insert(id, measurement);
     }
 
@@ -179,6 +210,7 @@ mod tests {
     fn sample_world() -> World {
         let mut world = World::new();
         world.observe_meter(
+            Some(Timestamp::from_millis(1_757_000_000_400)),
             MeterReading::new(
                 GridPower(150.5),
                 [GridPower(10.0), GridPower(-200.0), GridPower(340.5)],
@@ -187,6 +219,7 @@ mod tests {
         );
         world.observe_device(
             DeviceId::new("SN123"),
+            Timestamp::from_millis(1_757_000_001_900),
             Measurement::Battery(BatteryState {
                 soc: Soc::new(50),
                 max_discharge_power: PowerCap::new(800),
@@ -210,8 +243,23 @@ mod tests {
         let world = sample_world();
         assert_eq!(
             serde_json::to_string(&world).unwrap(),
-            r#"{"grid":{"total":150.5,"phases":[10.0,-200.0,340.5]},"solar":200.0,"devices":{"SN123":{"class":"battery","soc":50,"max_discharge_power":800,"max_charge_power":2400,"current_power":-300,"soc_calibrating":true,"soc_limit_reached":false,"fault":true}}}"#
+            r#"{"grid":{"total":150.5,"phases":[10.0,-200.0,340.5]},"solar":200.0,"devices":{"SN123":{"class":"battery","soc":50,"max_discharge_power":800,"max_charge_power":2400,"current_power":-300,"soc_calibrating":true,"soc_limit_reached":false,"fault":true}},"sampled_at":{"meter":1757000000400,"devices":{"SN123":1757000001900}}}"#
         );
+    }
+
+    /// The shape every row journalled before `sampled_at` existed. It must
+    /// still read, with every reading intact and every sample time unknown —
+    /// not a decode error that drops the row from a replay.
+    #[test]
+    fn a_world_journalled_without_sample_times_still_reads() {
+        let world: World = serde_json::from_str(
+            r#"{"grid":{"total":150.5,"phases":[10.0,-200.0,340.5]},"solar":200.0,"devices":{"SN123":{"class":"battery","soc":50,"max_discharge_power":800,"max_charge_power":2400,"current_power":-300,"soc_calibrating":true,"soc_limit_reached":false,"fault":true}}}"#,
+        )
+        .unwrap();
+
+        let mut expected = sample_world();
+        expected.sampled_at = SampleTimes::default();
+        assert_eq!(world, expected);
     }
 
     /// A battery otherwise identical to `sample_world`'s, distinguished only by
@@ -242,6 +290,7 @@ mod tests {
         let mut world = World::new();
         world.observe_device(
             DeviceId::new("SN1"),
+            Timestamp::from_millis(0),
             Measurement::Battery(battery_with_power(BatteryPower(-450))),
         );
         assert_eq!(world.battery_flow(), BatteryPower(-450));
@@ -255,14 +304,17 @@ mod tests {
         let mut world = World::new();
         world.observe_device(
             DeviceId::new("SN1"),
+            Timestamp::from_millis(0),
             Measurement::Battery(battery_with_power(BatteryPower(-300))),
         );
         world.observe_device(
             DeviceId::new("SN2"),
+            Timestamp::from_millis(0),
             Measurement::Battery(battery_with_power(BatteryPower(500))),
         );
         world.observe_device(
             DeviceId::new("SN3"),
+            Timestamp::from_millis(0),
             Measurement::Battery(battery_with_power(BatteryPower(-150))),
         );
         assert_eq!(world.battery_flow(), BatteryPower(50));
@@ -275,19 +327,23 @@ mod tests {
     fn underlying_grid_sums_meter_and_every_batterys_flow() {
         let mut world = World::new();
         world.observe_meter(
+            None,
             MeterReading::total_only(GridPower(1000.0)),
             SolarPower::ZERO,
         );
         world.observe_device(
             DeviceId::new("SN1"),
+            Timestamp::from_millis(0),
             Measurement::Battery(battery_with_power(BatteryPower(-300))),
         );
         world.observe_device(
             DeviceId::new("SN2"),
+            Timestamp::from_millis(0),
             Measurement::Battery(battery_with_power(BatteryPower(200))),
         );
         world.observe_device(
             DeviceId::new("SN3"),
+            Timestamp::from_millis(0),
             Measurement::Battery(battery_with_power(BatteryPower(150))),
         );
 
@@ -300,11 +356,13 @@ mod tests {
     fn home_usage_adds_solar_and_battery_flow_back_onto_the_meter() {
         let mut world = World::new();
         world.observe_meter(
+            None,
             MeterReading::total_only(GridPower(1000.0)),
             SolarPower::new(200.0),
         );
         world.observe_device(
             DeviceId::new("SN1"),
+            Timestamp::from_millis(0),
             Measurement::Battery(battery_with_power(BatteryPower(300))),
         );
         assert_eq!(world.home_usage(), Watts(1500));
@@ -316,9 +374,14 @@ mod tests {
     #[test]
     fn home_usage_is_positive_when_the_battery_covers_the_whole_house() {
         let mut world = World::new();
-        world.observe_meter(MeterReading::total_only(GridPower::ZERO), SolarPower::ZERO);
+        world.observe_meter(
+            None,
+            MeterReading::total_only(GridPower::ZERO),
+            SolarPower::ZERO,
+        );
         world.observe_device(
             DeviceId::new("SN1"),
+            Timestamp::from_millis(0),
             Measurement::Battery(battery_with_power(BatteryPower(800))),
         );
         assert_eq!(world.home_usage(), Watts(800));
@@ -330,11 +393,13 @@ mod tests {
     fn home_usage_excludes_what_the_battery_is_charging() {
         let mut world = World::new();
         world.observe_meter(
+            None,
             MeterReading::total_only(GridPower(1500.0)),
             SolarPower::ZERO,
         );
         world.observe_device(
             DeviceId::new("SN1"),
+            Timestamp::from_millis(0),
             Measurement::Battery(battery_with_power(BatteryPower(-1000))),
         );
         assert_eq!(world.home_usage(), Watts(500));
@@ -346,11 +411,13 @@ mod tests {
     fn home_usage_while_exporting_is_solar_minus_the_export() {
         let mut world = World::new();
         world.observe_meter(
+            None,
             MeterReading::total_only(GridPower(-1200.0)),
             SolarPower::new(2000.0),
         );
         world.observe_device(
             DeviceId::new("SN1"),
+            Timestamp::from_millis(0),
             Measurement::Battery(battery_with_power(BatteryPower::ZERO)),
         );
         assert_eq!(world.home_usage(), Watts(800));
@@ -367,11 +434,13 @@ mod tests {
                     let total = f64::from(load) - solar - f64::from(flow);
                     let mut world = World::new();
                     world.observe_meter(
+                        None,
                         MeterReading::total_only(GridPower(total)),
                         SolarPower::new(solar),
                     );
                     world.observe_device(
                         DeviceId::new("SN1"),
+                        Timestamp::from_millis(0),
                         Measurement::Battery(battery_with_power(BatteryPower(flow))),
                     );
                     assert_eq!(
@@ -398,14 +467,17 @@ mod tests {
         let mut world = World::new();
         world.observe_device(
             DeviceId::new("battery-c"),
+            Timestamp::from_millis(0),
             Measurement::Battery(battery_with_power(BatteryPower(300))),
         );
         world.observe_device(
             DeviceId::new("battery-a"),
+            Timestamp::from_millis(0),
             Measurement::Battery(battery_with_power(BatteryPower(-100))),
         );
         world.observe_device(
             DeviceId::new("battery-b"),
+            Timestamp::from_millis(0),
             Measurement::Battery(battery_with_power(BatteryPower(200))),
         );
 
