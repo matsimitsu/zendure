@@ -21,7 +21,7 @@ use crate::models::ControlDecision;
 use crate::mqtt::{self, MqttPublisher, PublisherTask};
 use crate::prediction;
 use crate::publish::{NullPublisher, Publisher};
-use crate::registry::{self, Devices};
+use crate::registry::{self, Battery, Devices};
 use crate::scan::{self, Delivery, Failures, Inbox, TickSeq};
 use crate::source::{self, MeterSample};
 use crate::units::{Soc, Timestamp, WattHours};
@@ -506,6 +506,18 @@ pub async fn run(
         e.error
     })?;
     journal.capture(reading.raw.as_ref());
+
+    // The device's own charge ceiling, from `[tuning] max_soc` — see
+    // `write_soc_set`: `prepare()`'s cap write is the model's rated limits,
+    // this is the operator's own choice, which only `run.rs` has (a
+    // `BatteryMonitor` doesn't take config, and a virtual/simulated device
+    // has no such device-side concept at all). Best-effort, the same policy
+    // `write_power_caps` follows.
+    if let Battery::Zendure(client) = primary
+        && let Err(e) = client.write_soc_set(config.max_soc).await
+    {
+        tracing::warn!("Failed to write socSet at startup: {e}");
+    }
 
     let BatteryReading {
         state: battery_state,
