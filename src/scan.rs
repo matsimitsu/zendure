@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use chrono_tz::Tz;
 use tokio::sync::watch;
+use tokio::time::Instant;
 
 use crate::backpressure;
 use crate::clock::Clock;
@@ -25,7 +26,6 @@ use crate::device::{BatteryReading, PollError, RawCapture};
 use crate::journal::Journal;
 use crate::source::MeterSample;
 use crate::sync::guard;
-use crate::units::{Elapsed, Timestamp};
 use crate::world::DeviceId;
 
 /// What [`request_timeout`] derives within: the floor keeps a request from
@@ -122,38 +122,47 @@ impl<T> Delivery<T> {
     }
 }
 
-/// What one source has most recently produced, and its standing.
+/// What one source has most recently produced, and its standing. Ages on
+/// [`Instant`], a monotonic clock — never on the [`Clock`] stamped on each
+/// delivery, which is wall-clock and journalled. An NTP step moves the
+/// latter without moving the former, so a jump can neither idle a healthy
+/// source nor keep a dead one looking alive until the wall clock catches up.
 pub struct Slot<T> {
     state: Mutex<SlotState<T>>,
-    blind_window: Elapsed,
+    blind_window: Duration,
 }
 
 struct SlotState<T> {
     pending: Option<(TickSeq, Clock, T)>,
     failures: Failures,
-    /// The last good sample, or the inbox's opening instant while there has
-    /// been none — so a source that never comes up still ages out.
-    last_good: Timestamp,
+    /// The last good sample's monotonic instant, or the inbox's opening
+    /// instant while there has been none — so a source that never comes up
+    /// still ages out.
+    last_good: Instant,
 }
 
 impl<T> Slot<T> {
-    fn new(blind_window: Duration, opened_at: Timestamp) -> Self {
+    fn new(blind_window: Duration, opened_at: Instant) -> Self {
         Slot {
             state: Mutex::new(SlotState {
                 pending: None,
                 failures: Failures(0),
                 last_good: opened_at,
             }),
-            blind_window: Elapsed::of(blind_window),
+            blind_window,
         }
     }
 
     /// Returns what the source had failed consecutively before this sample,
-    /// which is the one count an operator is ever told.
-    fn deliver(&self, round: TickSeq, at: Clock, reading: T) -> Failures {
+    /// which is the one count an operator is ever told. `at` is the wall
+    /// clock this delivery is journalled with; `now` is the monotonic
+    /// instant it landed at, which is what staleness is measured against —
+    /// the two are captured together at the edge (`sample_loop`) and diverge
+    /// only when the wall clock has just stepped.
+    fn deliver(&self, round: TickSeq, at: Clock, now: Instant, reading: T) -> Failures {
         let mut state = guard(&self.state);
         state.pending = Some((round, at, reading));
-        state.last_good = at.now;
+        state.last_good = now;
         std::mem::replace(&mut state.failures, Failures(0))
     }
 
@@ -167,13 +176,14 @@ impl<T> Slot<T> {
     /// and only once: one taken for an earlier round would date the decision's
     /// inputs differently from each other, and `RteTracker::record` integrates
     /// between calls, so re-recording one counts the same joules twice.
-    pub fn take(&self, round: TickSeq, now: Timestamp) -> Delivery<T> {
+    pub fn take(&self, round: TickSeq, now: Instant) -> Delivery<T> {
         let mut state = guard(&self.state);
 
         // Age, not a failure count: a source that hangs never reports a
         // failure, so a count would stay at zero through an outage of any
-        // length.
-        if now - state.last_good > self.blind_window {
+        // length. `now` is monotonic, so this is blind to whatever the wall
+        // clock is doing.
+        if now.duration_since(state.last_good) > self.blind_window {
             return Delivery::Down(state.failures);
         }
 
@@ -195,7 +205,7 @@ impl Inbox {
     /// slot has read every box it is about to command.
     pub fn new(
         devices: impl IntoIterator<Item = DeviceId>,
-        opened_at: Timestamp,
+        opened_at: Instant,
         blind_window: Duration,
     ) -> Self {
         Inbox {
@@ -215,7 +225,7 @@ impl Inbox {
         self.devices.get(id).cloned()
     }
 
-    pub fn take_meter(&self, round: TickSeq, now: Timestamp) -> Delivery<MeterSample> {
+    pub fn take_meter(&self, round: TickSeq, now: Instant) -> Delivery<MeterSample> {
         self.meter.take(round, now)
     }
 
@@ -224,7 +234,7 @@ impl Inbox {
     pub fn take_devices(
         &self,
         round: TickSeq,
-        now: Timestamp,
+        now: Instant,
     ) -> Vec<(DeviceId, Delivery<BatteryReading>)> {
         self.devices
             .iter()
@@ -251,7 +261,8 @@ pub async fn sample_loop<S: Sampler>(
         match source.sample().await {
             Ok(reading) => {
                 journal.capture(reading.raw());
-                if slot.deliver(round, Clock::now(timezone), reading) > Failures(0) {
+                if slot.deliver(round, Clock::now(timezone), Instant::now(), reading) > Failures(0)
+                {
                     tracing::info!("{} is answering again", source.id());
                 }
             }
