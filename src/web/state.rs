@@ -13,7 +13,7 @@ use crate::engine::EngineState;
 use crate::journal::read::read_recent_decisions;
 use crate::models::ControlDecision;
 use crate::units::{
-    GridPower, KiloWattHours, Percent, SolarForecastPoint, SolarPower, Timestamp, Watts,
+    GridPower, KiloWattHours, Percent, Soc, SolarForecastPoint, SolarPower, Timestamp, Watts,
 };
 
 /// Solcast's own resolution (see `SolcastEntry`'s doc comment in
@@ -120,7 +120,9 @@ impl<T: Plottable> Sparkline<T> {
 }
 
 /// One ring buffer per stat card that has real data, each carrying the
-/// quantity its card reads. EV has no real source and carries no history.
+/// quantity its card reads. The EV card's reading (`DashboardState::car_soc`)
+/// carries no history — one poll every ~15 minutes is too sparse a
+/// sparkline to say anything, unlike the meter-cadence readings below.
 
 #[derive(Debug, Clone, Default)]
 pub struct SparklineHistory {
@@ -235,6 +237,12 @@ pub struct DashboardState {
     /// The forecast poller's latest cached series — see `crate::prediction`.
     /// Updated only by `forecast_tick`, on that poller's own schedule.
     pub forecast: ForecastSnapshot,
+    /// The car's last-known state of charge and when it was read — see
+    /// `crate::car_battery`. `None` until `[car_battery]` is configured and
+    /// its first successful poll lands; updated only by `car_soc_tick`, on
+    /// that poller's own schedule. A failed poll leaves this as it was, so
+    /// its age (not a fallback value) is what tells a viewer it's stale.
+    pub car_soc: Option<(Soc, Timestamp)>,
     pub as_of: Timestamp,
 }
 
@@ -266,6 +274,7 @@ impl DashboardState {
             sparklines: SparklineHistory::default(),
             actual_solar,
             forecast: ForecastSnapshot::default(),
+            car_soc: None,
             as_of,
         };
         for (at, decision) in history {
@@ -307,6 +316,14 @@ impl DashboardState {
     /// independent of every event the engine folds.
     pub fn forecast_tick(&mut self, forecast: ForecastSnapshot) {
         self.forecast = forecast;
+    }
+
+    /// The car-battery poller's own tick — same posture as `forecast_tick`:
+    /// not folded through `refresh`, updates on its own schedule
+    /// (see `crate::car_battery::run_car_battery_poller`), independent of
+    /// every event the engine folds.
+    pub fn car_soc_tick(&mut self, soc: Soc, at: Timestamp) {
+        self.car_soc = Some((soc, at));
     }
 
     /// A device poll: SOC, RTE and pack figures move here and nowhere else.

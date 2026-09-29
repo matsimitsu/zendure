@@ -485,6 +485,12 @@ The controller publishes MQTT discovery config automatically. These sensors appe
 - `Zendure Controller Battery Daily Mode Transitions` — charge/discharge/idle transitions today
 - `Zendure Controller Battery Daily Cooldown Suppressions` — suppressed rapid toggles today
 
+When `[car_battery]` is configured (see Dashboard, below), one more sensor is
+published, under its own HA device ("Car Battery (via Zendure Controller)")
+rather than "Zendure Controller" — it describes the car, not the stationary
+battery:
+- `Car Battery State of Charge` — the car's own SoC (%)
+
 **Binary sensors:**
 - `Zendure Controller Battery SOC Calibrating` — ON when SOC calibration is in progress
 
@@ -515,9 +521,9 @@ it. A quiet Idle stretch decides the same thing every few seconds, and without
 this it would fill all twenty rows in under two minutes and push out everything
 worth reading. The mode badge still follows every decision, collapsed or not.
 
-The EV card is a static placeholder: it has no real data source in this
-controller yet, and renders fixed sample content rather than pretending to
-be live.
+The EV card shows the car's own battery state of charge when `[car_battery]`
+is configured — see below — and a "No vehicle configured" placeholder
+otherwise.
 
 The forecast panel shows real solar predictions when `[prediction]` is
 configured — 48 half-hourly bars (Solcast's own resolution) for the
@@ -541,6 +547,22 @@ draws a synthetic clear-sky curve instead, with no network call and no daily
 quota, for local testing. No `[prediction]` table means no poller runs at
 all — the same rule `[mqtt]`/`[web]` follow — and the panel renders an empty
 state. The poller only ever feeds the dashboard: nothing here reaches
+`src/controller.rs`.
+
+The EV card shows a car's battery state of charge when `[car_battery]` is
+configured. `kind = "vw_portal"` reads it from the VW Group EU Data Act
+portal (`eu-data-act.drivesomethinggreater.com`) — the same subscription the
+official VW/Cupra app can enable, and independent of any Home Assistant
+integration for it. Requires `email`, `password` (a VW account with the
+subscription active) and `vin` (found in the car's own app or registration
+document — not auto-discovered, since this integration skips the portal's
+vehicle-listing endpoint entirely). `country`/`language` default to `"de"`;
+`poll_interval_secs` defaults to 900 (15 minutes), matching the portal's own
+delivery cadence — polling faster only re-downloads the same snapshot.
+`kind = "simulated"` draws a slowly drifting SoC instead, with no VW account
+needed, for local testing. No `[car_battery]` table means no poller runs at
+all and the EV card stays a placeholder. Like `[prediction]`, this only ever
+feeds the dashboard and Home Assistant (see below): nothing here reaches
 `src/controller.rs`.
 
 ## Releasing

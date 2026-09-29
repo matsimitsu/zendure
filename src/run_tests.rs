@@ -115,6 +115,7 @@ fn virtual_config(dir: &tempfile::TempDir, capacity: WattHours) -> Config {
         },
         web: None,
         prediction: None,
+        car_battery: None,
         ha_publish_prefix: "test".to_string(),
         charge_margin: PowerMargin::new(50),
         discharge_margin: PowerMargin::new(5),

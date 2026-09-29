@@ -78,6 +78,16 @@ publish_prefix = "zendure"
 # state_path = "/var/lib/zendure/prediction_state.json"
 # poll_times = ["06:00", "09:30", "12:30", "15:30", "18:30"]
 
+# The EV dashboard card and Home Assistant sensor. See README.md.
+# [car_battery]
+# kind = "vw_portal"
+# email = "…"                                       # required, VW account with the portal subscription active
+# password = "…"                                    # required
+# vin = "WVWZZZ…"                                    # required — not auto-discovered
+# country = "de"
+# language = "de"
+# poll_interval_secs = 900
+
 [clock]
 # IANA name. Cycle counting and the balance weekday are reckoned in it.
 timezone = "Europe/Amsterdam"

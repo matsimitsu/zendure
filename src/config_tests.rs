@@ -31,6 +31,7 @@ fn config() -> Config {
         meter: MeterConfig::Shelly,
         web: None,
         prediction: None,
+        car_battery: None,
         ha_publish_prefix: "SECRET-PREFIX".to_string(),
         charge_margin: PowerMargin::new(50),
         discharge_margin: PowerMargin::new(5),
@@ -588,8 +589,8 @@ fn the_tuning_table_has_exactly_the_session_config_keys() {
     assert_eq!(toml_keys, session_keys);
 }
 
-/// Production's values, pinned as an explicit `Config` literal (all thirty
-/// fields, in full) rather than a helper that would hide which value belongs
+/// Production's values, pinned as an explicit `Config` literal (every
+/// field, in full) rather than a helper that would hide which value belongs
 /// to which field. If this ever disagrees with `config.example.toml`, the example file
 /// is wrong: it is the record of what production runs, not the other way around.
 #[test]
@@ -614,6 +615,7 @@ fn the_example_config_is_what_production_runs() {
         meter: MeterConfig::Shelly,
         web: None,
         prediction: None,
+        car_battery: None,
         ha_publish_prefix: "zendure".to_string(),
         charge_margin: PowerMargin::new(50),
         discharge_margin: PowerMargin::new(5),

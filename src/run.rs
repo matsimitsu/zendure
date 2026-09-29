@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use crate::allocate::Directive;
 use crate::announce::Announcer;
+use crate::car_battery;
 use crate::clock::Clock;
 use crate::config::Config;
 use crate::device::{Applied, BatteryMonitor, BatteryReading, ControlPath};
@@ -689,6 +690,34 @@ pub async fn run(
         }));
     }
 
+    // The car-battery poller: same independent-of-`Event`/`Engine::step`
+    // posture as the forecast poller, but gated only on `[car_battery]`
+    // being configured, not also on a dashboard — publishing to Home
+    // Assistant is useful with `[web]` absent, unlike the forecast poller
+    // which is dashboard-only.
+    let (car_battery_stop_tx, car_battery_stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut car_battery_task: Option<tokio::task::JoinHandle<()>> = None;
+    if let Some(car_cfg) = &config.car_battery {
+        let source = car_battery::from_config(car_cfg);
+        let poll_interval = car_cfg.poll_interval();
+        let dashboard_tx = dashboard_tx.clone();
+        let publisher = publisher.clone();
+        let announcer = announcer.clone();
+        let ha_publish_prefix = config.ha_publish_prefix.clone();
+        car_battery_task = Some(tokio::spawn(async move {
+            car_battery::run_car_battery_poller(
+                source,
+                poll_interval,
+                dashboard_tx,
+                publisher,
+                announcer,
+                ha_publish_prefix,
+                car_battery_stop_rx,
+            )
+            .await;
+        }));
+    }
+
     let tick = config.device.poll_interval();
 
     let meter = Arc::new(source::from_config(&config, &devices));
@@ -836,6 +865,7 @@ pub async fn run(
     // hold `with_graceful_shutdown` to the deadline below.
     let _ = web_stop_tx.send(());
     let _ = forecast_stop_tx.send(());
+    let _ = car_battery_stop_tx.send(());
     drop(dashboard_tx);
 
     shut_down(
@@ -878,6 +908,21 @@ pub async fn run(
         handle.abort();
         tracing::warn!(
             "Forecast poller did not stop within {}s — aborted",
+            DRAIN_DEADLINE.as_secs(),
+        );
+    }
+
+    // No careful drain sequence needed, same reason as the forecast poller:
+    // nothing here queues state that an abort would lose — a failed poll
+    // just logs and leaves the dashboard's last reading as it was.
+    if let Some(mut handle) = car_battery_task
+        && tokio::time::timeout(DRAIN_DEADLINE, &mut handle)
+            .await
+            .is_err()
+    {
+        handle.abort();
+        tracing::warn!(
+            "Car battery poller did not stop within {}s — aborted",
             DRAIN_DEADLINE.as_secs(),
         );
     }

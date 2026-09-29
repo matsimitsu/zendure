@@ -477,3 +477,31 @@ fn the_home_card_reports_the_houses_own_draw() {
     assert_eq!(view.stat_cards[1].label, "Home usage");
     assert_eq!(view.stat_cards[1].value, "1,750");
 }
+
+/// No `[car_battery]` configured and no poll yet look identical from the
+/// view layer — both are `car_soc: None` — and render the same placeholder.
+#[test]
+fn the_ev_card_placeholders_with_no_reading_yet() {
+    let s = state(vec![]);
+    let view = dashboard_view(&s, tz());
+
+    assert_eq!(view.stat_cards[3].variant, "ev");
+    assert_eq!(view.stat_cards[3].value, "--");
+    assert_eq!(view.stat_cards[3].detail, "No vehicle configured");
+}
+
+/// Once the car-battery poller has landed a reading, the card shows the
+/// real percent and when it was read.
+#[test]
+fn the_ev_card_reports_the_last_polled_soc() {
+    let mut s = state(vec![]);
+    s.car_soc_tick(crate::units::Soc::new(62), at(300));
+    let view = dashboard_view(&s, tz());
+
+    assert_eq!(view.stat_cards[3].value, "62");
+    assert!(
+        view.stat_cards[3].detail.starts_with("Updated "),
+        "detail was {:?}",
+        view.stat_cards[3].detail
+    );
+}

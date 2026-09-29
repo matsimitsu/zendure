@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 rumqttc = "0.24"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
@@ -28,6 +28,13 @@ rust-embed = { version = "8", features = ["interpolate-folder-path"] }
 tokio-stream = { version = "0.1.19", features = ["sync"] }
 mime_guess = "2"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# Pure-Rust deflate only (no C dependency), to stay consistent with the static
+# musl release build — see the `rusqlite`/`toml` comments above.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# Pure Rust, no build script. Used only for the small amount of HTML/JS
+# scraping the VW portal's login flow needs (form fields, the templateModel
+# JSON blob, the csrf token) — see `src/car_battery/vw_portal.rs`.
+regex = "1"
 
 [dev-dependencies]
 tempfile = "3"

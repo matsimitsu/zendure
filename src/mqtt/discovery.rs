@@ -158,6 +158,25 @@ const SENSORS: &[Sensor] = &[
 /// constant rather than a row in the table above.
 const SOC_CALIBRATING: &str = "soc_calibrating";
 
+/// The car's own HA device — separate from `ha_device()`'s "Zendure
+/// Controller", since this reading describes a different physical thing
+/// (the car, via `crate::car_battery`) that happens to be announced over the
+/// same MQTT connection.
+fn car_ha_device() -> serde_json::Value {
+    serde_json::json!({
+        "identifiers": ["zendure_car_battery"],
+        "name": "Car Battery (via Zendure Controller)",
+        "manufacturer": "Volkswagen",
+    })
+}
+
+const CAR_BATTERY_SOC: Sensor = Sensor::new(
+    "car_battery_soc",
+    "Car Battery State of Charge",
+    "%",
+    Some("battery"),
+);
+
 pub fn publish_ha_discovery(publisher: &dyn Publisher, announcer: &Announcer, prefix: &str) {
     for sensor in SENSORS {
         announcer.announce(publisher, sensor.id, || sensor.discovery(prefix));
@@ -313,6 +332,41 @@ pub fn publish_temperatures(
     }
 }
 
+/// Announced (once per connection — `Announcer::announce` is idempotent)
+/// and published together, from the car-battery poller's own schedule
+/// (`crate::car_battery::run_car_battery_poller`) rather than from
+/// `publish_ha_discovery`'s on-connect table: that poller runs independently
+/// of the main decision loop's ConnAck-triggered announce cycle, the same
+/// reason `publish_temperatures` announces per-pack sensors from here rather
+/// than the static list.
+pub fn publish_car_battery_soc(
+    publisher: &dyn Publisher,
+    announcer: &Announcer,
+    prefix: &str,
+    soc: Soc,
+) {
+    announcer.announce(publisher, CAR_BATTERY_SOC.id, || {
+        let config = serde_json::json!({
+            "name": CAR_BATTERY_SOC.name,
+            "state_topic": format!("{prefix}/{}", CAR_BATTERY_SOC.id),
+            "unique_id": format!("zendure_{}", CAR_BATTERY_SOC.id),
+            "device": car_ha_device(),
+            "unit_of_measurement": CAR_BATTERY_SOC.unit,
+            "device_class": "battery",
+            "state_class": "measurement",
+        });
+        Message::discovery(
+            format!("homeassistant/sensor/zendure_{}/config", CAR_BATTERY_SOC.id),
+            config.to_string(),
+        )
+    });
+    publish_values(
+        publisher,
+        prefix,
+        vec![(CAR_BATTERY_SOC.id, soc.to_string())],
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,6 +458,45 @@ mod tests {
         let p = RecordingPublisher::new();
         publish_battery_soc(&p, "zendure", Soc::new(81));
         assert_eq!(p.payload("zendure/battery_soc").unwrap(), "81");
+    }
+
+    #[test]
+    fn car_battery_soc_announces_under_its_own_device_and_publishes_the_value() {
+        let p = RecordingPublisher::new();
+        let announcer = Announcer::new();
+        publish_car_battery_soc(&p, &announcer, "zendure", Soc::new(62));
+
+        assert_eq!(p.payload("zendure/car_battery_soc").unwrap(), "62");
+
+        let sent = p.sent();
+        let doc = sent
+            .iter()
+            .find(|m| m.topic == "homeassistant/sensor/zendure_car_battery_soc/config")
+            .expect("the car battery SOC sensor is announced");
+        let config: serde_json::Value = serde_json::from_str(&doc.payload).unwrap();
+        assert_eq!(config["state_topic"], "zendure/car_battery_soc");
+        assert_eq!(
+            config["device"]["identifiers"][0], "zendure_car_battery",
+            "the car is a separate HA device from the stationary battery",
+        );
+    }
+
+    #[test]
+    fn car_battery_soc_is_announced_once_per_connection() {
+        let p = RecordingPublisher::new();
+        let announcer = Announcer::new();
+        publish_car_battery_soc(&p, &announcer, "zendure", Soc::new(62));
+        publish_car_battery_soc(&p, &announcer, "zendure", Soc::new(63));
+
+        let discovery_docs = p
+            .sent()
+            .iter()
+            .filter(|m| m.topic.starts_with("homeassistant/"))
+            .count();
+        assert_eq!(
+            discovery_docs, 1,
+            "the second call re-offers, not re-announces"
+        );
     }
 
     /// A binary sensor, so the payload is HA's `ON`/`OFF`, not `true`/`false`.

@@ -28,6 +28,11 @@ pub const DEFAULT_JOURNAL_PATH: &str = "/var/lib/zendure/journal.db";
 /// silently rebuild it from scratch every restart.
 pub const DEFAULT_RTE_STATE_PATH: &str = "/var/lib/zendure/rte_state.json";
 
+/// Matches the VW EU Data Act portal's own delivery cadence (a fresh ZIP
+/// roughly every 15 minutes) — polling faster would only ever re-download
+/// the same snapshot.
+const DEFAULT_CAR_BATTERY_POLL_INTERVAL_SECS: u64 = 15 * 60;
+
 /// Where the forecast poller's daily budget and last cached series are
 /// persisted. Same reasoning as `DEFAULT_RTE_STATE_PATH`: not `/tmp`, so a
 /// restart mid-day does not forget which anchors already fired today.
@@ -420,6 +425,66 @@ impl PredictionConfig {
     }
 }
 
+/// `[car_battery]`, present or not — same presence-gates-the-feature rule
+/// `[mqtt]`/`[web]`/`[prediction]` already follow: no table means no
+/// car-battery poller runs and the dashboard's EV card stays a placeholder.
+/// `kind` selects the backend the same way `prediction.kind` does.
+#[derive(Clone, PartialEq)]
+pub enum CarBatteryConfig {
+    VwPortal {
+        email: String,
+        password: String,
+        /// Required rather than auto-discovered from the account: this
+        /// integration skips the portal's vehicle-listing/relation endpoints
+        /// entirely, since the user already knows their one VIN.
+        vin: String,
+        country: String,
+        language: String,
+        poll_interval: Duration,
+    },
+    Simulated {
+        poll_interval: Duration,
+    },
+}
+
+/// Hand-written for the reason `PredictionConfig`'s own `Debug` is: a derived
+/// one would print `password` (and `email`, an account identifier) in plain
+/// text, and `--check` exists precisely to print a `Config` on the terminal.
+impl std::fmt::Debug for CarBatteryConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CarBatteryConfig::VwPortal {
+                vin,
+                country,
+                language,
+                poll_interval,
+                ..
+            } => f
+                .debug_struct("VwPortal")
+                .field("email", &"<redacted>")
+                .field("password", &"<redacted>")
+                .field("vin", vin)
+                .field("country", country)
+                .field("language", language)
+                .field("poll_interval", poll_interval)
+                .finish(),
+            CarBatteryConfig::Simulated { poll_interval } => f
+                .debug_struct("Simulated")
+                .field("poll_interval", poll_interval)
+                .finish(),
+        }
+    }
+}
+
+impl CarBatteryConfig {
+    pub fn poll_interval(&self) -> Duration {
+        match self {
+            CarBatteryConfig::VwPortal { poll_interval, .. } => *poll_interval,
+            CarBatteryConfig::Simulated { poll_interval } => *poll_interval,
+        }
+    }
+}
+
 /// Which meter feeds the engine its grid readings. Defaults to `Shelly`,
 /// selected by leaving `[meter]` out. `Synthetic` lets a laptop with no
 /// broker feed the engine — see `source::synthetic` for why the battery's own flow must
@@ -745,6 +810,9 @@ pub struct Config {
     /// `None` when `[prediction]` is absent — no forecast poller runs, and
     /// the dashboard's forecast panel renders its empty state.
     pub prediction: Option<PredictionConfig>,
+    /// `None` when `[car_battery]` is absent — no car-battery poller runs,
+    /// and the dashboard's EV card stays a placeholder.
+    pub car_battery: Option<CarBatteryConfig>,
     pub ha_publish_prefix: String,
     /// Safety margin subtracted from charge power to avoid grid import
     pub charge_margin: PowerMargin,
@@ -818,6 +886,7 @@ impl std::fmt::Debug for Config {
             .field("meter", &self.meter)
             .field("web", &self.web)
             .field("prediction", &self.prediction)
+            .field("car_battery", &self.car_battery)
             .field("ha_publish_prefix", &self.ha_publish_prefix)
             .field("charge_margin", &self.charge_margin)
             .field("discharge_margin", &self.discharge_margin)
@@ -945,6 +1014,7 @@ impl Config {
             meter: _,
             web: _,
             prediction: _,
+            car_battery: _,
             ha_publish_prefix: _,
             journal_path: _,
             journal_retention_days: _,
@@ -1132,6 +1202,33 @@ impl Config {
             None
         };
 
+        // Same presence-gates-the-feature rule as `[prediction]`.
+        let car_battery = if taker.has_table("car_battery")? {
+            let kind = taker.required::<String>("car_battery.kind")?;
+            let poll_interval = Duration::from_secs(taker.lenient::<u64>(
+                "car_battery.poll_interval_secs",
+                DEFAULT_CAR_BATTERY_POLL_INTERVAL_SECS,
+            )?);
+            Some(match kind.as_str() {
+                "vw_portal" => CarBatteryConfig::VwPortal {
+                    email: taker.required::<String>("car_battery.email")?,
+                    password: taker.required::<String>("car_battery.password")?,
+                    vin: taker.required::<String>("car_battery.vin")?,
+                    country: taker.lenient::<String>("car_battery.country", "de".to_string())?,
+                    language: taker.lenient::<String>("car_battery.language", "de".to_string())?,
+                    poll_interval,
+                },
+                "simulated" => CarBatteryConfig::Simulated { poll_interval },
+                other => {
+                    return Err(format!(
+                        "car_battery.kind must be \"vw_portal\" or \"simulated\", found {other:?}"
+                    ));
+                }
+            })
+        } else {
+            None
+        };
+
         let ha_publish_prefix =
             taker.lenient::<String>("homeassistant.publish_prefix", "zendure".to_string())?;
 
@@ -1200,6 +1297,7 @@ impl Config {
                 meter,
                 web,
                 prediction,
+                car_battery,
                 ha_publish_prefix,
                 charge_margin,
                 discharge_margin,

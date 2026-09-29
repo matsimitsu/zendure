@@ -3,6 +3,7 @@ mod analyze;
 mod announce;
 mod backpressure;
 mod battery;
+mod car_battery;
 mod cli;
 mod clock;
 mod command;

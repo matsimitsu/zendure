@@ -3,7 +3,7 @@
 //! strings, never a `Watts` or a `Soc`.
 
 use crate::models::ControlMode;
-use crate::units::{Elapsed, KiloWattHours, Percent, SolarForecastPoint, Timestamp, Watts};
+use crate::units::{Elapsed, KiloWattHours, Percent, Soc, SolarForecastPoint, Timestamp, Watts};
 
 use super::state::{
     ActualSolarHistory, DashboardState, ForecastSnapshot, Plottable, SOLAR_BUCKET_MS,
@@ -194,17 +194,30 @@ fn panel_badge(mode: Option<ControlMode>) -> (&'static str, &'static str) {
     }
 }
 
-/// A zero-parameter placeholder: the EV card has no real integration, and a
-/// function that cannot read `DashboardState` cannot accidentally regress
-/// into pretending it does.
-fn ev_stat_card_placeholder() -> StatCardView {
+/// The EV card: the car's last-known state of charge (`crate::car_battery`),
+/// or the placeholder text `[car_battery]` not being configured, or no
+/// successful poll yet, look identical from here — both are `car_soc: None`.
+/// No sparkline: one poll every ~15 minutes is too sparse to plot, per
+/// `SparklineHistory`'s own doc comment.
+fn ev_stat_card_view(
+    car_soc: Option<(Soc, Timestamp)>,
+    now: Timestamp,
+    timezone: chrono_tz::Tz,
+) -> StatCardView {
+    let (value, detail) = match car_soc {
+        Some((soc, at)) => (
+            soc.to_string(),
+            format!("Updated {}", format_log_time(at, now, timezone)),
+        ),
+        None => ("--".to_string(), "No vehicle configured".to_string()),
+    };
     StatCardView {
         variant: "ev",
         glyph: "⛽",
-        label: "EV (sample data)",
-        value: "42".to_string(),
+        label: "Car Battery",
+        value,
         unit: "%",
-        detail: "Sample data — no vehicle integration".to_string(),
+        detail,
         sparkline_path: String::new(),
     }
 }
@@ -495,7 +508,12 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
                 format_time(state.as_of, timezone)
             ),
         },
-        stat_cards: [solar, home, grid, ev_stat_card_placeholder()],
+        stat_cards: [
+            solar,
+            home,
+            grid,
+            ev_stat_card_view(state.car_soc, state.as_of, timezone),
+        ],
         battery,
         decision_log,
         forecast: forecast_panel_view(&state.forecast, &state.actual_solar, state.as_of, timezone),
