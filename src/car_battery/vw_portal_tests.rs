@@ -165,6 +165,34 @@ fn login_fields_merges_html_inputs_with_the_template_model() {
 }
 
 #[test]
+fn resolve_post_action_joins_against_the_identifier_actions_root_not_the_page_url() {
+    // The password page renders no <form action> (client-rendered); both
+    // `postAction` and `identifierUrl` are relative to the signin-service
+    // root, not to this page's own URL — which is itself the identifier
+    // step's URL, one path segment "deeper" than that root.
+    let html = r#"
+        <script>
+        window._IDK = { templateModel: {
+            "hmac": "h", "relayState": "r",
+            "identifierUrl": "login/identifier",
+            "postAction": "login/authenticate"
+        } };
+        </script>
+    "#;
+    let identifier_action = "https://identity.vwgroup.io/signin-service/v1/CLIENT/login/identifier";
+    let resolved = resolve_post_action(html, identifier_action).unwrap();
+    assert_eq!(
+        resolved,
+        "https://identity.vwgroup.io/signin-service/v1/CLIENT/login/authenticate"
+    );
+}
+
+#[test]
+fn resolve_post_action_is_none_without_a_post_action_in_the_model() {
+    assert!(resolve_post_action("<html></html>", "https://identity.vwgroup.io/x").is_none());
+}
+
+#[test]
 fn resolve_joins_a_relative_path_against_the_base() {
     let resolved = resolve(
         "https://identity.vwgroup.io/signin-service/v1/signin",

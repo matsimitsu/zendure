@@ -83,6 +83,10 @@ impl VwPortalClient {
         let http = reqwest::Client::builder()
             .cookie_store(true)
             .timeout(Duration::from_secs(30))
+            // `follow_redirects` below walks the `Location` chain by hand to
+            // build `history` for `passed_portal_callback`; reqwest's default
+            // policy would follow it first and hide every intermediate hop.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("failed to build the VW portal HTTP client");
         VwPortalClient {
@@ -144,7 +148,7 @@ impl VwPortalClient {
 
         // 3. The identifier step lands on the password (authenticate) page,
         // whose hidden fields live in the JS templateModel, not HTML inputs.
-        let (mut fields2, action2) = login_fields(&r2.body);
+        let (mut fields2, _) = login_fields(&r2.body);
         if !fields2.contains_key("hmac") || !fields2.contains_key("_csrf") {
             let err = login_error(&r2.body);
             return Err(CarBatteryError::Auth(err.unwrap_or_else(|| {
@@ -155,13 +159,20 @@ impl VwPortalClient {
         }
         fields2.insert("email".to_string(), self.email.clone());
         fields2.insert("password".to_string(), self.password.clone());
-        // The browser posts to the clean action URL with relayState in the
-        // body; posting to a URL that also carries `?relayState=` duplicates
-        // it and is rejected with HTTP 400.
-        let authenticate_action = match &action2 {
-            Some(a) => resolve(&r2.final_url, a)?,
-            None => strip_query(&r2.final_url),
-        };
+        // The page never renders a `<form action>` here (it's client-rendered
+        // per the model's `useClientRendering`); the real target is
+        // `templateModel.postAction`, e.g. "login/authenticate" — relative not
+        // to this page's own URL but to the same signin-service root that
+        // `identifierUrl` (also in this model) was relative to when it
+        // produced `identifier_action` in step 2. Joining it against the page
+        // URL instead double-counts the "login/" segment and gets HTTP 400.
+        let authenticate_action =
+            resolve_post_action(&r2.body, &identifier_action).ok_or_else(|| {
+                CarBatteryError::Auth(
+                    "identity portal did not include a postAction for the password step"
+                        .to_string(),
+                )
+            })?;
         let headers3 = login_headers(&self.country, &self.language, Some(&r2.final_url))?;
 
         // 4. POST credentials; follow the redirect chain back to the portal,
@@ -683,6 +694,28 @@ fn attrs_of(attr_re: &Regex, tag_attrs: &str) -> HashMap<String, String> {
             (key, value)
         })
         .collect()
+}
+
+/// The password step's submit URL, built from `templateModel.postAction`
+/// (e.g. `"login/authenticate"`) — never a `<form action>`, since this page
+/// is client-rendered. `postAction` and the model's own `identifierUrl` are
+/// both relative to the same signin-service root, so that root is recovered
+/// by stripping `identifierUrl` off the *already-correct* `identifier_action`
+/// URL from step 2, rather than resolved against this page's own URL: a
+/// standard relative-URL join only drops the last path segment, which
+/// double-counts the shared `login/` segment and gets HTTP 400.
+fn resolve_post_action(html: &str, identifier_action: &str) -> Option<String> {
+    let model = extract_template_model(html);
+    let obj = model.as_object()?;
+    let post_action = obj.get("postAction").and_then(|v| v.as_str())?;
+    let identifier_url = obj
+        .get("identifierUrl")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let root = identifier_action
+        .strip_suffix(identifier_url)
+        .unwrap_or(identifier_action);
+    Some(format!("{root}{post_action}"))
 }
 
 /// Collects the fields needed to POST a VW identity login step: merges HTML
