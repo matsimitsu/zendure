@@ -14,7 +14,7 @@ use chrono_tz::Tz;
 
 use crate::device::PackStatus;
 use crate::event::Event;
-use crate::journal::read::{read_events_in_range, read_raw_in_range};
+use crate::journal::read::{ReadError, read_events_in_range, read_raw_in_range};
 use crate::units::{
     BatteryPower, Elapsed, GridPower, Soc, SolarPower, Timestamp, WattHours, Watts,
 };
@@ -423,23 +423,57 @@ impl IntervalHistory {
 /// The 1h resolution, derived rather than stored so it can never disagree
 /// with the 15-minute buckets. Grouped by the hour each slot falls in, so a
 /// run that starts mid-hour opens with a partial hour.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn hourly(quarters: &[IntervalSlot]) -> Vec<IntervalSlot> {
     quarters
         .chunk_by(|a, b| a.index.hour_start() == b.index.hour_start())
-        .map(|hour| {
-            let each = || hour.iter().map(|slot| slot.averages);
-            IntervalSlot {
-                index: hour[0].index.hour_start(),
-                averages: IntervalAverages {
-                    solar: Mean::of(each().map(|a| a.solar)),
-                    home: Mean::of(each().map(|a| a.home)),
-                    grid: Mean::of(each().map(|a| a.grid)),
-                    battery: Mean::of(each().map(|a| a.battery)),
-                    soc: each().filter_map(|a| a.soc).next_back(),
-                },
-            }
+        .map(|hour| IntervalSlot {
+            index: hour[0].index.hour_start(),
+            averages: merged(hour),
         })
         .collect()
+}
+
+/// Consecutive intervals read as one: the mean of each flow, and the last
+/// SOC seen.
+pub fn merged(slots: &[IntervalSlot]) -> IntervalAverages {
+    let each = || slots.iter().map(|slot| slot.averages);
+    IntervalAverages {
+        solar: Mean::of(each().map(|a| a.solar)),
+        home: Mean::of(each().map(|a| a.home)),
+        grid: Mean::of(each().map(|a| a.grid)),
+        battery: Mean::of(each().map(|a| a.battery)),
+        soc: each().filter_map(|a| a.soc).next_back(),
+    }
+}
+
+/// One whole local day of the journal folded into a fresh [`IntervalHistory`]
+/// through the same [`IntervalHistory::record`] the live loop uses. Flows
+/// only: a past day's chart draws no pack figures. Empty for a date `tz`
+/// cannot place.
+pub fn history_of_day(
+    journal_path: &std::path::Path,
+    date: NaiveDate,
+    tz: Tz,
+    devices: impl IntoIterator<Item = DeviceId>,
+) -> Result<IntervalHistory, ReadError> {
+    let mut history = IntervalHistory::new(devices);
+    let bounds = date.succ_opt().and_then(|next| {
+        Some((
+            crate::clock::local_day_start(date, tz)?,
+            crate::clock::local_day_start(next, tz)?,
+        ))
+    });
+    let Some((start, end)) = bounds else {
+        return Ok(history);
+    };
+    // The journal's range includes both ends; the next midnight is the next
+    // day's.
+    let last = end - Elapsed::of(Duration::from_millis(1));
+    read_events_in_range(journal_path, start, last)?
+        .iter()
+        .for_each(|event| history.record(event));
+    Ok(history)
 }
 
 /// Folds the journal's last ring's worth of events and poll captures into a

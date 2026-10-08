@@ -1,8 +1,9 @@
+use chrono::NaiveDate;
 use maud::{Markup, html};
 
 use crate::web::flows::{
-    EnergyFlowsView, FLOWS_CHART_HEIGHT, FLOWS_CHART_WIDTH, FlowPlotView, FlowResolution,
-    FlowSeries,
+    DayNavView, EnergyFlowsView, FLOWS_CHART_HEIGHT, FLOWS_CHART_WIDTH, FlowPlotView,
+    FlowResolution, FlowSeries,
 };
 use crate::web::templates::axis;
 
@@ -18,14 +19,17 @@ pub fn render(view: &EnergyFlowsView) -> Markup {
                     "Average power per interval, 00:00–23:59. Below zero: grid export and battery charging."
                 }
             }
-            div class="energy-flows__segmented" role="group" aria-label="Interval" {
-                @for plot in &view.plots {
-                    @let key = plot.resolution.key();
-                    button
-                        type="button"
-                        class=(format!("energy-flows__segment energy-flows__segment--{key}"))
-                        data-interval=(key)
-                        aria-pressed=(plot.resolution == FlowResolution::Hour) { (key) }
+            div class="energy-flows__controls" {
+                (day_nav(&view.nav, view.interval))
+                div class="energy-flows__segmented" role="group" aria-label="Interval" {
+                    @for plot in &view.plots {
+                        @let key = plot.resolution.key();
+                        button
+                            type="button"
+                            class=(format!("energy-flows__segment energy-flows__segment--{key}"))
+                            data-interval=(key)
+                            aria-pressed=(plot.resolution == view.interval) { (key) }
+                    }
                 }
             }
         }
@@ -49,6 +53,71 @@ pub fn render(view: &EnergyFlowsView) -> Markup {
             }
             div class="energy-flows__x-axis" { (axis::render(&view.x_axis)) }
         }
+    }
+}
+
+/// The host's classes as the server renders them; after load the script owns
+/// the interval modifier.
+pub fn host_class(view: &EnergyFlowsView) -> String {
+    match view.interval {
+        FlowResolution::Hour => "energy-flows".to_string(),
+        FlowResolution::Quarter => "energy-flows energy-flows--15m".to_string(),
+    }
+}
+
+/// `data-day` and `data-live` travel on the nav, which every swap replaces;
+/// the script mirrors them onto the host, whose `data-live` decides whether
+/// the stream may overwrite the panel.
+fn day_nav(nav: &DayNavView, interval: FlowResolution) -> Markup {
+    html! {
+        nav class="energy-flows__day-nav" aria-label="Day" data-day=(nav.shown) data-live=(nav.live()) {
+            (step(nav.previous, "‹", "Previous day", interval))
+            div class="energy-flows__day" {
+                span class="energy-flows__day-label" { (nav.label) }
+                span class="energy-flows__day-date" { (nav.date) }
+            }
+            (step(nav.next, "›", "Next day", interval))
+            @if !nav.live() {
+                a class="energy-flows__today"
+                    href=(page_href(None, interval))
+                    hx-get=(fragment_href(None))
+                    hx-target="closest energy-flows" { "Today" }
+            }
+        }
+    }
+}
+
+/// A link to `target`, or an inert glyph where there is no day to go to.
+fn step(target: Option<NaiveDate>, glyph: &str, label: &str, interval: FlowResolution) -> Markup {
+    html! {
+        @match target {
+            Some(day) => a class="energy-flows__step"
+                href=(page_href(Some(day), interval))
+                hx-get=(fragment_href(Some(day)))
+                hx-target="closest energy-flows"
+                aria-label=(label) { (glyph) },
+            None => span class="energy-flows__step energy-flows__step--disabled"
+                role="link"
+                aria-disabled="true"
+                aria-label=(label) { (glyph) },
+        }
+    }
+}
+
+/// The whole page on `day`, for a browser following the link itself. The
+/// interval rides along because only the script remembers it otherwise.
+fn page_href(day: Option<NaiveDate>, interval: FlowResolution) -> String {
+    match day {
+        Some(day) => format!("/?day={day}&interval={}", interval.key()),
+        None => format!("/?interval={}", interval.key()),
+    }
+}
+
+/// The panel alone; the script adds the interval it is showing.
+fn fragment_href(day: Option<NaiveDate>) -> String {
+    match day {
+        Some(day) => format!("/fragments/energy-flows?day={day}"),
+        None => "/fragments/energy-flows".to_string(),
     }
 }
 

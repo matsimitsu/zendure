@@ -4,6 +4,7 @@ use crate::battery::BatteryState;
 use crate::engine::EngineState;
 use crate::fixtures::journey;
 use crate::units::{BatteryPower, GridPower, SolarPower, Timestamp};
+use crate::web::past_days::PastDays;
 use crate::web::state::DashboardState;
 use crate::web::{ActualSolarHistory, intervals::IntervalHistory};
 use crate::world::{DeviceId, Measurement, MeterReading, World};
@@ -44,6 +45,12 @@ fn app_state() -> AppState {
     AppState {
         dashboard,
         timezone: chrono_tz::UTC,
+        // Unreadable on purpose: a past day then renders empty, which is
+        // all the routing tests need.
+        past_days: Arc::new(PastDays::new(
+            std::path::PathBuf::from("/nonexistent/journal.db"),
+            [DeviceId::new(journey::BATTERY_ID)],
+        )),
     }
 }
 
@@ -98,6 +105,51 @@ async fn every_component_script_is_loaded_deferred_and_served() {
     let (status, script) = get("/assets/energy-flows.js", false).await;
     assert_eq!(status, StatusCode::OK);
     assert!(script.contains("customElements.define(\"energy-flows\""));
+}
+
+/// `journey::NOW_MS` falls on 4 September 2025, UTC.
+const TODAY: &str = "2025-09-04";
+
+#[tokio::test]
+async fn an_unparsable_day_is_a_bad_request() {
+    let (status, _) = get("/fragments/energy-flows?day=someday", true).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, _) = get("/?day=2025-02-30", false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, _) = get("/fragments/energy-flows?interval=5m", true).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_future_day_is_today_and_live() {
+    let (status, body) = get("/fragments/energy-flows?day=2099-01-01", true).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains(&format!(r#"data-day="{TODAY}""#)), "{body}");
+    assert!(body.contains(r#"data-live="true""#));
+    assert!(!body.contains("<html"));
+}
+
+#[tokio::test]
+async fn the_page_opens_on_the_day_it_is_asked_for() {
+    let (status, page) = get("/?day=2025-09-01&interval=15m", false).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        page.contains(r#"class="energy-flows energy-flows--15m" sse-swap="energy-flows" data-day="2025-09-01" data-live="false""#),
+        "{page}"
+    );
+    assert!(page.contains("Mon 1 Sep"));
+    assert!(page.contains(r#"href="/?day=2025-09-02&amp;interval=15m""#));
+}
+
+#[tokio::test]
+async fn the_page_without_a_day_shows_today() {
+    let (_, page) = get("/", false).await;
+
+    assert!(page.contains(&format!(r#"data-day="{TODAY}" data-live="true""#)));
 }
 
 #[tokio::test]

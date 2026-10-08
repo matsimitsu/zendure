@@ -8,6 +8,7 @@ mod flows;
 mod intervals;
 mod line_chart;
 mod pack_intervals;
+mod past_days;
 mod routes;
 mod server;
 mod soc_bar;
@@ -17,6 +18,7 @@ mod templates;
 mod view;
 
 pub use intervals::seed_interval_history;
+pub use past_days::PastDays;
 pub use server::spawn;
 pub use state::{
     ActualSolarHistory, DashboardState, DashboardStateSender, DashboardTelemetry, ForecastSnapshot,

@@ -515,6 +515,15 @@ pub fn read_raw_in_range(
     Ok(rows)
 }
 
+/// When the oldest event still retained was recorded; `None` for an empty
+/// journal. One indexed lookup, cheap enough to ask per request.
+pub fn read_oldest_event_at(path: &Path) -> Result<Option<Timestamp>> {
+    let conn = open_for_reading(path)?;
+    let oldest: Option<i64> =
+        conn.query_row("SELECT MIN(ts_ms) FROM events", [], |row| row.get(0))?;
+    Ok(oldest.map(Timestamp::from_millis))
+}
+
 #[cfg(test)]
 #[path = "read_tests.rs"]
 mod tests;

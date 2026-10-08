@@ -62,7 +62,13 @@ pub fn page(view: &DashboardView) -> Markup {
                         (stat_card::render(&view.stat_cards.ev, "stat-card-ev"))
                     }
                     (battery_panel::render(view.battery.as_ref(), "battery-panel"))
-                    energy-flows id="energy-flows" class="energy-flows" sse-swap="energy-flows" {
+                    // `data-live` is on the host from the first byte, so a
+                    // page opened on a past day drops the stream's first
+                    // message too.
+                    energy-flows id="energy-flows" class=(energy_flows::host_class(&view.energy_flows))
+                        sse-swap="energy-flows"
+                        data-day=(view.energy_flows.nav.shown)
+                        data-live=(view.energy_flows.nav.live()) {
                         (energy_flows_inner(view))
                     }
                     div id="decision-log" sse-swap="decision-log" {

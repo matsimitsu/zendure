@@ -3,16 +3,17 @@
 //! class toggle in the browser rather than a round trip.
 
 use std::collections::BTreeMap;
+use std::str::FromStr;
 use std::time::Duration;
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, NaiveTime, TimeZone};
 use chrono_tz::Tz;
 
 use crate::units::{Elapsed, Timestamp, Watts};
 
 use super::axis::{AxisDensity, AxisPosition, AxisTick, day_axis};
 use super::intervals::{
-    HOUR, INTERVAL, IntervalAverages, IntervalHistory, IntervalIndex, IntervalSlot, hourly,
+    HOUR, INTERVAL, IntervalAverages, IntervalHistory, IntervalIndex, IntervalSlot, merged,
 };
 use super::state::Plottable;
 use super::view::{MISSING, format_time};
@@ -73,7 +74,7 @@ impl FlowSeries {
 }
 
 /// One of the two plots the panel carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FlowResolution {
     Hour,
     Quarter,
@@ -110,14 +111,17 @@ impl FlowResolution {
             Self::Quarter => 1.0,
         }
     }
+}
 
-    /// The first slot `now` has not finished filling.
-    fn in_progress(self, now: Timestamp) -> IntervalIndex {
-        let quarter = IntervalIndex::containing(now);
-        match self {
-            Self::Hour => quarter.hour_start(),
-            Self::Quarter => quarter,
-        }
+/// The `interval=` a request carries.
+impl FromStr for FlowResolution {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        [Self::Hour, Self::Quarter]
+            .into_iter()
+            .find(|resolution| resolution.key() == raw)
+            .ok_or_else(|| format!("unknown interval {raw:?}; expected 1h or 15m"))
     }
 }
 
@@ -129,21 +133,67 @@ struct Day {
 }
 
 impl Day {
-    fn of(date: NaiveDate, tz: Tz) -> Option<Self> {
-        let start = crate::clock::local_day_start(date, tz)?;
-        let end = crate::clock::local_day_start(date.succ_opt()?, tz)?;
-        Some(Day {
-            start,
-            length: end - start,
-        })
+    /// Falls back to the UTC day for a date `tz` cannot place, so the chart
+    /// still has a frame to draw its gaps in.
+    fn of(date: NaiveDate, tz: Tz) -> Self {
+        let bounds = date.succ_opt().and_then(|next| {
+            Some((
+                crate::clock::local_day_start(date, tz)?,
+                crate::clock::local_day_start(next, tz)?,
+            ))
+        });
+        match bounds {
+            Some((start, end)) => Day {
+                start,
+                length: end - start,
+            },
+            None => Day {
+                start: Timestamp::from(date.and_time(NaiveTime::MIN).and_utc()),
+                length: Elapsed::of(24 * HOUR),
+            },
+        }
     }
 
-    /// A plain 24 hours from local midnight, for a date `tz` cannot place.
-    fn fallback(now: Timestamp, tz: Tz) -> Self {
-        Day {
-            start: crate::clock::local_midnight(now, tz),
-            length: Elapsed::of(24 * HOUR),
-        }
+    fn end(&self) -> Timestamp {
+        self.start + self.length
+    }
+
+    /// The slot of `span` that `at` falls in; `None` outside the day.
+    fn slot_containing(&self, span: Duration, at: Timestamp) -> Option<Timestamp> {
+        (at >= self.start && at < self.end())
+            .then(|| {
+                self.slot_starts(span)
+                    .take_while(|&start| start <= at)
+                    .last()
+            })
+            .flatten()
+    }
+
+    /// A tick every three local hours, each placed where that hour really
+    /// falls, so a 23- or 25-hour day's labels stay over their bars. On a
+    /// narrow screen only `00:00 · 12:00 · 23:59` remain.
+    fn axis(&self, tz: Tz) -> Vec<AxisTick> {
+        let Some(date) = local_date(self.start, tz) else {
+            return day_axis();
+        };
+        let hours = (0..24).step_by(3).filter_map(|hour| {
+            // A local hour a DST change skips has no tick.
+            let at = tz
+                .from_local_datetime(&date.and_hms_opt(hour, 0, 0)?)
+                .earliest()?;
+            let density = if hour % 12 == 0 {
+                AxisDensity::Always
+            } else {
+                AxisDensity::WideOnly
+            };
+            Some(AxisTick::new(
+                AxisPosition::new(self.x(Timestamp::from(at)) / FLOWS_CHART_WIDTH),
+                format!("{hour:02}:00"),
+                density,
+            ))
+        });
+        let end = AxisTick::new(AxisPosition::END, "23:59".to_string(), AxisDensity::Always);
+        hours.chain(std::iter::once(end)).collect()
     }
 
     /// `span` as a share of the viewBox's width.
@@ -288,12 +338,14 @@ pub struct FlowRect {
     pub height: f64,
 }
 
+#[derive(Debug, Clone)]
 pub struct FlowBarView {
     pub series: FlowSeries,
     pub rect: FlowRect,
 }
 
 /// A full-height column over one slot, the hover target the readout reads.
+#[derive(Debug, Clone)]
 pub struct FlowHitView {
     pub x: f64,
     pub width: f64,
@@ -302,6 +354,7 @@ pub struct FlowHitView {
     pub latest: bool,
 }
 
+#[derive(Debug, Clone)]
 pub struct FlowPlotView {
     pub resolution: FlowResolution,
     pub bars: Vec<FlowBarView>,
@@ -311,7 +364,54 @@ pub struct FlowPlotView {
     pub now_x: Option<f64>,
 }
 
+/// Which day the panel shows, and where its step controls lead.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DayNavView {
+    pub shown: NaiveDate,
+    pub today: NaiveDate,
+    /// `None` on the oldest day the journal still holds.
+    pub previous: Option<NaiveDate>,
+    /// `None` on today: there is nothing to show after it.
+    pub next: Option<NaiveDate>,
+    /// "Today", "Yesterday" or "Mon 5 Oct".
+    pub label: String,
+    /// "5 Oct".
+    pub date: String,
+}
+
+impl DayNavView {
+    fn new(shown: NaiveDate, today: NaiveDate, earliest: Option<NaiveDate>) -> Self {
+        let label = if shown == today {
+            "Today".to_string()
+        } else if today.pred_opt() == Some(shown) {
+            "Yesterday".to_string()
+        } else {
+            shown.format("%a %-d %b").to_string()
+        };
+        DayNavView {
+            shown,
+            today,
+            previous: shown
+                .pred_opt()
+                .filter(|_| earliest.is_none_or(|earliest| shown > earliest)),
+            next: shown.succ_opt().filter(|_| shown < today),
+            label,
+            date: shown.format("%-d %b").to_string(),
+        }
+    }
+
+    /// Only today takes the live stream; a past day never changes.
+    pub fn live(&self) -> bool {
+        self.shown == self.today
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct EnergyFlowsView {
+    pub nav: DayNavView,
+    /// The plot the server shows: the segmented control's pressed button,
+    /// and the interval the step links carry.
+    pub interval: FlowResolution,
     pub y_axis: Vec<AxisTick>,
     pub x_axis: Vec<AxisTick>,
     /// Gridline heights, one per y-axis tick other than zero.
@@ -323,9 +423,58 @@ pub struct EnergyFlowsView {
     pub readout: FlowReadoutView,
 }
 
+/// One slot of the day as a plot draws it: `None` until it has finished.
+struct FlowSlot {
+    start: Timestamp,
+    averages: Option<IntervalAverages>,
+}
+
+/// Every quarter of the day, looked up by its absolute index.
+fn quarter_slots(
+    day: &Day,
+    completed: &BTreeMap<IntervalIndex, IntervalAverages>,
+) -> Vec<FlowSlot> {
+    day.slot_starts(INTERVAL)
+        .map(|start| FlowSlot {
+            start,
+            averages: completed.get(&IntervalIndex::containing(start)).copied(),
+        })
+        .collect()
+}
+
+/// Every hour of the day on the local clock, merged from its quarters.
+/// Grouped from local midnight rather than by UTC hour, so a zone offset by
+/// half an hour still reads 10:00–11:00 as its own ten o'clock.
+fn hour_slots(
+    day: &Day,
+    completed: &BTreeMap<IntervalIndex, IntervalAverages>,
+    now: Timestamp,
+) -> Vec<FlowSlot> {
+    day.slot_starts(HOUR)
+        .map(|start| {
+            let end = start + Elapsed::of(HOUR);
+            let quarters: Vec<IntervalSlot> =
+                std::iter::successors(Some(IntervalIndex::containing(start)), |index| {
+                    Some(index.offset(1))
+                })
+                .take_while(|index| index.start() < end)
+                .filter_map(|index| {
+                    completed
+                        .get(&index)
+                        .map(|&averages| IntervalSlot { index, averages })
+                })
+                .collect();
+            FlowSlot {
+                start,
+                averages: (end <= now && !quarters.is_empty()).then(|| merged(&quarters)),
+            }
+        })
+        .collect()
+}
+
 fn plot(
     resolution: FlowResolution,
-    completed: &[IntervalSlot],
+    slots: &[FlowSlot],
     now: Timestamp,
     day: &Day,
     scale: &FlowScale,
@@ -337,21 +486,21 @@ fn plot(
     let lane = (slot_width - 2.0 * padding) / FlowSeries::ALL.len() as f64;
     let bar_width = lane * resolution.bar_fill();
 
-    let by_start: BTreeMap<Timestamp, &IntervalAverages> = completed
+    let latest = slots
         .iter()
-        .map(|slot| (slot.index.start(), &slot.averages))
-        .collect();
-    let latest = by_start.keys().next_back().copied();
+        .rev()
+        .find(|slot| slot.averages.is_some())
+        .map(|slot| slot.start);
 
     let mut bars = Vec::new();
     let mut hits = Vec::new();
-    for start in day.slot_starts(span) {
-        let x = day.x(start);
-        let Some(averages) = by_start.get(&start) else {
+    for slot in slots {
+        let x = day.x(slot.start);
+        let Some(averages) = &slot.averages else {
             hits.push(FlowHitView {
                 x,
                 width: slot_width,
-                readout: FlowReadoutView::of(start, span, &IntervalAverages::default(), tz),
+                readout: FlowReadoutView::of(slot.start, span, &IntervalAverages::default(), tz),
                 latest: false,
             });
             continue;
@@ -374,50 +523,68 @@ fn plot(
         hits.push(FlowHitView {
             x,
             width: slot_width,
-            readout: FlowReadoutView::of(start, span, averages, tz),
-            latest: Some(start) == latest,
+            readout: FlowReadoutView::of(slot.start, span, averages, tz),
+            latest: Some(slot.start) == latest,
         });
     }
-
-    let in_progress = resolution.in_progress(now).start();
-    let now_x = (in_progress >= day.start && in_progress < day.start + day.length)
-        .then(|| day.x(in_progress));
 
     FlowPlotView {
         resolution,
         bars,
         hits,
-        now_x,
+        now_x: day.slot_containing(span, now).map(|start| day.x(start)),
     }
 }
 
-fn local_date(now: Timestamp, tz: Tz) -> Option<NaiveDate> {
-    chrono::DateTime::from_timestamp_millis(now.as_millis())
+/// The calendar date `at` falls on in `tz`.
+pub fn local_date(at: Timestamp, tz: Tz) -> Option<NaiveDate> {
+    chrono::DateTime::from_timestamp_millis(at.as_millis())
         .map(|utc| utc.with_timezone(&tz).date_naive())
 }
 
-/// Today's completed intervals from `history`, laid out on a scale fitted to
-/// the 15-minute extremes, which the hourly means can never exceed.
+/// What the panel was asked to show, already resolved against today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FlowsRequest {
+    pub day: NaiveDate,
+    pub interval: FlowResolution,
+}
+
+/// Today in the hourly view, as the live stream renders it. The step back
+/// is always offered: the journal is not read on every tick.
 pub fn energy_flows_view(history: &IntervalHistory, now: Timestamp, tz: Tz) -> EnergyFlowsView {
-    let today = local_date(now, tz);
-    let day = today
-        .and_then(|date| Day::of(date, tz))
-        .unwrap_or_else(|| Day::fallback(now, tz));
-    let quarters = today
-        .map(|date| history.completed_on(date, tz, now))
-        .unwrap_or_default();
-    let current_hour = FlowResolution::Hour.in_progress(now);
-    let hours: Vec<IntervalSlot> = hourly(&quarters)
+    let request = FlowsRequest {
+        day: local_date(now, tz).unwrap_or_default(),
+        interval: FlowResolution::Hour,
+    };
+    requested_flows_view(history, request, None, now, tz)
+}
+
+/// `request.day`'s completed intervals from `history`, laid out on a scale
+/// fitted to the 15-minute extremes, which the hourly means can never exceed.
+/// `earliest` is the oldest day the journal still holds.
+pub fn requested_flows_view(
+    history: &IntervalHistory,
+    request: FlowsRequest,
+    earliest: Option<NaiveDate>,
+    now: Timestamp,
+    tz: Tz,
+) -> EnergyFlowsView {
+    let today = local_date(now, tz).unwrap_or_default();
+    let day = Day::of(request.day, tz);
+    let completed: BTreeMap<IntervalIndex, IntervalAverages> = history
+        .completed_on(request.day, tz, now)
         .into_iter()
-        .filter(|hour| hour.index < current_hour)
+        .map(|slot| (slot.index, slot.averages))
         .collect();
 
-    let scale = FlowScale::fitting(quarters.iter().flat_map(|slot| {
+    let scale = FlowScale::fitting(completed.values().flat_map(|averages| {
         FlowSeries::ALL
             .into_iter()
-            .filter_map(|series| series.watts(&slot.averages))
+            .filter_map(|series| series.watts(averages))
     }));
 
+    let hours = hour_slots(&day, &completed, now);
+    let quarters = quarter_slots(&day, &completed);
     let hourly_plot = plot(FlowResolution::Hour, &hours, now, &day, &scale, tz);
     let quarterly_plot = plot(FlowResolution::Quarter, &quarters, now, &day, &scale, tz);
     let readout = hourly_plot
@@ -428,6 +595,8 @@ pub fn energy_flows_view(history: &IntervalHistory, now: Timestamp, tz: Tz) -> E
 
     let ticks = scale.ticks();
     EnergyFlowsView {
+        nav: DayNavView::new(request.day, today, earliest),
+        interval: request.interval,
         y_axis: ticks
             .iter()
             .map(|&tick| {
@@ -438,7 +607,7 @@ pub fn energy_flows_view(history: &IntervalHistory, now: Timestamp, tz: Tz) -> E
                 )
             })
             .collect(),
-        x_axis: day_axis(),
+        x_axis: day.axis(tz),
         grid_lines: ticks
             .iter()
             .filter(|&&tick| tick != Watts::ZERO)

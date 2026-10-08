@@ -67,6 +67,7 @@ impl AxisDensity {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct AxisTick {
     pub position: AxisPosition,
     pub anchor: AxisAnchor,

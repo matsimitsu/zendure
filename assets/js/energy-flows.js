@@ -31,7 +31,30 @@ class EnergyFlows extends HTMLElement {
     // is a backstop in case the settle phase touches the markup again.
     this.addEventListener("htmx:afterSwap", () => this.apply());
     this.addEventListener("htmx:afterSettle", () => this.apply());
+    // The stream only ever carries today; it must not overwrite a past day.
+    this.addEventListener("htmx:sseBeforeMessage", (e) => {
+      if (this.dataset.live === "false") e.preventDefault();
+    });
+    // Step links carry only the day: the interval is host state, which the
+    // server could not know when it rendered them.
+    this.addEventListener("htmx:configRequest", (e) => {
+      if (e.detail.path?.startsWith("/fragments/energy-flows")) {
+        e.detail.parameters.interval = this.interval;
+      }
+    });
     this.apply();
+  }
+
+  // The fragment says which day it shows; the host keeps it across swaps.
+  mirrorDay() {
+    const nav = this.querySelector(`.${B}__day-nav`);
+    if (!nav) return;
+    if (this.dataset.day !== nav.dataset.day) {
+      // Column indexes from another day point at unrelated intervals.
+      this.hover = this.pinned = null;
+    }
+    this.dataset.day = nav.dataset.day;
+    this.dataset.live = nav.dataset.live;
   }
 
   get interval() {
@@ -86,6 +109,7 @@ class EnergyFlows extends HTMLElement {
   // Idempotent: derives everything from host state, so it is safe to call
   // after any swap or interaction.
   apply() {
+    this.mirrorDay();
     const interval = this.interval;
     for (const s of this.querySelectorAll(`.${B}__segment`)) {
       s.setAttribute("aria-pressed", String(s.dataset.interval === interval));

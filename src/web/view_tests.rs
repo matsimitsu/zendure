@@ -741,7 +741,7 @@ fn every_card_but_the_car_opens_its_detail() {
             "{slug}"
         );
     }
-    assert_eq!(html.matches("hx-get=").count(), 4);
+    assert_eq!(html.matches("hx-get=\"/detail/").count(), 4);
 }
 
 /// The `(start, end)` byte span of every element carrying `sse-swap`, from its

@@ -1,3 +1,5 @@
+@use "../breakpoints" as *;
+
 $series: (
   solar: var(--color-accent),
   home: var(--color-home),
@@ -42,6 +44,77 @@ $series: (
     margin: 0;
     color: var(--color-text-secondary);
     font-size: var(--text-sm);
+  }
+
+  &__controls {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+  }
+
+  &__day-nav {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+
+  &__step,
+  &__today {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: var(--size-step);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-md);
+    text-decoration: none;
+    cursor: pointer;
+
+    &:hover {
+      background: var(--color-hover-wash);
+    }
+  }
+
+  &__step {
+    width: var(--size-step);
+    color: var(--color-text-secondary);
+    font-size: var(--text-md);
+
+    &--disabled {
+      opacity: 0.35;
+      cursor: default;
+
+      &:hover {
+        background: transparent;
+      }
+    }
+  }
+
+  &__today {
+    padding: 0 var(--space-3);
+    color: var(--color-accent-text);
+    font-size: var(--text-sm);
+  }
+
+  // A fixed width so stepping between "Today" and "Mon 5 Oct" does not
+  // shift the buttons under the pointer.
+  &__day {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: var(--size-day-label);
+  }
+
+  &__day-label {
+    color: var(--color-text-primary);
+    font-size: var(--text-sm);
+    font-weight: var(--weight-semibold);
+  }
+
+  &__day-date {
+    color: var(--color-text-faint);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
   }
 
   &__segmented {
@@ -200,10 +273,25 @@ $series: (
   }
 }
 
+// The controls drop under the title as one row, the day steps on one side
+// and the interval on the other.
+@include narrow {
+  .energy-flows__controls {
+    flex-basis: 100%;
+    justify-content: space-between;
+  }
+}
+
 @media (pointer: coarse) {
   .energy-flows__segment,
-  .energy-flows__legend-item {
+  .energy-flows__legend-item,
+  .energy-flows__today {
     min-width: var(--size-tap);
     min-height: var(--size-tap);
+  }
+
+  .energy-flows__step {
+    width: var(--size-tap);
+    height: var(--size-tap);
   }
 }

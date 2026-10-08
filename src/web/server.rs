@@ -6,6 +6,7 @@ use tokio::net::TcpListener;
 
 use crate::config::WebConfig;
 
+use super::past_days::PastDays;
 use super::routes::{self, AppState};
 use super::state::DashboardStateReceiver;
 
@@ -18,6 +19,7 @@ pub async fn spawn(
     config: &WebConfig,
     dashboard: DashboardStateReceiver,
     timezone: Tz,
+    past_days: PastDays,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Option<ServerHandle> {
     let addr = SocketAddr::new(config.bind_address, config.port);
@@ -36,6 +38,7 @@ pub async fn spawn(
     let app = routes::router(AppState {
         dashboard,
         timezone,
+        past_days: std::sync::Arc::new(past_days),
     });
 
     Some(tokio::spawn(async move {

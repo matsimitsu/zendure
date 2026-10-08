@@ -500,9 +500,14 @@ Add `[web]` to run a live browser dashboard (`src/web/`) — solar/home/grid
 stat cards, the battery panel (SOC, mode, RTE, usable energy, capacity, and
 a row per pack with its model, serial, SOC, flow, temperature and capacity),
 and a decision log, all real data, updating every scan tick over
-server-sent events. Three routes: `GET /` (the full page), `GET /events`
-(the SSE stream fragments it swaps in via htmx) and `GET /detail/{entity}`
-(`solar`, `home`, `grid` or `battery`; anything else is a 404). The solar,
+server-sent events. Four routes: `GET /` (the full page), `GET /events`
+(the SSE stream fragments it swaps in via htmx), `GET
+/fragments/energy-flows?day=YYYY-MM-DD&interval=1h|15m` (the energy flows
+panel alone, for one day) and `GET /detail/{entity}`
+(`solar`, `home`, `grid` or `battery`; anything else is a 404). `GET /` takes
+the same `day` and `interval` parameters. Both parameters are optional: a
+missing `day` means today, a day after today shows today, and a value that
+isn't a date (or an interval other than `1h`/`15m`) is a 400. The solar,
 home and grid cards and the battery panel open `/detail/{entity}` in a modal
 `<dialog>` (Esc, the close button or a click beside it dismisses it); the
 modal is a snapshot taken when opened, not live. The solar, home and grid
@@ -550,6 +555,18 @@ The legend shows the most recent finished interval's averages. The panel
 reads the dashboard's 15-minute history, which is seeded from the journal at
 startup, so a restart keeps the day's bars. EV charging has no series of its
 own: nothing measures it separately, so it counts as home usage.
+
+The `‹`/`›` buttons in the panel's header step to earlier days, and `Today`
+returns. A past day is read from the journal, folded through the same
+history as the live chart and counting only the configured batteries, and
+the last few rendered days are cached since a finished day does not change.
+Days follow the configured timezone, so a DST change gives 23 or 25 hourly
+bars (92 or 100 quarters) with the time labels over the hours they name.
+`‹` is disabled on the oldest day the journal still holds, `›` on today.
+Only today is live: while a past day is shown the stream's updates to the
+panel are ignored, and going back to today resumes them. The buttons are
+plain links to `/?day=…` too, so they work without JavaScript; the interval
+being shown is kept when the day changes.
 
 The forecast panel shows real solar predictions when `[prediction]` is
 configured — 48 half-hourly bars (Solcast's own resolution) for the
