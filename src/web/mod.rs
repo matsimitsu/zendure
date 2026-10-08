@@ -7,6 +7,7 @@ mod detail;
 mod intervals;
 mod routes;
 mod server;
+mod soc_bar;
 mod sse;
 mod state;
 mod templates;

@@ -8,6 +8,7 @@ use crate::units::{Elapsed, KiloWattHours, Percent, Soc, SolarForecastPoint, Tim
 
 use super::axis::{AxisTick, day_axis};
 use super::detail::DetailEntity;
+use super::soc_bar::{SocBarView, SocLimitsView};
 use super::state::{
     ActualSolarHistory, DashboardState, ForecastSnapshot, Plottable, SOLAR_BUCKET_MS,
     SOLAR_BUCKETS_PER_DAY, Sparkline,
@@ -62,23 +63,9 @@ pub struct MiniStatView {
     pub value: String,
 }
 
-/// The SOC window the bar marks with limit ticks. Kept as [`Soc`] because
-/// the template positions by it as well as printing it.
-// Built for the soc_bar component; only the tests read it.
-#[cfg_attr(not(test), allow(dead_code))]
-pub struct SocLimitsView {
-    pub min: Soc,
-    pub max: Soc,
-    pub balance_day: bool,
-    /// What a full bar is worth, formatted for the "of X kWh" label.
-    pub usable_max: String,
-}
-
 pub struct BatteryPanelView {
     pub soc_percent: u32,
-    // Built for the soc_bar component; only the tests read it.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub limits: SocLimitsView,
+    pub bar: SocBarView,
     pub mode_label: &'static str,
     /// BEM modifier: "charge" | "discharge" | "idle".
     pub badge_variant: &'static str,
@@ -527,12 +514,14 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
     let battery = world.battery().map(|battery| {
         let (mode_label, badge_variant) = panel_badge(state.last_decision.as_ref().map(|d| d.mode));
         BatteryPanelView {
-            limits: SocLimitsView {
-                min: state.soc_limits.min,
-                max: state.soc_limits.max,
-                balance_day: state.soc_limits.balance_day,
-                usable_max: energy_string(state.usable_max()),
-            },
+            bar: SocBarView::labelled(
+                battery.soc,
+                SocLimitsView {
+                    min: state.soc_limits.min,
+                    max: state.soc_limits.max,
+                    balance_day: state.soc_limits.balance_day,
+                },
+            ),
             soc_percent: battery.soc.get(),
             mode_label,
             badge_variant,
@@ -545,7 +534,11 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
             },
             usable_energy: MiniStatView {
                 label: "Usable energy",
-                value: energy_string(state.usable_energy),
+                value: format!(
+                    "{} of {}",
+                    energy_string(state.usable_energy),
+                    energy_string(state.usable_max())
+                ),
             },
             capacity: MiniStatView {
                 label: "Capacity",

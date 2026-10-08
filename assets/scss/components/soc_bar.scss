@@ -1,0 +1,124 @@
+@use "../breakpoints" as *;
+
+// The parent sizes the bar's width; every label is placed by percentage on
+// a relative track so its text can never widen the bar.
+.soc-bar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+
+  // Ticks overhang the track, so they sit beside it rather than inside its
+  // `overflow: hidden`.
+  &__plot {
+    position: relative;
+  }
+
+  &__track {
+    position: relative;
+    height: var(--size-bar);
+    border-radius: var(--radius-sm);
+    background: var(--color-idle-bg);
+    overflow: hidden;
+  }
+
+  &__fill {
+    height: 100%;
+    background: var(--color-accent);
+    transition: width 0.3s ease-out;
+  }
+
+  &__stripes {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+
+    &--reserve {
+      left: 0;
+      background: repeating-linear-gradient(
+        135deg,
+        var(--color-stripe-dark) 0 var(--size-stripe),
+        transparent var(--size-stripe) var(--size-stripe-period)
+      );
+    }
+
+    &--headroom {
+      right: 0;
+      background: repeating-linear-gradient(
+        135deg,
+        var(--color-stripe-light) 0 var(--size-stripe),
+        transparent var(--size-stripe) var(--size-stripe-period)
+      );
+    }
+  }
+
+  &__limit {
+    position: absolute;
+    top: calc(-1 * var(--space-1));
+    bottom: calc(-1 * var(--space-1));
+    width: var(--size-tick);
+    transform: translateX(-50%);
+    background: var(--color-text-secondary);
+  }
+
+  &__labels {
+    position: relative;
+    height: var(--text-xs);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    line-height: 1;
+    color: var(--color-text-muted);
+
+    // A second line for the max label when the limits sit close together.
+    &--stacked {
+      height: calc(2 * var(--text-xs));
+    }
+  }
+
+  &__label {
+    position: absolute;
+    top: 0;
+    white-space: nowrap;
+
+    &--start {
+      transform: translateX(0);
+    }
+
+    &--end {
+      transform: translateX(-100%);
+    }
+
+    &--lower {
+      top: var(--text-xs);
+    }
+  }
+
+  &__text--narrow {
+    display: none;
+  }
+
+  &--compact {
+    gap: 0;
+
+    .soc-bar__track {
+      height: var(--size-bar-compact);
+    }
+
+    .soc-bar__limit {
+      top: calc(-1 * var(--size-tick-overhang-compact));
+      bottom: calc(-1 * var(--size-tick-overhang-compact));
+      width: var(--size-tick-compact);
+      background: var(--color-tick-soft);
+    }
+  }
+}
+
+// "max 100% · balance day" is too long to sit beside "min 10%" at 375px.
+@include narrow {
+  .soc-bar__text--wide {
+    display: none;
+  }
+
+  .soc-bar__text--narrow {
+    display: inline;
+  }
+}

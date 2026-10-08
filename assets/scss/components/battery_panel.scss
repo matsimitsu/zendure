@@ -97,20 +97,6 @@
     }
   }
 
-  &__bar {
-    height: var(--space-2);
-    border-radius: var(--radius-sm);
-    background: var(--color-border-soft);
-    overflow: hidden;
-  }
-
-  &__bar-fill {
-    height: 100%;
-    background: var(--color-accent);
-    border-radius: var(--radius-sm);
-    transition: width 0.3s ease-out;
-  }
-
   &__stats {
     display: grid;
     grid-template-columns: repeat(4, 1fr);

@@ -10,7 +10,7 @@ use crate::device::PackStatus;
 use crate::engine::EngineState;
 use crate::fixtures::journey;
 use crate::models::ControlDecision;
-use crate::units::{BatteryPower, GridPower, SolarPower, Timestamp, Watts};
+use crate::units::{BatteryPower, GridPower, Soc, SolarPower, Timestamp, Watts};
 use crate::web::intervals::IntervalHistory;
 use crate::web::sse::{FRAGMENTS, SentFragments};
 use crate::web::state::DashboardState;
@@ -600,8 +600,21 @@ fn a_new_connection_is_sent_every_fragment_again() {
 
 // --- SOC limits --------------------------------------------------------------
 
+fn bar_html(min: u32, max: u32, balance_day: bool) -> String {
+    use crate::web::soc_bar::{SocBarView, SocLimitsView};
+    let view = SocBarView::labelled(
+        Soc::new(50),
+        SocLimitsView {
+            min: Soc::new(min),
+            max: Soc::new(max),
+            balance_day,
+        },
+    );
+    crate::web::templates::soc_bar::render(&view).into_string()
+}
+
 #[test]
-fn battery_view_carries_the_limits_and_what_a_full_bar_is_worth() {
+fn the_battery_panel_reads_usable_energy_against_a_full_bar() {
     use crate::units::{KiloWattHours, Soc};
 
     let mut seeded = state(vec![]);
@@ -612,15 +625,51 @@ fn battery_view_carries_the_limits_and_what_a_full_bar_is_worth() {
     };
     seeded.pack_capacity = KiloWattHours(5.0);
 
-    let limits = dashboard_view(&seeded, tz())
+    let battery = dashboard_view(&seeded, tz())
         .battery
-        .expect("the fixture world has a battery")
-        .limits;
+        .expect("the fixture world has a battery");
 
-    assert_eq!((limits.min, limits.max), (Soc::new(20), Soc::FULL));
-    assert!(limits.balance_day);
+    assert_eq!(battery.bar.limits.min, Soc::new(20));
+    assert_eq!(battery.bar.limits.max, Soc::FULL);
     // 80% of 5 kWh, discounted by the 85% round trip a fresh tracker assumes.
-    assert_eq!(limits.usable_max, "3.4 kWh");
+    assert!(battery.usable_energy.value.ends_with("of 3.4 kWh"));
+}
+
+#[test]
+fn the_limit_ticks_sit_at_the_limits_and_the_stripes_cover_what_is_unused() {
+    let html = bar_html(10, 95, false);
+
+    assert!(html.contains("soc-bar__limit\" style=\"left: 10%\""));
+    assert!(html.contains("soc-bar__limit\" style=\"left: 95%\""));
+    assert!(html.contains("stripes--reserve"));
+    assert!(html.contains("width: 10%"));
+    assert!(html.contains("width: 5%"));
+    assert!(html.contains("min 10%") && html.contains("max 95%"));
+}
+
+#[test]
+fn a_balance_day_bar_reaches_100_with_a_label_and_no_headroom() {
+    let html = bar_html(10, 100, true);
+
+    assert!(html.contains("left: 100%"));
+    assert!(html.contains("max 100% · balance day"));
+    assert!(html.contains("max 100% ⚖"));
+    assert!(!html.contains("stripes--headroom"));
+}
+
+#[test]
+fn limit_labels_anchor_inward_at_the_bar_edges() {
+    let html = bar_html(0, 100, false);
+
+    assert!(html.contains("soc-bar__label soc-bar__label--start\" style=\"left: 0%\""));
+    assert!(html.contains("soc-bar__label soc-bar__label--end\" style=\"left: 100%\""));
+    assert!(!html.contains("stripes--reserve"));
+}
+
+#[test]
+fn close_limits_stack_their_labels_instead_of_overlapping() {
+    assert!(bar_html(40, 60, false).contains("soc-bar__label--lower"));
+    assert!(!bar_html(10, 95, false).contains("soc-bar__label--lower"));
 }
 
 // --- The detail modal ---------------------------------------------------------

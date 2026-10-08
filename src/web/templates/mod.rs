@@ -11,6 +11,7 @@ mod components {
     pub mod modal;
     pub mod pack_list;
     pub mod page_header;
+    pub mod soc_bar;
     pub mod stat_card;
     pub mod top_bar;
 }

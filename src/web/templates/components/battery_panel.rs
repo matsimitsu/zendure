@@ -1,7 +1,7 @@
 use maud::{Markup, html};
 
 use crate::web::detail::DetailEntity;
-use crate::web::templates::{mini_stat, pack_list};
+use crate::web::templates::{mini_stat, pack_list, soc_bar};
 use crate::web::view::BatteryPanelView;
 
 pub fn render(view: &BatteryPanelView) -> Markup {
@@ -26,9 +26,7 @@ pub fn render(view: &BatteryPanelView) -> Markup {
                 }
             }
             div class="battery-panel__history" { "24h history ›" }
-            div class="battery-panel__bar" {
-                div class="battery-panel__bar-fill" style=(format!("width: {}%;", view.soc_percent)) {}
-            }
+            (soc_bar::render(&view.bar))
             div class="battery-panel__stats" {
                 (mini_stat::render(&view.rate))
                 (mini_stat::render(&view.usable_energy))

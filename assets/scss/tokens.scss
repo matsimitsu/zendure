@@ -40,6 +40,20 @@
 
   --color-operational: oklch(0.7 0.15 150);
 
+  // SOC bar: stripes mark the SOC the controller will not use
+  --color-stripe-dark: oklch(0.16 0.015 250 / 0.75);
+  --color-stripe-light: oklch(1 0 0 / 0.12);
+  --color-tick-soft: oklch(0.9 0.01 250 / 0.7);
+
+  // Bar geometry
+  --size-bar: 10px;
+  --size-bar-compact: 4px;
+  --size-tick: 2px;
+  --size-tick-compact: 1px;
+  --size-tick-overhang-compact: 3px;
+  --size-stripe: 3px;
+  --size-stripe-period: 6px;
+
   // Typography
   --font-ui: "Inter", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", monospace;
