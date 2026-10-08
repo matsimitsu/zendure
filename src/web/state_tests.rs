@@ -42,7 +42,7 @@ fn engine() -> EngineState {
 }
 
 fn intervals() -> IntervalHistory {
-    IntervalHistory::new([DeviceId::new(journey::BATTERY_ID)])
+    journey::interval_ring()
 }
 
 fn seeded() -> DashboardState {
@@ -552,6 +552,49 @@ fn forecast_tick_changes_only_the_forecast_field() {
     assert_eq!(state.as_of, as_of_before);
     assert!(state.recent_decisions.is_empty());
     assert!(state.last_decision.is_none());
+}
+
+#[test]
+fn a_poll_records_its_own_packs_under_the_box_that_sent_them() {
+    use crate::web::pack_intervals::{Extent, PackId, PackKey};
+
+    let mut state = seeded();
+    let device = DeviceId::new(journey::BATTERY_ID);
+    let packs = [PackStatus {
+        model: None,
+        serial: Some("P1".to_string()),
+        capacity: crate::units::WattHours(2880.0),
+        soc: Some(Soc::new(55)),
+        power: None,
+        temp: None,
+    }];
+    let event = journey::battery_event(at(1), BatteryPower::ZERO, Soc::new(55));
+    state.poll_tick(
+        &engine(),
+        &event,
+        Some(PolledPacks {
+            device: &device,
+            sampled_at: at(1),
+            packs: &packs,
+        }),
+        telemetry(),
+        at(1),
+    );
+
+    let recorded = state
+        .intervals
+        .packs(crate::web::intervals::IntervalIndex::containing(at(1)));
+    let key = PackKey {
+        device,
+        pack: PackId::Serial("P1".to_string()),
+    };
+    assert_eq!(
+        recorded.get(&key).and_then(|pack| pack.soc),
+        Some(Extent {
+            min: Soc::new(55),
+            max: Soc::new(55),
+        })
+    );
 }
 
 #[test]

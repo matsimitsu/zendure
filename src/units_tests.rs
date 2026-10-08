@@ -564,3 +564,14 @@ fn celsius_keeps_the_precision_it_is_given() {
     assert_eq!(format!("{:.1}", Celsius(1.2345)), "1.2");
     assert_eq!(format!("{}", Celsius(1.2345)), "1.2345");
 }
+
+#[test]
+fn a_span_is_kept_only_forward_and_within_the_gap() {
+    let gap = Duration::from_secs(30);
+    let start = Timestamp::from_millis(1_000_000);
+    let later = |secs: i64| Timestamp::from_millis(1_000_000 + secs * 1000);
+
+    assert_eq!(start.span_within(later(30), gap), Some(gap));
+    assert_eq!(start.span_within(later(31), gap), None, "an outage");
+    assert_eq!(start.span_within(later(-1), gap), None, "a backwards step");
+}

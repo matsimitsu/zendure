@@ -11,7 +11,6 @@ use crate::engine::EngineState;
 use crate::fixtures::journey;
 use crate::models::ControlDecision;
 use crate::units::{BatteryPower, GridPower, Soc, SolarPower, Timestamp, Watts};
-use crate::web::intervals::IntervalHistory;
 use crate::web::sse::{FRAGMENTS, SentFragments};
 use crate::web::state::DashboardState;
 use crate::web::templates::layout;
@@ -60,7 +59,7 @@ fn state(history: Vec<(Timestamp, ControlDecision)>) -> DashboardState {
         &engine_state(BatteryPower::ZERO),
         history,
         crate::web::state::ActualSolarHistory::default(),
-        IntervalHistory::new([DeviceId::new(journey::BATTERY_ID)]),
+        journey::interval_ring(),
         at(0),
     )
 }
@@ -281,8 +280,8 @@ fn thousands_groups_from_the_right() {
 
 #[test]
 fn the_sign_style_decides_what_a_negative_reads_as() {
-    assert_eq!(format_watts(Watts(-1_234), SignStyle::Negative), "-1,234");
-    assert_eq!(format_watts(Watts(-1_234), SignStyle::Explicit), "-1,234");
+    assert_eq!(format_watts(Watts(-1_234), SignStyle::Negative), "−1,234");
+    assert_eq!(format_watts(Watts(-1_234), SignStyle::Explicit), "−1,234");
     assert_eq!(format_watts(Watts(-1_234), SignStyle::Magnitude), "1,234");
 }
 
@@ -309,11 +308,11 @@ fn millions_group_on_both_boundaries() {
     );
     assert_eq!(
         format_watts(Watts(-2_345_678), SignStyle::Explicit),
-        "-2,345,678"
+        "−2,345,678"
     );
     assert_eq!(
         format_watts(Watts(i32::MIN), SignStyle::Negative),
-        "-2,147,483,648"
+        "−2,147,483,648"
     );
 }
 
@@ -336,8 +335,8 @@ fn pack_status(model: Option<&'static str>, power: Option<BatteryPower>) -> Pack
     }
 }
 
-fn limits() -> crate::web::soc_bar::SocLimitsView {
-    crate::web::soc_bar::SocLimitsView {
+fn limits() -> SocLimits {
+    SocLimits {
         min: Soc::new(10),
         max: Soc::new(95),
         balance_day: false,
@@ -356,7 +355,7 @@ fn a_pack_row_shows_what_its_pack_reported() {
     assert_eq!(row.serial, "GO2ALP1P1008296");
     assert_eq!(row.bar.fill, Soc::new(68));
     assert_eq!(row.soc, "68%");
-    assert_eq!(row.power, "-1,240 W");
+    assert_eq!(row.power, "−1,240 W");
     assert_eq!(row.temperature, "18.0 °C");
     assert_eq!(row.capacity, "2.9 kWh");
 }
@@ -573,7 +572,7 @@ fn the_home_card_reports_the_houses_own_draw() {
         &engine_state(BatteryPower(600)),
         vec![],
         ActualSolarHistory::default(),
-        IntervalHistory::new([DeviceId::new(journey::BATTERY_ID)]),
+        journey::interval_ring(),
         at(0),
     );
     let view = dashboard_view(&discharging, tz());
@@ -641,10 +640,10 @@ fn a_new_connection_is_sent_every_fragment_again() {
 // --- SOC limits --------------------------------------------------------------
 
 fn bar_html(min: u32, max: u32, balance_day: bool) -> String {
-    use crate::web::soc_bar::{SocBarView, SocLimitsView};
+    use crate::web::soc_bar::SocBarView;
     let view = SocBarView::labelled(
         Soc::new(50),
-        SocLimitsView {
+        SocLimits {
             min: Soc::new(min),
             max: Soc::new(max),
             balance_day,
@@ -704,6 +703,14 @@ fn limit_labels_anchor_inward_at_the_bar_edges() {
     assert!(html.contains("soc-bar__label soc-bar__label--start\" style=\"left: 0%\""));
     assert!(html.contains("soc-bar__label soc-bar__label--end\" style=\"left: 100%\""));
     assert!(!html.contains("stripes--reserve"));
+}
+
+/// "max 85% · balance day" needs more than the 15 points beside an 85% limit,
+/// so it turns back over the bar; the plain "max 85%" still fits outward.
+#[test]
+fn a_label_too_long_for_the_room_beside_its_limit_turns_back_over_the_bar() {
+    assert!(bar_html(10, 85, true).contains("soc-bar__label--end\" style=\"left: 85%\""));
+    assert!(bar_html(10, 85, false).contains("soc-bar__label--start\" style=\"left: 85%\""));
 }
 
 #[test]

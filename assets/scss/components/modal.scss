@@ -1,9 +1,5 @@
 @use "../breakpoints" as *;
 
-body:has(.modal[open]) {
-  overflow: hidden;
-}
-
 // A full-viewport, transparent dialog: the panel sits inside it and the
 // scrim form behind the panel catches a click beside it.
 .modal {
@@ -28,7 +24,7 @@ body:has(.modal[open]) {
 
   &::backdrop {
     background: var(--color-overlay);
-    backdrop-filter: blur(3px);
+    backdrop-filter: blur(var(--blur-backdrop));
   }
 
   &__scrim {

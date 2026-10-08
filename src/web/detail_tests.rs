@@ -168,7 +168,7 @@ fn battery_dashboard() -> DashboardState {
 }
 
 fn battery_body(state: &DashboardState) -> DetailBodyView {
-    detail_body(state, DetailEntity::Battery, chrono_tz::UTC).expect("the battery has reported")
+    detail_body(state, Entity::Battery, chrono_tz::UTC).expect("the battery has reported")
 }
 
 #[test]
@@ -239,7 +239,7 @@ fn the_soc_chart_dashes_the_limits_and_shades_outside_them() {
     let [soc, power] = body.charts.as_slice() else {
         panic!("an SOC chart and a power chart");
     };
-    assert_eq!(soc.series, ChartSeries::Battery);
+    assert_eq!(soc.series, Entity::Battery);
     assert_eq!(soc.note.as_deref(), Some("dashed: limits 10% / 95%"));
     assert_eq!(soc.limit_lines.len(), 2);
     assert_eq!(soc.bands.len(), 2);
@@ -248,22 +248,30 @@ fn the_soc_chart_dashes_the_limits_and_shades_outside_them() {
 }
 
 #[test]
-fn a_limit_at_the_edge_of_the_scale_leaves_no_band() {
+fn a_limit_at_the_edge_of_the_scale_leaves_no_line_or_band() {
     let spec = soc_chart(limits(0, 95));
 
-    assert_eq!(spec.limits, vec![Soc::ZERO, Soc::new(95)]);
+    assert_eq!(spec.limits, vec![Soc::new(95)]);
     assert_eq!(spec.bands, vec![(Soc::new(95), Soc::FULL)]);
+    assert_eq!(spec.note.as_deref(), Some("dashed: limits 0% / 95%"));
+}
+
+/// The defaults before any limits are known: nothing to dash, so nothing to
+/// note either.
+#[test]
+fn unknown_limits_draw_no_window() {
+    let spec = soc_chart(limits(0, 100));
+
+    assert!(spec.limits.is_empty());
+    assert!(spec.bands.is_empty());
+    assert_eq!(spec.note, None);
 }
 
 #[test]
 fn the_battery_detail_renders_stats_packs_and_both_charts() {
     let state = battery_dashboard();
-    let html = detail_view::render(&detail_view_model(
-        &state,
-        DetailEntity::Battery,
-        chrono_tz::UTC,
-    ))
-    .into_string();
+    let html = detail_view::render(&detail_view_model(&state, Entity::Battery, chrono_tz::UTC))
+        .into_string();
 
     assert!(html.contains("State of charge"), "{html}");
     assert!(html.contains("class=\"pack-table\""), "{html}");
@@ -279,17 +287,13 @@ fn a_battery_that_has_never_reported_shows_an_empty_state() {
         &engine(None),
         vec![],
         ActualSolarHistory::default(),
-        IntervalHistory::new([DeviceId::new(journey::BATTERY_ID)]),
+        journey::interval_ring(),
         after(0),
     );
 
-    assert!(detail_body(&state, DetailEntity::Battery, chrono_tz::UTC).is_none());
-    let html = detail_view::render(&detail_view_model(
-        &state,
-        DetailEntity::Battery,
-        chrono_tz::UTC,
-    ))
-    .into_string();
+    assert!(detail_body(&state, Entity::Battery, chrono_tz::UTC).is_none());
+    let html = detail_view::render(&detail_view_model(&state, Entity::Battery, chrono_tz::UTC))
+        .into_string();
     assert!(html.contains("detail-view__empty"), "{html}");
     assert!(!html.contains("line-chart"), "{html}");
 }

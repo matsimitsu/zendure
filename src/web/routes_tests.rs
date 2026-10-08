@@ -5,8 +5,8 @@ use crate::engine::EngineState;
 use crate::fixtures::journey;
 use crate::units::{BatteryPower, GridPower, SolarPower, Timestamp};
 use crate::web::past_days::PastDays;
+use crate::web::state::ActualSolarHistory;
 use crate::web::state::DashboardState;
-use crate::web::{intervals::IntervalHistory, state::ActualSolarHistory};
 use crate::world::{DeviceId, Measurement, MeterReading, World};
 
 fn app_state() -> AppState {
@@ -31,7 +31,7 @@ fn app_state() -> AppState {
         mqtt_timed_out: false,
     };
     let now = Timestamp::from_millis(journey::NOW_MS);
-    let mut intervals = IntervalHistory::new([DeviceId::new(journey::BATTERY_ID)]);
+    let mut intervals = journey::interval_ring();
     intervals.record(&journey::meter_event(now, 400.0, 750.0));
     let seeded = DashboardState::seed(
         &engine,

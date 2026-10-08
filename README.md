@@ -518,7 +518,9 @@ rather than an interpolation. The battery panel shows its SOC now, the energy
 charged and discharged, and the SOC range over the same window; a table of
 each pack's SOC range, charged and discharged energy and temperature range
 over the 24 hours; then an SOC chart with the controller's limits dashed and
-the SOC outside them shaded, and a power chart (positive is discharge). Before
+the SOC outside them shaded (a limit at 0% or 100% draws neither, so before
+any limits are known the chart shows no window), and a power chart (positive
+is discharge). Before
 the battery has reported anything it says so instead. With htmx the route returns
 just the panel; without it (JavaScript off, a pasted link) it returns a full
 page with a link back to the dashboard. The EV card is not clickable. No `[web]` table means no

@@ -10,6 +10,7 @@
 
 use std::path::Path;
 
+use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use super::SCHEMA_VERSION;
@@ -432,23 +433,11 @@ pub fn read_recent_decisions(path: &Path, limit: usize) -> Result<Vec<DecisionRo
 /// what a reading *means* is `analyze`'s business, and this module's job ends
 /// at handing over rows it could decode.
 pub fn read_events_in_range(path: &Path, from: Timestamp, to: Timestamp) -> Result<Vec<Event>> {
-    let conn = open_for_reading(path)?;
-
-    // Ordered by `seq`, not `ts_ms`: `seq` is assigned by the single writer
-    // thread, so it is the order these were observed in even where two rows
-    // share a millisecond.
-    let mut stmt = conn.prepare(
-        "SELECT payload_json FROM events \
-         WHERE kind IN ('meter', 'device_update') AND ts_ms >= ?1 AND ts_ms <= ?2 \
-         ORDER BY seq",
-    )?;
-    let rows: Vec<String> = stmt
-        .query_map([from.as_millis(), to.as_millis()], |row| row.get(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows = rows_in_range(path, &["meter", "device_update"], from, to)?;
 
     let mut skipped = 0usize;
     let mut events = Vec::with_capacity(rows.len());
-    for payload in rows {
+    for (_, payload) in rows {
         match decode::<Event>("an event", &payload) {
             Ok(event) => events.push(event),
             Err(_) => skipped += 1,
@@ -470,17 +459,38 @@ pub fn read_raw_in_range(
     from: Timestamp,
     to: Timestamp,
 ) -> Result<Vec<(Timestamp, String)>> {
+    rows_in_range(path, &[kind], from, to)
+}
+
+/// Every `events` row of one of `kinds` stamped between two instants,
+/// inclusive, as its stamp and undecoded payload.
+fn rows_in_range(
+    path: &Path,
+    kinds: &[&str],
+    from: Timestamp,
+    to: Timestamp,
+) -> Result<Vec<(Timestamp, String)>> {
     let conn = open_for_reading(path)?;
-    let mut stmt = conn.prepare(
+    let placeholders = vec!["?"; kinds.len()].join(", ");
+    // Ordered by `seq`, not `ts_ms`: `seq` is assigned by the single writer
+    // thread, so it is the order these were observed in even where two rows
+    // share a millisecond.
+    let mut stmt = conn.prepare(&format!(
         "SELECT ts_ms, payload_json FROM events \
-         WHERE kind = ?1 AND ts_ms >= ?2 AND ts_ms <= ?3 \
-         ORDER BY seq",
-    )?;
+         WHERE kind IN ({placeholders}) AND ts_ms >= ? AND ts_ms <= ? \
+         ORDER BY seq"
+    ))?;
+    let params = kinds
+        .iter()
+        .map(|kind| Value::Text((*kind).to_string()))
+        .chain([
+            Value::Integer(from.as_millis()),
+            Value::Integer(to.as_millis()),
+        ]);
     let rows = stmt
-        .query_map(
-            rusqlite::params![kind, from.as_millis(), to.as_millis()],
-            |row| Ok((Timestamp::from_millis(row.get(0)?), row.get(1)?)),
-        )?
+        .query_map(rusqlite::params_from_iter(params), |row| {
+            Ok((Timestamp::from_millis(row.get(0)?), row.get(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }

@@ -7,8 +7,9 @@ use chrono_tz::Tz;
 use crate::units::{BatteryPower, GridPower, Soc, SolarPower, Watts};
 
 use super::axis::{AxisDensity, AxisPosition, AxisTick};
+use super::entity::Entity;
 use super::intervals::{IntervalAverages, IntervalSlot};
-use super::view::format_time;
+use super::view::{SignStyle, format_kw, format_time};
 
 /// The plot's viewBox. The SVG stretches to its box, so these are user units,
 /// not pixels.
@@ -17,26 +18,6 @@ pub const LINE_CHART_HEIGHT: f64 = 180.0;
 
 /// Fifteen-minute slots between two wide-screen time labels: three hours.
 const SLOTS_PER_TIME_LABEL: usize = 12;
-
-/// Which semantic color the chart wears, as its BEM modifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChartSeries {
-    Solar,
-    Home,
-    Grid,
-    Battery,
-}
-
-impl ChartSeries {
-    pub fn modifier(self) -> &'static str {
-        match self {
-            Self::Solar => "solar",
-            Self::Home => "home",
-            Self::Grid => "grid",
-            Self::Battery => "battery",
-        }
-    }
-}
 
 /// How a chart's value range is chosen and its ticks are labelled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +44,7 @@ impl Charted for SolarPower {
         self.get()
     }
     fn readout(self) -> String {
-        format_kw(self.get())
+        kw_readout(self.into_watts())
     }
 }
 
@@ -73,7 +54,7 @@ impl Charted for Watts {
         self.as_f64()
     }
     fn readout(self) -> String {
-        format_kw(self.as_f64())
+        kw_readout(self)
     }
 }
 
@@ -83,7 +64,7 @@ impl Charted for GridPower {
         self.get()
     }
     fn readout(self) -> String {
-        format_kw(self.get())
+        kw_readout(self.into_watts())
     }
 }
 
@@ -93,7 +74,7 @@ impl Charted for BatteryPower {
         self.as_f64()
     }
     fn readout(self) -> String {
-        format_kw(self.as_f64())
+        kw_readout(self.into_watts())
     }
 }
 
@@ -107,16 +88,14 @@ impl Charted for Soc {
     }
 }
 
-/// Signed like `SignStyle::Explicit`, so a flow always reads as a direction.
-/// Adding `0.0` turns a rounded `-0.00` into `+0.00`.
-fn format_kw(watts: f64) -> String {
-    let kw = (watts / 10.0).round() / 100.0 + 0.0;
-    format!("{kw:+.2} kW")
+/// Signed, so a flow always reads as a direction.
+fn kw_readout(watts: Watts) -> String {
+    format!("{} kW", format_kw(watts, 2, SignStyle::Explicit))
 }
 
 /// What one chart shows, before the data: its labels and any reference marks.
 pub struct LineChartSpec<T> {
-    pub series: ChartSeries,
+    pub series: Entity,
     pub title: &'static str,
     pub note: Option<String>,
     /// Drawn as dashed horizontal lines.
@@ -126,7 +105,7 @@ pub struct LineChartSpec<T> {
 }
 
 impl<T> LineChartSpec<T> {
-    pub fn new(series: ChartSeries, title: &'static str) -> Self {
+    pub fn new(series: Entity, title: &'static str) -> Self {
         Self {
             series,
             title,
@@ -161,7 +140,7 @@ pub struct LinePointView {
 }
 
 pub struct LineChartView {
-    pub series: ChartSeries,
+    pub series: Entity,
     pub title: &'static str,
     pub note: Option<String>,
     pub y_ticks: Vec<AxisTick>,
@@ -235,13 +214,9 @@ fn tick_label(scale: ChartScale, value: f64) -> String {
     match scale {
         ChartScale::Percent => format!("{value:.0}%"),
         ChartScale::Power => {
-            let kw = value / 1000.0;
-            let text = if kw.fract() == 0.0 {
-                format!("{kw:.0}")
-            } else {
-                format!("{kw:.1}")
-            };
-            text.replace('-', "−")
+            let watts = Watts::rounded(value);
+            let places = if watts.get() % 1000 == 0 { 0 } else { 1 };
+            format_kw(watts, places, SignStyle::Negative)
         }
     }
 }

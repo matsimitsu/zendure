@@ -183,6 +183,12 @@ impl GridPower {
         Watts((-self.0) as i32)
     }
 
+    /// The signed flow as whole [`Watts`], rounded — a reading to display,
+    /// not a setpoint to command.
+    pub fn into_watts(self) -> Watts {
+        Watts::rounded(self.0)
+    }
+
     pub fn get(self) -> f64 {
         self.0
     }
@@ -727,6 +733,14 @@ impl Timestamp {
 
     pub fn as_millis(self) -> i64 {
         self.0
+    }
+
+    /// The time from `self` to `later` when two readings are close enough to
+    /// integrate between; `None` across a gap wider than `max_gap` or one that
+    /// runs backwards, as a wall-clock NTP step can.
+    pub fn span_within(self, later: Timestamp, max_gap: Duration) -> Option<Duration> {
+        let dt = Duration::from_millis(u64::try_from((later - self).as_millis()).ok()?);
+        (dt <= max_gap).then_some(dt)
     }
 }
 

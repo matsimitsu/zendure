@@ -62,7 +62,7 @@
 
   &__labels {
     position: relative;
-    height: var(--text-xs);
+    height: var(--size-line);
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     line-height: 1;
@@ -70,7 +70,7 @@
 
     // A second line for the max label when the limits sit close together.
     &--stacked {
-      height: calc(2 * var(--text-xs));
+      height: calc(2 * var(--size-line));
     }
   }
 
@@ -88,7 +88,7 @@
     }
 
     &--lower {
-      top: var(--text-xs);
+      top: var(--size-line);
     }
   }
 

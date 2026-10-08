@@ -9,14 +9,13 @@ use std::sync::Mutex;
 use chrono::NaiveDate;
 use chrono_tz::Tz;
 
+use crate::clock::local_date;
 use crate::journal::read::read_oldest_event_at;
 use crate::sync::guard;
 use crate::units::Timestamp;
 use crate::world::DeviceId;
 
-use super::flows::{
-    EnergyFlowsView, FlowResolution, FlowsRequest, local_date, requested_flows_view,
-};
+use super::flows::{EnergyFlowsView, FlowResolution, FlowsRequest, requested_flows_view};
 use super::intervals::{IntervalHistory, history_of_day};
 
 /// A week of stepping back and forth at both intervals stays warm.

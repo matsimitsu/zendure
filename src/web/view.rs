@@ -9,18 +9,20 @@ use crate::units::{
 };
 
 use super::axis::{AxisTick, day_axis};
-use super::detail::{DetailEntity, detail_body};
+use super::detail::detail_body;
+use super::entity::Entity;
 use super::flows::{EnergyFlowsView, energy_flows_view};
 use super::line_chart::LineChartView;
-use super::soc_bar::{SocBarView, SocLimitsView};
+use super::soc_bar::SocBarView;
 use super::state::{
     ActualSolarHistory, DashboardState, ForecastSnapshot, Plottable, SOLAR_BUCKET_MS,
     SOLAR_BUCKETS_PER_DAY, Sparkline,
 };
+use crate::controller::SocLimits;
 
 pub struct StatCardView {
     /// Where the card opens its detail; `None` leaves it a plain card.
-    pub detail_entity: Option<DetailEntity>,
+    pub detail_entity: Option<Entity>,
     /// BEM modifier selecting the semantic color: "solar" | "home" | "grid" | "ev".
     pub variant: &'static str,
     pub glyph: &'static str,
@@ -32,18 +34,10 @@ pub struct StatCardView {
     pub sparkline_path: String,
 }
 
-/// The modal panel's header: what the entity is called and how its icon is
-/// tinted.
-pub struct DetailHeaderView {
-    /// BEM modifier selecting the icon's color.
-    pub variant: &'static str,
-    pub glyph: &'static str,
-    pub title: &'static str,
-}
-
 /// Everything one `/detail/{entity}` panel renders from.
 pub struct DetailView {
-    pub header: DetailHeaderView,
+    /// What the header names, and how its icon is tinted.
+    pub entity: Entity,
     /// `None` while the entity has reported nothing to summarise.
     pub body: Option<DetailBodyView>,
 }
@@ -67,23 +61,9 @@ pub struct PackSummaryView {
     pub temp_range: String,
 }
 
-pub fn detail_view(
-    state: &DashboardState,
-    entity: DetailEntity,
-    timezone: chrono_tz::Tz,
-) -> DetailView {
-    let (glyph, title) = match entity {
-        DetailEntity::Solar => ("☀", "Solar production"),
-        DetailEntity::Home => ("⌂", "Home usage"),
-        DetailEntity::Grid => ("⇄", "Grid"),
-        DetailEntity::Battery => ("▮", "Home battery"),
-    };
+pub fn detail_view(state: &DashboardState, entity: Entity, timezone: chrono_tz::Tz) -> DetailView {
     DetailView {
-        header: DetailHeaderView {
-            variant: entity.slug(),
-            glyph,
-            title,
-        },
+        entity,
         body: detail_body(state, entity, timezone),
     }
 }
@@ -184,26 +164,47 @@ pub struct DashboardView {
     pub energy_flows: EnergyFlowsView,
 }
 
-/// How a formatted watt figure wears its sign.
+/// How a formatted power figure wears its sign. The minus is always the
+/// typographic `−`, as the design sets it.
 #[derive(Clone, Copy)]
 pub(super) enum SignStyle {
-    /// `-1,234` when negative, `1,234` otherwise.
+    /// `−1,234` when negative, `1,234` otherwise.
     Negative,
-    /// `-1,234` or `+1,234`, so a flow always reads as a direction.
+    /// `−1,234` or `+1,234`, so a flow always reads as a direction.
     Explicit,
     /// `1,234` either way, for a quantity whose direction is stated elsewhere.
     Magnitude,
 }
 
+impl SignStyle {
+    fn sign(self, negative: bool) -> &'static str {
+        match self {
+            SignStyle::Negative | SignStyle::Explicit if negative => "−",
+            SignStyle::Explicit => "+",
+            _ => "",
+        }
+    }
+}
+
 pub(super) fn format_watts(watts: Watts, style: SignStyle) -> String {
-    let negative = watts.get() < 0;
-    let sign = match style {
-        SignStyle::Negative if negative => "-",
-        SignStyle::Explicit if negative => "-",
-        SignStyle::Explicit => "+",
-        _ => "",
-    };
-    format!("{sign}{}", thousands(watts.get().unsigned_abs().into()))
+    format!(
+        "{}{}",
+        style.sign(watts < Watts::ZERO),
+        thousands(watts.get().unsigned_abs().into())
+    )
+}
+
+/// Kilowatts to `places` decimals. The sign follows the figure as shown, so
+/// a flow that rounds to zero reads `+0.00` rather than `−0.00`.
+pub(super) fn format_kw(watts: Watts, places: u8, style: SignStyle) -> String {
+    let scale = 10_f64.powi(i32::from(places));
+    let kw = (watts.as_f64() / 1000.0 * scale).round() / scale;
+    format!(
+        "{}{:.places$}",
+        style.sign(kw < 0.0),
+        kw.abs(),
+        places = usize::from(places)
+    )
 }
 
 /// Whole-number thousands grouping, which `std::fmt` has none of built in.
@@ -317,9 +318,7 @@ fn ev_stat_card_view(
 }
 
 fn stat_card<T: Plottable>(
-    entity: DetailEntity,
-    glyph: &'static str,
-    label: &'static str,
+    entity: Entity,
     value: Watts,
     unit: &'static str,
     detail: String,
@@ -328,8 +327,8 @@ fn stat_card<T: Plottable>(
     StatCardView {
         detail_entity: Some(entity),
         variant: entity.slug(),
-        glyph,
-        label,
+        glyph: entity.glyph(),
+        label: entity.title(),
         value: format_watts(value, SignStyle::Negative),
         unit,
         detail,
@@ -346,7 +345,7 @@ fn efficiency_string(rte: Option<Percent>) -> String {
 
 pub(super) const MISSING: &str = "—";
 
-fn pack_row(index: usize, pack: &PackStatus, limits: SocLimitsView) -> PackRowView {
+fn pack_row(index: usize, pack: &PackStatus, limits: SocLimits) -> PackRowView {
     PackRowView {
         name: pack
             .model
@@ -520,18 +519,14 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
     let world = &state.engine.world;
 
     let solar = stat_card(
-        DetailEntity::Solar,
-        "☀",
-        "Solar production",
+        Entity::Solar,
         world.solar.into_watts(),
         "W",
         "Live solar production".to_string(),
         &state.sparklines.solar,
     );
     let home = stat_card(
-        DetailEntity::Home,
-        "⌂",
-        "Home usage",
+        Entity::Home,
         world.home_usage(),
         "W",
         "Live home usage".to_string(),
@@ -539,9 +534,7 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
     );
     let importing = world.grid.total.importing();
     let grid = stat_card(
-        DetailEntity::Grid,
-        "⇄",
-        "Grid",
+        Entity::Grid,
         importing,
         "W",
         if importing < Watts::ZERO {
@@ -554,11 +547,7 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
 
     let battery = world.battery().map(|battery| {
         let (mode_label, badge_variant) = panel_badge(state.last_decision.as_ref().map(|d| d.mode));
-        let limits = SocLimitsView {
-            min: state.soc_limits.min,
-            max: state.soc_limits.max,
-            balance_day: state.soc_limits.balance_day,
-        };
+        let limits = state.soc_limits;
         BatteryPanelView {
             bar: SocBarView::labelled(battery.soc, limits),
             soc_percent: battery.soc.get(),

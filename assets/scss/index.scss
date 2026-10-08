@@ -17,12 +17,18 @@
 @use "components/modal";
 @use "components/line_chart";
 @use "components/detail_view";
+@use "components/back_link";
 
 body {
   margin: 0;
   background: var(--color-bg-canvas);
   color: var(--color-text-secondary);
   font-family: var(--font-ui);
+}
+
+// The page behind an open detail stays put while the dialog scrolls.
+body:has(.modal[open]) {
+  overflow: hidden;
 }
 
 a {
@@ -38,9 +44,10 @@ a {
   gap: var(--space-6);
 }
 
-.page__back {
-  align-self: flex-start;
-  font-size: var(--text-base);
+// A detail opened as a page of its own: the column narrows to the panel, so
+// the panel sits centred with its back link above its left edge.
+.page--detail {
+  max-width: var(--size-modal);
 }
 
 .stat-row {

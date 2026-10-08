@@ -74,6 +74,21 @@ pub fn local_day_start(date: NaiveDate, tz: Tz) -> Option<Timestamp> {
         .map(Timestamp::from)
 }
 
+/// The calendar date `at` falls on in `tz`.
+pub fn local_date(at: Timestamp, tz: Tz) -> Option<NaiveDate> {
+    chrono::DateTime::from_timestamp_millis(at.as_millis())
+        .map(|utc| utc.with_timezone(&tz).date_naive())
+}
+
+/// The first instant of `date` in `tz` and of the day after: 23 or 25 hours
+/// apart across a DST change.
+pub fn local_day_bounds(date: NaiveDate, tz: Tz) -> Option<(Timestamp, Timestamp)> {
+    Some((
+        local_day_start(date, tz)?,
+        local_day_start(date.succ_opt()?, tz)?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

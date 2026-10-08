@@ -1,0 +1,22 @@
+// The raised card every dashboard panel sits on. Padding stays with each
+// component, since it differs from panel to panel.
+@mixin panel-surface {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+}
+
+// A whole card that is a link: no link styling, and the accent ring on
+// hover and keyboard focus.
+@mixin clickable-card {
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+
+  &:hover,
+  &:focus-visible {
+    border-color: var(--color-accent-ring);
+    box-shadow: var(--shadow-focus-ring);
+    outline: none;
+  }
+}

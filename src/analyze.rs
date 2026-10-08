@@ -218,7 +218,7 @@ pub fn daily(events: &[Event]) -> Vec<DayTotals> {
 /// misplaces at most one scan tick of energy, and splitting it would buy precision
 /// this is nowhere near accurate enough to carry.
 fn accumulate(days: &mut BTreeMap<NaiveDate, DayTotals>, previous: &Sample, current: &Sample) {
-    let Some(dt) = span(previous.at, current.at) else {
+    let Some(dt) = previous.at.span_within(current.at, MAX_SAMPLE_GAP) else {
         return;
     };
 
@@ -256,15 +256,6 @@ fn accumulate(days: &mut BTreeMap<NaiveDate, DayTotals>, previous: &Sample, curr
                 dt,
             );
     }
-}
-
-/// The interval between two samples, or `None` when it is a gap or runs
-/// backwards. Backwards is possible without anything being corrupt: `ts_ms` is
-/// wall clock, so an NTP step can land one reading before the one it followed.
-fn span(from: Timestamp, to: Timestamp) -> Option<Duration> {
-    let millis = to.as_millis().checked_sub(from.as_millis())?;
-    let dt = Duration::from_millis(u64::try_from(millis).ok()?);
-    (dt <= MAX_SAMPLE_GAP).then_some(dt)
 }
 
 /// The local calendar date a clock falls in.

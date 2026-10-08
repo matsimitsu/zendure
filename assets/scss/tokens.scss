@@ -75,6 +75,13 @@
   --weight-medium: 500;
   --weight-semibold: 600;
 
+  // Small-caps headings and labels
+  --tracking-caps: 0.05em;
+
+  // One line of text at the element's own line height, for a box that only
+  // holds absolutely placed labels
+  --size-line: 1lh;
+
   // Spacing / radius (4px base grid)
   --space-1: 4px;
   --space-2: 8px;
@@ -95,6 +102,15 @@
   // Elevation
   --shadow-modal: 0 24px 64px oklch(0 0 0 / 0.5);
   --shadow-focus-ring: 0 0 0 1px var(--color-accent-ring);
+  --blur-backdrop: 3px;
+
+  // Emphasis
+  --opacity-disabled: 0.35;
+  --opacity-hidden: 0.4;
+
+  // Energy flows: the in-progress interval's marker
+  --opacity-now-line: 0.7;
+  --dash-now-line: 4 4;
 
   // Sizes
   --size-modal: 880px;

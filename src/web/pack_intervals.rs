@@ -81,7 +81,8 @@ impl PackInterval {
 pub(crate) type PackIntervals = BTreeMap<PackKey, PackInterval>;
 
 /// A gap wider than this between two flow readings is an outage or a
-/// restart: integrating across it would invent hours of constant flow.
+/// restart: integrating across it would invent a constant flow for however
+/// long the pack was silent.
 const MAX_FLOW_GAP: Duration = Duration::from_secs(15 * 60);
 
 /// What one reading changes in a pack's bucket.
@@ -156,11 +157,8 @@ impl PackTrace {
         power: BatteryPower,
     ) -> (WattHours, WattHours) {
         let previous = self.last_flow.insert(key.clone(), (at, power));
-        let span = previous.and_then(|(then, before)| {
-            // Negative after a backwards clock step: no span to integrate.
-            let dt = Duration::from_millis(u64::try_from((at - then).as_millis()).ok()?);
-            (dt <= MAX_FLOW_GAP).then_some((dt, before))
-        });
+        let span = previous
+            .and_then(|(then, before)| then.span_within(at, MAX_FLOW_GAP).map(|dt| (dt, before)));
         match span {
             Some((dt, before)) => (
                 WattHours::integrate(before.charging(), power.charging(), dt),

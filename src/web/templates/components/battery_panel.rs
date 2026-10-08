@@ -1,7 +1,7 @@
 use maud::{Markup, html};
 
-use crate::web::detail::DetailEntity;
-use crate::web::templates::{mini_stat, pack_list, soc_bar};
+use crate::web::entity::Entity;
+use crate::web::templates::{mini_stat, modal, pack_list, soc_bar};
 use crate::web::view::BatteryPanelView;
 
 /// The panel's shell, rendered once with the page and live only inside its
@@ -10,7 +10,7 @@ use crate::web::view::BatteryPanelView;
 /// re-rendered to become one later.
 pub fn render(view: Option<&BatteryPanelView>, swap: &str) -> Markup {
     html! {
-        a class="battery-panel battery-panel--link" href=(DetailEntity::Battery.path()) hx-get=(DetailEntity::Battery.path()) hx-target="#detail-modal .modal__panel" {
+        a class="battery-panel battery-panel--link" href=(Entity::Battery.path()) hx-get=(Entity::Battery.path()) hx-target=(modal::TARGET) {
             div class="battery-panel__live" sse-swap=(swap) { (contents(view)) }
         }
     }
@@ -34,11 +34,11 @@ fn panel(view: &BatteryPanelView) -> Markup {
         div class="battery-panel__head" {
             div class="battery-panel__identity" {
                 div class="battery-panel__icon" {
-                    "▮"
+                    (Entity::Battery.glyph())
                 }
                 div {
                     div class="battery-panel__label" {
-                        "Home battery"
+                        (Entity::Battery.title())
                     }
                     div class="battery-panel__soc" {
                         (view.soc_percent) "%"

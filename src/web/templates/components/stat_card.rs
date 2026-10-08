@@ -1,5 +1,6 @@
 use maud::{Markup, html};
 
+use crate::web::templates::modal;
 use crate::web::view::StatCardView;
 
 /// The card's shell, rendered once with the page. Only the `__live` wrapper
@@ -10,7 +11,7 @@ pub fn render(view: &StatCardView, swap: &str) -> Markup {
     let class = format!("stat-card stat-card--{}", view.variant);
     html! {
         @if let Some(entity) = view.detail_entity {
-            a class=(format!("{class} stat-card--link")) href=(entity.path()) hx-get=(entity.path()) hx-target="#detail-modal .modal__panel" {
+            a class=(format!("{class} stat-card--link")) href=(entity.path()) hx-get=(entity.path()) hx-target=(modal::TARGET) {
                 div class="stat-card__live" sse-swap=(swap) { (contents(view)) }
             }
         } @else {

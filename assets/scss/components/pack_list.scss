@@ -23,7 +23,7 @@
     font-size: var(--text-xs);
     font-weight: var(--weight-semibold);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: var(--tracking-caps);
     color: var(--color-text-faint);
   }
 

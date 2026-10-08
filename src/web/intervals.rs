@@ -12,6 +12,7 @@ use std::time::Duration;
 use chrono::NaiveDate;
 use chrono_tz::Tz;
 
+use crate::clock::local_day_bounds;
 use crate::device::PackStatus;
 use crate::event::Event;
 use crate::journal::read::{ReadError, read_events_in_range, read_raw_in_range};
@@ -406,13 +407,7 @@ impl IntervalHistory {
     /// Every interval of local `date` that had finished by `now`, oldest
     /// first. Empty where `tz` cannot place the day's bounds.
     pub fn completed_on(&self, date: NaiveDate, tz: Tz, now: Timestamp) -> Vec<IntervalSlot> {
-        let bounds = date.succ_opt().and_then(|next| {
-            Some((
-                crate::clock::local_day_start(date, tz)?,
-                crate::clock::local_day_start(next, tz)?,
-            ))
-        });
-        let Some((start, end)) = bounds else {
+        let Some((start, end)) = local_day_bounds(date, tz) else {
             return Vec::new();
         };
         let until = IntervalIndex::containing(end).min(IntervalIndex::containing(now));
@@ -458,13 +453,7 @@ pub fn history_of_day(
     devices: impl IntoIterator<Item = DeviceId>,
 ) -> Result<IntervalHistory, ReadError> {
     let mut history = IntervalHistory::new(devices);
-    let bounds = date.succ_opt().and_then(|next| {
-        Some((
-            crate::clock::local_day_start(date, tz)?,
-            crate::clock::local_day_start(next, tz)?,
-        ))
-    });
-    let Some((start, end)) = bounds else {
+    let Some((start, end)) = local_day_bounds(date, tz) else {
         return Ok(history);
     };
     // The journal's range includes both ends; the next midnight is the next

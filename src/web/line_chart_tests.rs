@@ -23,7 +23,7 @@ fn solar_slots(values: &[Option<f64>]) -> Vec<IntervalSlot> {
 
 fn solar_chart(values: &[Option<f64>]) -> LineChartView {
     LineChartView::build(
-        LineChartSpec::new(ChartSeries::Solar, "Power (kW)"),
+        LineChartSpec::new(Entity::Solar, "Power (kW)"),
         &solar_slots(values),
         |a| a.solar,
         chrono_tz::UTC,
@@ -97,7 +97,7 @@ fn a_negative_flow_puts_zero_inside_the_plot_and_labels_with_a_minus_sign() {
         })
         .collect();
     let chart = LineChartView::build(
-        LineChartSpec::new(ChartSeries::Grid, "Power (kW)"),
+        LineChartSpec::new(Entity::Grid, "Power (kW)"),
         &slots,
         |a| a.grid,
         chrono_tz::UTC,
@@ -108,7 +108,7 @@ fn a_negative_flow_puts_zero_inside_the_plot_and_labels_with_a_minus_sign() {
         chart.y_ticks.first().map(|t| t.label.as_str()),
         Some("−1.5")
     );
-    assert_eq!(chart.points[0].value, "-1.50 kW");
+    assert_eq!(chart.points[0].value, "−1.50 kW");
 }
 
 #[test]
@@ -134,7 +134,7 @@ fn a_soc_chart_spans_the_whole_range_and_draws_its_limits_and_bands() {
     let spec = LineChartSpec {
         limits: vec![Soc::new(10), Soc::new(90)],
         bands: vec![(Soc::ZERO, Soc::new(10)), (Soc::new(90), Soc::FULL)],
-        ..LineChartSpec::new(ChartSeries::Battery, "State of charge (%)")
+        ..LineChartSpec::new(Entity::Battery, "State of charge (%)")
     };
     let chart = LineChartView::build(spec, &slots, |a| a.soc, chrono_tz::UTC);
 

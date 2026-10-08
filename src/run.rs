@@ -164,7 +164,7 @@ impl Tick<'_> {
             // when the reading was taken.
             let event = Event::DeviceUpdate {
                 at: sampled_at,
-                id,
+                id: id.clone(),
                 measurement: Measurement::Battery(reading.state),
             };
             self.journal.event(&event);
@@ -172,10 +172,16 @@ impl Tick<'_> {
 
             if let Some(tx) = self.dashboard {
                 let snapshot = engine.state();
-                let polled_packs = reading.telemetry.packs.as_deref();
-                tx.send_modify(|state| {
-                    state.poll_tick(&snapshot, &event, polled_packs, figures, at.now)
-                });
+                let polled = reading
+                    .telemetry
+                    .packs
+                    .as_deref()
+                    .map(|packs| web::PolledPacks {
+                        device: &id,
+                        sampled_at: sampled_at.now,
+                        packs,
+                    });
+                tx.send_modify(|state| state.poll_tick(&snapshot, &event, polled, figures, at.now));
             }
         }
 

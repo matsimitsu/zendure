@@ -1,0 +1,6 @@
+// Only as wide as its text, so the column's stretch does not turn the whole
+// row into a link.
+.back-link {
+  align-self: flex-start;
+  font-size: var(--text-base);
+}

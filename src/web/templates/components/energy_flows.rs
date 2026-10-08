@@ -1,9 +1,10 @@
 use chrono::NaiveDate;
 use maud::{Markup, html};
 
+use crate::web::entity::Entity;
 use crate::web::flows::{
     DayNavView, EnergyFlowsView, FLOWS_CHART_HEIGHT, FLOWS_CHART_WIDTH, FlowPlotView,
-    FlowResolution, FlowSeries,
+    FlowResolution,
 };
 use crate::web::templates::axis;
 
@@ -36,7 +37,7 @@ pub fn render(view: &EnergyFlowsView) -> Markup {
         div class="energy-flows__legend" aria-live="polite" {
             span class="energy-flows__readout-time" { (view.readout.label) " · kW" }
             @for (series, value) in &view.readout.values {
-                @let key = series.key();
+                @let key = series.slug();
                 button type="button" class="energy-flows__legend-item" data-series=(key) {
                     span class=(format!("energy-flows__swatch energy-flows__swatch--{key}")) {}
                     span class="energy-flows__series" { (series.label()) }
@@ -136,7 +137,7 @@ fn render_plot(view: &EnergyFlowsView, plot: &FlowPlotView) -> Markup {
             rect class="energy-flows__highlight" x="0" y="0" width="0" height=(format!("{FLOWS_CHART_HEIGHT:.0}")) {}
             @for bar in &plot.bars {
                 rect
-                    class=(format!("energy-flows__bar energy-flows__bar--{}", bar.series.key()))
+                    class=(format!("energy-flows__bar energy-flows__bar--{}", bar.series.slug()))
                     x=(format!("{:.2}", bar.rect.x))
                     y=(format!("{:.2}", bar.rect.y))
                     width=(format!("{:.2}", bar.rect.width))
@@ -158,10 +159,10 @@ fn render_plot(view: &EnergyFlowsView, plot: &FlowPlotView) -> Markup {
                     width=(format!("{:.2}", hit.width))
                     height=(format!("{FLOWS_CHART_HEIGHT:.0}"))
                     data-label=(hit.readout.label)
-                    data-solar=(hit.readout.value(FlowSeries::Solar))
-                    data-home=(hit.readout.value(FlowSeries::Home))
-                    data-grid=(hit.readout.value(FlowSeries::Grid))
-                    data-battery=(hit.readout.value(FlowSeries::Battery)) {}
+                    data-solar=(hit.readout.value(Entity::Solar))
+                    data-home=(hit.readout.value(Entity::Home))
+                    data-grid=(hit.readout.value(Entity::Grid))
+                    data-battery=(hit.readout.value(Entity::Battery)) {}
             }
         }
     }

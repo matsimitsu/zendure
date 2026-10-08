@@ -10,7 +10,7 @@
   font-weight: var(--weight-semibold);
   color: var(--color-text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: var(--tracking-caps);
 }
 
 .mini-stat__value {

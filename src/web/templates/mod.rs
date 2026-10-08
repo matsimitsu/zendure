@@ -2,6 +2,7 @@ pub mod layout;
 
 mod components {
     pub mod axis;
+    pub mod back_link;
     pub mod battery_panel;
     pub mod callout;
     pub mod decision_log;

@@ -9,14 +9,15 @@ use std::time::Duration;
 use chrono::{NaiveDate, NaiveTime, TimeZone};
 use chrono_tz::Tz;
 
-use crate::units::{Elapsed, Timestamp, Watts};
+use crate::clock::{local_date, local_day_bounds};
+use crate::units::{BatteryPower, Elapsed, GridPower, SolarPower, Timestamp, Watts};
 
 use super::axis::{AxisDensity, AxisPosition, AxisTick, day_axis};
+use super::entity::Entity;
 use super::intervals::{
     HOUR, INTERVAL, IntervalAverages, IntervalHistory, IntervalIndex, IntervalSlot, merged,
 };
-use super::state::Plottable;
-use super::view::{MISSING, format_time};
+use super::view::{MISSING, SignStyle, format_kw, format_time};
 
 /// The plots' viewBox. Stretched to the panel (`preserveAspectRatio="none"`),
 /// so these are proportions rather than pixels.
@@ -31,45 +32,15 @@ const NICE_STEPS: [Watts; 3] = [Watts(500), Watts(1000), Watts(2000)];
 /// The most steps a scale may span before the next nice step up is tried.
 const MAX_STEPS: i32 = 6;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FlowSeries {
-    Solar,
-    Home,
-    Grid,
-    Battery,
-}
-
-impl FlowSeries {
-    pub const ALL: [Self; 4] = [Self::Solar, Self::Home, Self::Grid, Self::Battery];
-
-    /// The BEM modifier, and the `data-*` name its readout travels under.
-    pub fn key(self) -> &'static str {
-        match self {
-            Self::Solar => "solar",
-            Self::Home => "home",
-            Self::Grid => "grid",
-            Self::Battery => "battery",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Solar => "Solar",
-            Self::Home => "Home",
-            Self::Grid => "Grid",
-            Self::Battery => "Battery",
-        }
-    }
-
-    /// Grid is positive importing and battery positive discharging, as their
-    /// role types already are, so below zero reads as export and charge.
-    fn watts(self, averages: &IntervalAverages) -> Option<f64> {
-        match self {
-            Self::Solar => averages.solar.map(Plottable::plot_value),
-            Self::Home => averages.home.map(Plottable::plot_value),
-            Self::Grid => averages.grid.map(Plottable::plot_value),
-            Self::Battery => averages.battery.map(Plottable::plot_value),
-        }
+/// One series' flow over an interval, as the chart draws it. Grid is positive
+/// importing and battery positive discharging, as their role types already
+/// are, so below zero reads as export and charge.
+fn flow(series: Entity, averages: &IntervalAverages) -> Option<Watts> {
+    match series {
+        Entity::Solar => averages.solar.map(SolarPower::into_watts),
+        Entity::Home => averages.home,
+        Entity::Grid => averages.grid.map(GridPower::into_watts),
+        Entity::Battery => averages.battery.map(BatteryPower::into_watts),
     }
 }
 
@@ -136,13 +107,7 @@ impl Day {
     /// Falls back to the UTC day for a date `tz` cannot place, so the chart
     /// still has a frame to draw its gaps in.
     fn of(date: NaiveDate, tz: Tz) -> Self {
-        let bounds = date.succ_opt().and_then(|next| {
-            Some((
-                crate::clock::local_day_start(date, tz)?,
-                crate::clock::local_day_start(next, tz)?,
-            ))
-        });
-        match bounds {
+        match local_day_bounds(date, tz) {
             Some((start, end)) => Day {
                 start,
                 length: end - start,
@@ -198,7 +163,11 @@ impl Day {
 
     /// `span` as a share of the viewBox's width.
     fn width(&self, span: Elapsed) -> f64 {
-        span.as_millis() as f64 / self.length.as_millis().max(1) as f64 * FLOWS_CHART_WIDTH
+        let length = self.length.as_secs_f64();
+        if length <= 0.0 {
+            return 0.0;
+        }
+        span.as_secs_f64() / length * FLOWS_CHART_WIDTH
     }
 
     fn x(&self, at: Timestamp) -> f64 {
@@ -223,14 +192,23 @@ pub(super) struct FlowScale {
 }
 
 impl FlowScale {
-    fn fitting(values: impl Iterator<Item = f64>) -> Self {
-        let (high, low) = values.fold((0.0_f64, 0.0_f64), |(hi, lo), v| (hi.max(v), lo.min(v)));
-        // `as` saturates, so an absurd reading costs a tall axis, not a wrap.
-        let steps = |step: Watts, extent: f64| (extent / step.as_f64()).ceil() as i32;
+    fn fitting(values: impl Iterator<Item = Watts>) -> Self {
+        let (high, low) = values.fold((Watts::ZERO, Watts::ZERO), |(hi, lo), v| {
+            (hi.max(v), lo.min(v))
+        });
+        // How many `step`s cover `extent`; saturating, so an absurd reading
+        // costs a tall axis, not a wrap.
+        let steps = |step: Watts, extent: Watts| {
+            let count = extent
+                .get()
+                .unsigned_abs()
+                .div_ceil(step.get().unsigned_abs());
+            i32::try_from(count).unwrap_or(i32::MAX)
+        };
         let largest = NICE_STEPS[NICE_STEPS.len() - 1];
         let step = NICE_STEPS
             .into_iter()
-            .find(|&step| steps(step, high).max(1) + steps(step, -low) <= MAX_STEPS)
+            .find(|&step| steps(step, high).max(1).saturating_add(steps(step, -low)) <= MAX_STEPS)
             .unwrap_or(largest);
         FlowScale {
             top: Watts(step.get().saturating_mul(steps(step, high).max(1))),
@@ -243,16 +221,16 @@ impl FlowScale {
         (self.top - self.bottom).as_f64()
     }
 
-    fn y(&self, watts: f64) -> f64 {
-        (self.top.as_f64() - watts) / self.range() * FLOWS_CHART_HEIGHT
+    fn y(&self, watts: Watts) -> f64 {
+        (self.top - watts).as_f64() / self.range() * FLOWS_CHART_HEIGHT
     }
 
     /// A bar's `(y, height)`: up from the zero line for a positive flow,
     /// down from it for a negative one.
-    fn bar(&self, watts: f64) -> (f64, f64) {
-        let zero = self.y(0.0);
+    fn bar(&self, watts: Watts) -> (f64, f64) {
+        let zero = self.y(Watts::ZERO);
         let height = (zero - self.y(watts)).abs().max(MIN_BAR_HEIGHT);
-        if watts > 0.0 {
+        if watts > Watts::ZERO {
             (zero - height, height)
         } else {
             (zero, height)
@@ -267,31 +245,21 @@ impl FlowScale {
     }
 }
 
-/// A y-axis label: kilowatts to one place, with a typographic minus.
+/// A y-axis label: kilowatts to one place, and a bare zero.
 fn tick_label(watts: Watts) -> String {
     if watts == Watts::ZERO {
         return "0".to_string();
     }
-    let kw = format!("{:.1}", watts.as_f64().abs() / 1000.0);
-    if watts < Watts::ZERO {
-        format!("−{kw}")
-    } else {
-        kw
-    }
+    format_kw(watts, 1, SignStyle::Negative)
 }
 
 /// A readout value: signed kilowatts to two places, so every series reads as
-/// a direction, with a zero that rounded from either side reading `+0.00`.
-fn readout_value(watts: Option<f64>) -> String {
-    let Some(watts) = watts else {
-        return MISSING.to_string();
-    };
-    let kw = format!("{:.2}", watts.abs() / 1000.0);
-    if watts < 0.0 && kw != "0.00" {
-        format!("−{kw}")
-    } else {
-        format!("+{kw}")
-    }
+/// a direction.
+fn readout_value(watts: Option<Watts>) -> String {
+    watts.map_or_else(
+        || MISSING.to_string(),
+        |watts| format_kw(watts, 2, SignStyle::Explicit),
+    )
 }
 
 /// What the legend shows for one column: its time span and a value per series.
@@ -299,7 +267,7 @@ fn readout_value(watts: Option<f64>) -> String {
 pub struct FlowReadoutView {
     /// `13:00–14:00`, as the hit column's `data-label` carries it.
     pub label: String,
-    pub values: [(FlowSeries, String); 4],
+    pub values: [(Entity, String); 4],
 }
 
 impl FlowReadoutView {
@@ -310,11 +278,11 @@ impl FlowReadoutView {
                 format_time(start, tz),
                 format_time(start + Elapsed::of(span), tz)
             ),
-            values: FlowSeries::ALL.map(|series| (series, readout_value(series.watts(averages)))),
+            values: Entity::ALL.map(|series| (series, readout_value(flow(series, averages)))),
         }
     }
 
-    pub fn value(&self, series: FlowSeries) -> &str {
+    pub fn value(&self, series: Entity) -> &str {
         self.values
             .iter()
             .find(|(each, _)| *each == series)
@@ -324,7 +292,7 @@ impl FlowReadoutView {
     fn empty() -> Self {
         FlowReadoutView {
             label: MISSING.to_string(),
-            values: FlowSeries::ALL.map(|series| (series, MISSING.to_string())),
+            values: Entity::ALL.map(|series| (series, MISSING.to_string())),
         }
     }
 }
@@ -340,7 +308,7 @@ pub struct FlowRect {
 
 #[derive(Debug, Clone)]
 pub struct FlowBarView {
-    pub series: FlowSeries,
+    pub series: Entity,
     pub rect: FlowRect,
 }
 
@@ -483,7 +451,12 @@ fn plot(
     let span = resolution.span();
     let slot_width = day.width(Elapsed::of(span));
     let padding = slot_width * resolution.group_padding();
-    let lane = (slot_width - 2.0 * padding) / FlowSeries::ALL.len() as f64;
+    // Each series' lane, counted in lane widths from the group's left edge.
+    let lanes: Vec<(f64, Entity)> = std::iter::successors(Some(0.0), |lane| Some(lane + 1.0))
+        .zip(Entity::ALL)
+        .collect();
+    let lane_count = lanes.last().map_or(1.0, |&(last, _)| last + 1.0);
+    let lane = (slot_width - 2.0 * padding) / lane_count;
     let bar_width = lane * resolution.bar_fill();
 
     let latest = slots
@@ -505,15 +478,15 @@ fn plot(
             });
             continue;
         };
-        for (lane_index, series) in FlowSeries::ALL.into_iter().enumerate() {
-            let Some(watts) = series.watts(averages).filter(|&w| w != 0.0) else {
+        for &(lane_index, series) in &lanes {
+            let Some(watts) = flow(series, averages).filter(|&w| w != Watts::ZERO) else {
                 continue;
             };
             let (y, height) = scale.bar(watts);
             bars.push(FlowBarView {
                 series,
                 rect: FlowRect {
-                    x: x + padding + lane * lane_index as f64 + (lane - bar_width) / 2.0,
+                    x: x + padding + lane * lane_index + (lane - bar_width) / 2.0,
                     y,
                     width: bar_width,
                     height,
@@ -534,12 +507,6 @@ fn plot(
         hits,
         now_x: day.slot_containing(span, now).map(|start| day.x(start)),
     }
-}
-
-/// The calendar date `at` falls on in `tz`.
-pub fn local_date(at: Timestamp, tz: Tz) -> Option<NaiveDate> {
-    chrono::DateTime::from_timestamp_millis(at.as_millis())
-        .map(|utc| utc.with_timezone(&tz).date_naive())
 }
 
 /// What the panel was asked to show, already resolved against today.
@@ -578,9 +545,9 @@ pub fn requested_flows_view(
         .collect();
 
     let scale = FlowScale::fitting(completed.values().flat_map(|averages| {
-        FlowSeries::ALL
+        Entity::ALL
             .into_iter()
-            .filter_map(|series| series.watts(averages))
+            .filter_map(|series| flow(series, averages))
     }));
 
     let hours = hour_slots(&day, &completed, now);
@@ -601,7 +568,7 @@ pub fn requested_flows_view(
             .iter()
             .map(|&tick| {
                 AxisTick::new(
-                    AxisPosition::new(scale.y(tick.as_f64()) / FLOWS_CHART_HEIGHT),
+                    AxisPosition::new(scale.y(tick) / FLOWS_CHART_HEIGHT),
                     tick_label(tick),
                     AxisDensity::Always,
                 )
@@ -611,9 +578,9 @@ pub fn requested_flows_view(
         grid_lines: ticks
             .iter()
             .filter(|&&tick| tick != Watts::ZERO)
-            .map(|tick| scale.y(tick.as_f64()))
+            .map(|&tick| scale.y(tick))
             .collect(),
-        zero_y: scale.y(0.0),
+        zero_y: scale.y(Watts::ZERO),
         plots: [hourly_plot, quarterly_plot],
         readout,
     }

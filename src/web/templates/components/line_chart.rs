@@ -12,7 +12,7 @@ use crate::web::templates::axis;
 pub fn render(view: &LineChartView) -> Markup {
     let full_width = format!("{LINE_CHART_WIDTH:.0}");
     html! {
-        line-chart class=(format!("line-chart line-chart--{}", view.series.modifier()))
+        line-chart class=(format!("line-chart line-chart--{}", view.series.slug()))
             data-times=(json(view, |p| &p.time))
             data-values=(json(view, |p| &p.value))
             data-y=(json_y(view))

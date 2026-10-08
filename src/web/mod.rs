@@ -4,6 +4,7 @@
 
 mod axis;
 mod detail;
+mod entity;
 mod flows;
 mod intervals;
 mod line_chart;
@@ -17,10 +18,12 @@ mod state;
 mod templates;
 mod view;
 
+#[cfg(test)]
+pub(crate) use intervals::IntervalHistory;
 pub use intervals::seed_interval_history;
 pub use past_days::PastDays;
 pub use server::spawn;
 pub use state::{
-    DashboardState, DashboardStateSender, DashboardTelemetry, ForecastSnapshot, seed_actual_solar,
-    seed_decision_log,
+    DashboardState, DashboardStateSender, DashboardTelemetry, ForecastSnapshot, PolledPacks,
+    seed_actual_solar, seed_decision_log,
 };

@@ -3,20 +3,15 @@
 
 use super::*;
 
-use crate::fixtures::journey::{self, battery_event, meter_event};
+use crate::fixtures::journey::{battery_event, interval_ring, meter_event};
 use crate::fixtures::utc;
 use crate::units::{BatteryPower, Soc};
-use crate::world::DeviceId;
 
 fn tz() -> Tz {
     chrono_tz::Europe::Amsterdam
 }
 
-fn ring() -> IntervalHistory {
-    IntervalHistory::new([DeviceId::new(journey::BATTERY_ID)])
-}
-
-fn bars_of(plot: &FlowPlotView, series: FlowSeries) -> Vec<FlowRect> {
+fn bars_of(plot: &FlowPlotView, series: Entity) -> Vec<FlowRect> {
     plot.bars
         .iter()
         .filter(|bar| bar.series == series)
@@ -31,7 +26,7 @@ fn close(a: f64, b: f64) -> bool {
 #[test]
 fn an_ordinary_day_has_24_hours_and_96_quarters() {
     // 8 October 2026, 12:00 CEST.
-    let view = energy_flows_view(&ring(), utc(8, 10, 0), tz());
+    let view = energy_flows_view(&interval_ring(), utc(8, 10, 0), tz());
     let [hours, quarters] = &view.plots;
 
     assert_eq!(hours.hits.len(), 24);
@@ -40,7 +35,7 @@ fn an_ordinary_day_has_24_hours_and_96_quarters() {
 
 #[test]
 fn the_autumn_dst_day_has_25_hours_and_100_quarters() {
-    let view = energy_flows_view(&ring(), utc(25, 10, 0), tz());
+    let view = energy_flows_view(&interval_ring(), utc(25, 10, 0), tz());
     let [hours, quarters] = &view.plots;
 
     assert_eq!(hours.hits.len(), 25);
@@ -51,7 +46,7 @@ fn the_autumn_dst_day_has_25_hours_and_100_quarters() {
 /// charging grow down from it.
 #[test]
 fn a_positive_flow_stands_on_the_zero_line_and_a_negative_one_hangs_from_it() {
-    let mut history = ring();
+    let mut history = interval_ring();
     // 10:00 CEST: importing 400 W while the battery charges at 300 W.
     history.record(&meter_event(utc(8, 8, 1), 400.0, 0.0));
     history.record(&battery_event(
@@ -63,12 +58,12 @@ fn a_positive_flow_stands_on_the_zero_line_and_a_negative_one_hangs_from_it() {
     let view = energy_flows_view(&history, utc(8, 8, 20), tz());
     let quarters = &view.plots[1];
 
-    let [grid] = bars_of(quarters, FlowSeries::Grid)[..] else {
+    let [grid] = bars_of(quarters, Entity::Grid)[..] else {
         panic!("one grid bar");
     };
     assert!(close(grid.y + grid.height, view.zero_y), "{grid:?}");
 
-    let [battery] = bars_of(quarters, FlowSeries::Battery)[..] else {
+    let [battery] = bars_of(quarters, Entity::Battery)[..] else {
         panic!("one battery bar");
     };
     assert!(close(battery.y, view.zero_y), "{battery:?}");
@@ -77,7 +72,7 @@ fn a_positive_flow_stands_on_the_zero_line_and_a_negative_one_hangs_from_it() {
 
 #[test]
 fn zero_sits_where_the_scale_puts_it() {
-    let mut history = ring();
+    let mut history = interval_ring();
     history.record(&meter_event(utc(8, 8, 1), 900.0, 0.0));
     history.record(&battery_event(
         utc(8, 8, 2),
@@ -100,14 +95,14 @@ fn zero_sits_where_the_scale_puts_it() {
 
 #[test]
 fn with_nothing_below_zero_the_zero_line_is_the_floor() {
-    let view = energy_flows_view(&ring(), utc(8, 10, 0), tz());
+    let view = energy_flows_view(&interval_ring(), utc(8, 10, 0), tz());
 
     assert!(close(view.zero_y, FLOWS_CHART_HEIGHT));
 }
 
 #[test]
 fn a_wide_range_takes_a_larger_step() {
-    let scale = FlowScale::fitting([3000.0, -2400.0].into_iter());
+    let scale = FlowScale::fitting([Watts(3000), Watts(-2400)].into_iter());
 
     assert_eq!(scale.step, Watts(1000));
     assert_eq!((scale.top, scale.bottom), (Watts(3000), Watts(-3000)));
@@ -115,16 +110,16 @@ fn a_wide_range_takes_a_larger_step() {
 
 #[test]
 fn a_tiny_flow_still_shows() {
-    let scale = FlowScale::fitting([2000.0].into_iter());
+    let scale = FlowScale::fitting([Watts(2000)].into_iter());
 
-    assert!(close(scale.bar(1.0).1, MIN_BAR_HEIGHT));
+    assert!(close(scale.bar(Watts(1)).1, MIN_BAR_HEIGHT));
 }
 
 /// The legend opens on the newest hour that has finished, not on the one
 /// still filling.
 #[test]
 fn the_default_readout_is_the_last_completed_interval() {
-    let mut history = ring();
+    let mut history = interval_ring();
     // 09:xx and 10:xx CEST complete; 11:05 is in progress.
     history.record(&meter_event(utc(8, 7, 10), 100.0, 0.0));
     history.record(&meter_event(utc(8, 8, 10), 200.0, 0.0));
@@ -133,7 +128,7 @@ fn the_default_readout_is_the_last_completed_interval() {
     let view = energy_flows_view(&history, utc(8, 9, 20), tz());
 
     assert_eq!(view.readout.label, "10:00–11:00");
-    assert_eq!(view.readout.value(FlowSeries::Grid), "+0.20");
+    assert_eq!(view.readout.value(Entity::Grid), "+0.20");
     let [hours, quarters] = &view.plots;
     assert_eq!(hours.hits.iter().filter(|hit| hit.latest).count(), 1);
     assert!(hours.hits[10].latest);
@@ -142,14 +137,14 @@ fn the_default_readout_is_the_last_completed_interval() {
 
 #[test]
 fn an_unfinished_hour_draws_no_bars_but_marks_now() {
-    let mut history = ring();
+    let mut history = interval_ring();
     history.record(&meter_event(utc(8, 9, 5), 700.0, 0.0));
 
     let view = energy_flows_view(&history, utc(8, 9, 20), tz());
     let [hours, quarters] = &view.plots;
 
     assert!(hours.bars.is_empty());
-    assert_eq!(bars_of(quarters, FlowSeries::Grid).len(), 1);
+    assert_eq!(bars_of(quarters, Entity::Grid).len(), 1);
     // 11:00 and 11:15 local, out of a 24-hour day 1000 units wide.
     assert!(close(hours.now_x.unwrap(), 11.0 / 24.0 * FLOWS_CHART_WIDTH));
     assert!(close(
@@ -160,15 +155,15 @@ fn an_unfinished_hour_draws_no_bars_but_marks_now() {
 
 #[test]
 fn readouts_carry_signed_kilowatts() {
-    assert_eq!(readout_value(Some(1820.0)), "+1.82");
-    assert_eq!(readout_value(Some(-400.0)), "−0.40");
-    assert_eq!(readout_value(Some(-1.0)), "+0.00");
+    assert_eq!(readout_value(Some(Watts(1820))), "+1.82");
+    assert_eq!(readout_value(Some(Watts(-400))), "−0.40");
+    assert_eq!(readout_value(Some(Watts(-1))), "+0.00");
     assert_eq!(readout_value(None), MISSING);
 }
 
 #[test]
 fn every_hit_column_carries_its_readout_for_the_script() {
-    let mut history = ring();
+    let mut history = interval_ring();
     history.record(&meter_event(utc(8, 8, 1), 400.0, 0.0));
 
     let view = energy_flows_view(&history, utc(8, 9, 20), tz());
@@ -189,7 +184,13 @@ fn the_spring_dst_day_has_23_hours_and_92_quarters() {
     let day = NaiveDate::from_ymd_opt(2026, 3, 29).unwrap();
     let now = Timestamp::from(chrono::Utc.with_ymd_and_hms(2026, 4, 2, 12, 0, 0).unwrap());
 
-    let view = requested_flows_view(&ring(), on(day, FlowResolution::Hour), None, now, tz());
+    let view = requested_flows_view(
+        &interval_ring(),
+        on(day, FlowResolution::Hour),
+        None,
+        now,
+        tz(),
+    );
     let [hours, quarters] = &view.plots;
 
     assert_eq!(hours.hits.len(), 23);
@@ -208,7 +209,7 @@ fn tick_at(view: &EnergyFlowsView, label: &str) -> f64 {
 /// on sits an hour further along than a 24-hour axis would put it.
 #[test]
 fn a_dst_day_places_its_labels_by_the_local_hour() {
-    let view = energy_flows_view(&ring(), utc(25, 20, 0), tz());
+    let view = energy_flows_view(&interval_ring(), utc(25, 20, 0), tz());
 
     assert!(close(tick_at(&view, "00:00"), 0.0));
     assert!(close(tick_at(&view, "03:00"), 4.0 / 25.0 * 100.0));
@@ -218,7 +219,7 @@ fn a_dst_day_places_its_labels_by_the_local_hour() {
 
 #[test]
 fn an_ordinary_day_places_its_labels_every_three_hours() {
-    let view = energy_flows_view(&ring(), utc(8, 10, 0), tz());
+    let view = energy_flows_view(&interval_ring(), utc(8, 10, 0), tz());
 
     assert!(close(tick_at(&view, "12:00"), 50.0));
     assert!(close(tick_at(&view, "21:00"), 87.5));
@@ -229,7 +230,7 @@ fn an_ordinary_day_places_its_labels_every_three_hours() {
 #[test]
 fn a_half_hour_zone_groups_hours_on_its_own_clock() {
     let kolkata = chrono_tz::Asia::Kolkata;
-    let mut history = ring();
+    let mut history = interval_ring();
     // 10:10 and 10:50 IST.
     history.record(&meter_event(utc(8, 4, 40), 200.0, 0.0));
     history.record(&meter_event(utc(8, 5, 20), 600.0, 0.0));
@@ -240,15 +241,15 @@ fn a_half_hour_zone_groups_hours_on_its_own_clock() {
 
     assert_eq!(hours.hits.len(), 24);
     assert_eq!(view.readout.label, "10:00–11:00");
-    assert_eq!(view.readout.value(FlowSeries::Grid), "+0.40");
+    assert_eq!(view.readout.value(Entity::Grid), "+0.40");
     assert!(hours.hits[10].latest);
-    assert_eq!(bars_of(hours, FlowSeries::Grid).len(), 1);
+    assert_eq!(bars_of(hours, Entity::Grid).len(), 1);
     assert!(close(hours.now_x.unwrap(), 11.0 / 24.0 * FLOWS_CHART_WIDTH));
 }
 
 #[test]
 fn a_past_day_is_finished_and_not_live() {
-    let mut history = ring();
+    let mut history = interval_ring();
     history.record(&meter_event(utc(7, 21, 50), 300.0, 0.0));
 
     let view = requested_flows_view(
@@ -279,7 +280,7 @@ fn a_past_day_is_finished_and_not_live() {
 
 #[test]
 fn today_cannot_step_forward() {
-    let view = energy_flows_view(&ring(), utc(8, 10, 0), tz());
+    let view = energy_flows_view(&interval_ring(), utc(8, 10, 0), tz());
 
     assert_eq!(view.nav.next, None);
     assert!(view.nav.live());

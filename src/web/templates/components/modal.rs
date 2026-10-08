@@ -1,6 +1,10 @@
 use maud::{Markup, html};
 
-use crate::web::view::DetailHeaderView;
+use crate::web::entity::Entity;
+
+/// Where a link that opens a detail swaps it: the `hx-target` every card
+/// carries.
+pub const TARGET: &str = "#detail-modal .modal__panel";
 
 /// How the panel is dismissed: the dialog's own close button, or a link home
 /// when the panel is a page of its own and there is no dialog to close.
@@ -26,12 +30,12 @@ pub fn shell() -> Markup {
 
 /// The panel's contents: what `/detail/{entity}` swaps into
 /// `.modal__panel`.
-pub fn panel(header: &DetailHeaderView, body: Markup, presentation: Presentation) -> Markup {
+pub fn panel(entity: Entity, body: Markup, presentation: Presentation) -> Markup {
     html! {
         div class="modal__header" {
-            div class=(format!("modal__icon modal__icon--{}", header.variant)) { (header.glyph) }
+            div class=(format!("modal__icon modal__icon--{}", entity.slug())) { (entity.glyph()) }
             div class="modal__heading" {
-                div class="modal__title" { (header.title) }
+                div class="modal__title" { (entity.title()) }
                 div class="modal__subtitle" { "Last 24 hours · 15-minute resolution" }
             }
             @if let Presentation::Dialog = presentation {

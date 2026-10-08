@@ -12,8 +12,8 @@
 use maud::{DOCTYPE, Markup, html};
 
 use super::components::{
-    battery_panel, callout, decision_log, detail_view, energy_flows, forecast_panel, modal,
-    page_header, stat_card, top_bar,
+    back_link, battery_panel, callout, decision_log, detail_view, energy_flows, forecast_panel,
+    modal, page_header, stat_card, top_bar,
 };
 use crate::web::view::{DashboardView, DetailView};
 
@@ -155,10 +155,10 @@ pub fn detail_page(dashboard: &DashboardView, detail: &DetailView) -> Markup {
             (head())
             body {
                 (top_bar_inner(dashboard))
-                div class="page" {
-                    a class="page__back" href="/" { "← Dashboard" }
+                div class="page page--detail" {
+                    (back_link::render())
                     div class="modal__panel modal__panel--page" {
-                        (modal::panel(&detail.header, detail_view::render(detail), modal::Presentation::Page))
+                        (modal::panel(detail.entity, detail_view::render(detail), modal::Presentation::Page))
                     }
                 }
             }
@@ -169,7 +169,7 @@ pub fn detail_page(dashboard: &DashboardView, detail: &DetailView) -> Markup {
 /// What `/detail/{entity}` swaps into the dialog's panel.
 pub fn detail_fragment(detail: &DetailView) -> Markup {
     modal::panel(
-        &detail.header,
+        detail.entity,
         detail_view::render(detail),
         modal::Presentation::Dialog,
     )

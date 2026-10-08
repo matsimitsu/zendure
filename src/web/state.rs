@@ -21,6 +21,7 @@ use crate::units::{
     BatteryPower, GridPower, KiloWattHours, Percent, Soc, SolarForecastPoint, SolarPower,
     Timestamp, Watts,
 };
+use crate::world::DeviceId;
 
 use super::intervals::{IntervalHistory, Mean};
 
@@ -158,6 +159,14 @@ pub struct DashboardTelemetry {
     pub capacity: KiloWattHours,
     pub packs: Vec<PackStatus>,
     pub soc_limits: SocLimits,
+}
+
+/// The packs one poll reported, and which box reported them when.
+#[derive(Debug, Clone, Copy)]
+pub struct PolledPacks<'a> {
+    pub device: &'a DeviceId,
+    pub sampled_at: Timestamp,
+    pub packs: &'a [PackStatus],
 }
 
 /// Today's *actual* measured solar production, bucketed into the same 48
@@ -353,19 +362,20 @@ impl DashboardState {
     }
 
     /// A device poll: SOC, RTE and pack figures move here and nowhere else.
-    /// `polled_packs` is what this poll itself reported, not the sticky set
-    /// in `telemetry`, so a report without packs adds nothing to the history.
+    /// `polled` is what this poll itself reported, not the sticky set in
+    /// `telemetry`, so a report without packs adds nothing to the history.
     pub fn poll_tick(
         &mut self,
         engine: &EngineState,
         event: &Event,
-        polled_packs: Option<&[PackStatus]>,
+        polled: Option<PolledPacks<'_>>,
         telemetry: DashboardTelemetry,
         as_of: Timestamp,
     ) {
         self.intervals.record(event);
-        if let (Event::DeviceUpdate { at, id, .. }, Some(packs)) = (event, polled_packs) {
-            self.intervals.record_packs(id, at.now, packs);
+        if let Some(polled) = polled {
+            self.intervals
+                .record_packs(polled.device, polled.sampled_at, polled.packs);
         }
         self.apply_telemetry(telemetry);
         self.refresh(engine, None, as_of);

@@ -1,7 +1,5 @@
-//! The entities `GET /detail/{entity}` can describe, and what each one's
-//! panel summarises from the interval ring.
-
-use std::str::FromStr;
+//! What each entity's `GET /detail/{entity}` panel summarises from the
+//! interval ring.
 
 use chrono_tz::Tz;
 
@@ -9,58 +7,17 @@ use crate::controller::SocLimits;
 use crate::device::PackStatus;
 use crate::units::{BatteryPower, DeciKelvin, Soc, SolarPower, WattHours, Watts};
 
+use super::entity::Entity;
 use super::intervals::{
     Averaged, IntervalAverages, IntervalIndex, IntervalSlot, Mean, interval_energy,
 };
-use super::line_chart::{ChartSeries, LineChartSpec, LineChartView};
+use super::line_chart::{LineChartSpec, LineChartView};
 use super::pack_intervals::{Extent, PackId, PackInterval};
 use super::state::{DashboardState, Plottable};
 use super::view::{
     DetailBodyView, MISSING, MiniStatView, PackSummaryView, SignStyle, energy_string, format_time,
     format_watts,
 };
-
-/// Parsed from the URL once, at the route, so everything past it holds a
-/// valid entity. There is no car variant: its SOC is not journalled, so there
-/// is no history to show.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DetailEntity {
-    Solar,
-    Home,
-    Grid,
-    Battery,
-}
-
-impl DetailEntity {
-    pub const fn slug(self) -> &'static str {
-        match self {
-            DetailEntity::Solar => "solar",
-            DetailEntity::Home => "home",
-            DetailEntity::Grid => "grid",
-            DetailEntity::Battery => "battery",
-        }
-    }
-
-    pub fn path(self) -> String {
-        format!("/detail/{}", self.slug())
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct UnknownEntity;
-
-impl FromStr for DetailEntity {
-    type Err = UnknownEntity;
-
-    fn from_str(slug: &str) -> Result<Self, UnknownEntity> {
-        [Self::Solar, Self::Home, Self::Grid, Self::Battery]
-            .into_iter()
-            .find(|entity| entity.slug() == slug)
-            .ok_or(UnknownEntity)
-    }
-}
-
-// --- What each panel shows ---------------------------------------------------
 
 /// A peak reading and the interval it was averaged over.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -150,11 +107,11 @@ const POWER_TITLE: &str = "Power (kW)";
 
 /// The stats and charts over the rolling 24 hours for `entity`; `None` while
 /// there is nothing yet to summarise.
-pub fn detail_body(state: &DashboardState, entity: DetailEntity, tz: Tz) -> Option<DetailBodyView> {
+pub fn detail_body(state: &DashboardState, entity: Entity, tz: Tz) -> Option<DetailBodyView> {
     let slots = state.intervals.last_24h(state.as_of);
     let world = &state.engine.world;
     let body = match entity {
-        DetailEntity::Solar => {
+        Entity::Solar => {
             let solar = |a: &IntervalAverages| a.solar;
             let solar_watts = |a: &IntervalAverages| a.solar.map(SolarPower::into_watts);
             DetailBodyView {
@@ -169,14 +126,14 @@ pub fn detail_body(state: &DashboardState, entity: DetailEntity, tz: Tz) -> Opti
                     ),
                 ],
                 charts: vec![LineChartView::build(
-                    LineChartSpec::new(ChartSeries::Solar, POWER_TITLE),
+                    LineChartSpec::new(Entity::Solar, POWER_TITLE),
                     &slots,
                     solar,
                     tz,
                 )],
             }
         }
-        DetailEntity::Home => {
+        Entity::Home => {
             let home = |a: &IntervalAverages| a.home;
             DetailBodyView {
                 packs: Vec::new(),
@@ -187,14 +144,14 @@ pub fn detail_body(state: &DashboardState, entity: DetailEntity, tz: Tz) -> Opti
                     stat("Average", watts_or_missing(average(&slots, home))),
                 ],
                 charts: vec![LineChartView::build(
-                    LineChartSpec::new(ChartSeries::Home, POWER_TITLE),
+                    LineChartSpec::new(Entity::Home, POWER_TITLE),
                     &slots,
                     home,
                     tz,
                 )],
             }
         }
-        DetailEntity::Grid => {
+        Entity::Grid => {
             let (imported, exported) = (imported(&slots), exported(&slots));
             DetailBodyView {
                 packs: Vec::new(),
@@ -211,14 +168,14 @@ pub fn detail_body(state: &DashboardState, entity: DetailEntity, tz: Tz) -> Opti
                     stat("Net", kwh(imported - exported)),
                 ],
                 charts: vec![LineChartView::build(
-                    LineChartSpec::new(ChartSeries::Grid, POWER_TITLE).note("+ import · − export"),
+                    LineChartSpec::new(Entity::Grid, POWER_TITLE).note("+ import · − export"),
                     &slots,
                     |a| a.grid,
                     tz,
                 )],
             }
         }
-        DetailEntity::Battery => return battery_body(state, &slots, tz),
+        Entity::Battery => return battery_body(state, &slots, tz),
     };
     Some(body)
 }
@@ -250,8 +207,7 @@ fn battery_body(state: &DashboardState, slots: &[IntervalSlot], tz: Tz) -> Optio
         charts: vec![
             LineChartView::build(soc_chart(state.soc_limits), slots, |a| a.soc, tz),
             LineChartView::build(
-                LineChartSpec::new(ChartSeries::Battery, POWER_TITLE)
-                    .note("+ discharge · − charge"),
+                LineChartSpec::new(Entity::Battery, POWER_TITLE).note("+ discharge · − charge"),
                 slots,
                 |a| a.battery,
                 tz,
@@ -261,17 +217,25 @@ fn battery_body(state: &DashboardState, slots: &[IntervalSlot], tz: Tz) -> Optio
 }
 
 /// Dashed at the controller's SOC window, with the SOC it will not use
-/// shaded. A limit at the scale's edge leaves no band to shade.
+/// shaded. A limit at the scale's edge draws neither line nor band, so
+/// before any limits are known the chart shows no window at all.
 fn soc_chart(limits: SocLimits) -> LineChartSpec<Soc> {
-    let bands = [(Soc::ZERO, limits.min), (limits.max, Soc::FULL)]
+    let edges = [(Soc::ZERO, limits.min), (limits.max, Soc::FULL)];
+    let bands: Vec<(Soc, Soc)> = edges.into_iter().filter(|(from, to)| from != to).collect();
+    let lines: Vec<Soc> = [limits.min, limits.max]
         .into_iter()
-        .filter(|(from, to)| from != to)
+        .filter(|&limit| limit != Soc::ZERO && limit != Soc::FULL)
         .collect();
+    let spec = LineChartSpec::new(Entity::Battery, "State of charge (%)");
+    let spec = if lines.is_empty() {
+        spec
+    } else {
+        spec.note(format!("dashed: limits {}% / {}%", limits.min, limits.max))
+    };
     LineChartSpec {
-        limits: vec![limits.min, limits.max],
+        limits: lines,
         bands,
-        ..LineChartSpec::new(ChartSeries::Battery, "State of charge (%)")
-            .note(format!("dashed: limits {}% / {}%", limits.min, limits.max))
+        ..spec
     }
 }
 

@@ -108,6 +108,22 @@ pub mod journey {
     pub fn session() -> Vec<Event> {
         std::iter::once(startup()).chain(events()).collect()
     }
+
+    /// An empty dashboard interval ring that counts the journey's battery.
+    pub fn interval_ring() -> crate::web::IntervalHistory {
+        crate::web::IntervalHistory::new([DeviceId::new(BATTERY_ID)])
+    }
+
+    /// A poll report as the device journals it: two packs, the first charging
+    /// and the second discharging at `power`.
+    pub fn poll_body(device: &str, soc: u32, power: i32, temp: u32) -> String {
+        format!(
+            r#"{{"sn":"{device}","properties":{{"packNum":2}},"packData":[
+            {{"sn":"P1","packType":500,"socLevel":{soc},"state":1,"power":{power},"maxTemp":{temp}}},
+            {{"sn":"P2","packType":501,"socLevel":{soc},"state":2,"power":{power},"maxTemp":{temp}}}
+        ]}}"#
+        )
+    }
 }
 
 /// An instant in October 2026, UTC: a month that holds Europe's autumn DST

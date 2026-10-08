@@ -9,13 +9,14 @@ use axum::routing::get;
 use chrono_tz::Tz;
 use rust_embed::Embed;
 
-use super::detail::DetailEntity;
-use super::flows::{EnergyFlowsView, local_date, requested_flows_view};
+use super::entity::Entity;
+use super::flows::{EnergyFlowsView, requested_flows_view};
 use super::past_days::{FlowsQuery, PastDays};
 use super::sse::fragment_stream;
 use super::state::{DashboardState, DashboardStateReceiver};
 use super::templates::{energy_flows, layout};
 use super::view::{dashboard_view, detail_view};
+use crate::clock::local_date;
 
 /// The Grass-compiled CSS, written to `OUT_DIR` by `build.rs` — see its own
 /// doc comment for why compilation happens at build time rather than here.
@@ -96,7 +97,7 @@ async fn detail(
     Path(entity): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let Ok(entity) = entity.parse::<DetailEntity>() else {
+    let Ok(entity) = entity.parse::<Entity>() else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
     let current = state.dashboard.borrow().clone();

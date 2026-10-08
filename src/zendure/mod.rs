@@ -502,7 +502,12 @@ pub fn packs_in_capture(body: &str) -> Result<CapturedPacks, serde_json::Error> 
     let report: ZendureReport = serde_json::from_str(body)?;
     Ok(CapturedPacks {
         device: report.sn.map(DeviceId::new),
-        packs: complete_packs(&report.pack_data, report.properties.pack_num),
+        packs: complete_packs(&report.pack_data, report.properties.pack_num).unwrap_or_else(
+            |incomplete| {
+                tracing::debug!("Journal capture: {incomplete}");
+                None
+            },
+        ),
     })
 }
 
@@ -526,7 +531,12 @@ fn reading_from_report(
     let charge = Watts::from_device(report.properties.output_pack_power.unwrap_or(0));
     let discharge = Watts::from_device(report.properties.pack_input_power.unwrap_or(0));
 
-    let packs = complete_packs(&report.pack_data, report.properties.pack_num);
+    let packs = complete_packs(&report.pack_data, report.properties.pack_num).unwrap_or_else(
+        |incomplete| {
+            tracing::warn!("{incomplete}");
+            None
+        },
+    );
 
     let pack_temps = report
         .pack_data
@@ -690,19 +700,37 @@ fn pack_status(pack: &PackData) -> PackStatus {
 fn complete_packs(
     pack_data: &Option<Vec<PackData>>,
     pack_num: Option<u32>,
-) -> Option<Vec<PackStatus>> {
-    let packs = pack_data.as_ref()?;
-    if let Some(expected) = pack_num {
-        match u32::try_from(packs.len()) {
-            Ok(actual) if actual == expected => {}
-            Ok(actual) => {
-                tracing::warn!(
-                    "packData has {actual} packs but pack_num reports {expected}; treating as incomplete"
-                );
-                return None;
-            }
-            Err(_) => return None,
-        }
+) -> Result<Option<Vec<PackStatus>>, IncompletePacks> {
+    let Some(packs) = pack_data.as_ref() else {
+        return Ok(None);
+    };
+    if let Some(expected) = pack_num
+        && u32::try_from(packs.len()).ok() != Some(expected)
+    {
+        return Err(IncompletePacks {
+            actual: packs.len(),
+            expected,
+        });
     }
-    Some(packs.iter().map(pack_status).collect())
+    Ok(Some(packs.iter().map(pack_status).collect()))
+}
+
+/// A `packData` whose length disagrees with the device's own `pack_num`.
+/// Left to the caller to log: a live poll warns, while a journal seed
+/// re-parsing a day of captures would turn one stuck pack into thousands of
+/// lines.
+#[derive(Debug)]
+struct IncompletePacks {
+    actual: usize,
+    expected: u32,
+}
+
+impl std::fmt::Display for IncompletePacks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "packData has {} packs but pack_num reports {}; treating as incomplete",
+            self.actual, self.expected
+        )
+    }
 }

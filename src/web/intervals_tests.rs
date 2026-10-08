@@ -4,7 +4,9 @@
 use super::*;
 
 use crate::battery::BatteryState;
-use crate::fixtures::journey::{self, battery_event, device_update, meter_event};
+use crate::fixtures::journey::{
+    self, battery_event, device_update, interval_ring, meter_event, poll_body,
+};
 use crate::fixtures::utc;
 use crate::units::{DeciKelvin, WattHours};
 use crate::web::pack_intervals::{Extent, PackId};
@@ -18,10 +20,6 @@ fn configured() -> [DeviceId; 1] {
     [DeviceId::new(journey::BATTERY_ID)]
 }
 
-fn ring() -> IntervalHistory {
-    IntervalHistory::new(configured())
-}
-
 fn base() -> IntervalIndex {
     IntervalIndex::containing(at(0))
 }
@@ -32,7 +30,7 @@ fn into_interval(index: IntervalIndex, secs: i64) -> Timestamp {
 
 #[test]
 fn readings_average_within_an_interval_and_the_next_one_starts_fresh() {
-    let mut history = ring();
+    let mut history = interval_ring();
     history.record(&meter_event(into_interval(base(), 0), 100.0, 200.0));
     history.record(&meter_event(into_interval(base(), 60), 300.0, 400.0));
     history.record(&battery_event(
@@ -63,7 +61,7 @@ fn readings_average_within_an_interval_and_the_next_one_starts_fresh() {
 
 #[test]
 fn an_interval_older_than_the_ring_is_gone() {
-    let mut history = ring();
+    let mut history = interval_ring();
     history.record(&meter_event(into_interval(base(), 0), 100.0, 0.0));
     history.record(&meter_event(into_interval(base().offset(99), 0), 1.0, 0.0));
     assert_eq!(history.averages(base()).grid, Some(GridPower(100.0)));
@@ -73,7 +71,7 @@ fn an_interval_older_than_the_ring_is_gone() {
     assert_eq!(history.averages(base()), IntervalAverages::default());
 
     // A slot nothing overwrote, which the ring has moved past all the same.
-    let mut gapped = ring();
+    let mut gapped = interval_ring();
     gapped.record(&meter_event(into_interval(base(), 0), 100.0, 0.0));
     gapped.record(&meter_event(into_interval(base().offset(150), 0), 2.0, 0.0));
     assert_eq!(gapped.averages(base()), IntervalAverages::default());
@@ -81,7 +79,7 @@ fn an_interval_older_than_the_ring_is_gone() {
 
 #[test]
 fn a_late_event_from_before_the_ring_cannot_clobber_its_slot() {
-    let mut history = ring();
+    let mut history = interval_ring();
     history.record(&meter_event(into_interval(base(), 0), 100.0, 0.0));
     history.record(&meter_event(
         into_interval(base().offset(-100), 0),
@@ -98,7 +96,7 @@ fn a_late_event_from_before_the_ring_cannot_clobber_its_slot() {
 
 #[test]
 fn the_ring_recovers_after_the_clock_steps_far_ahead_and_back() {
-    let mut history = ring();
+    let mut history = interval_ring();
     history.record(&meter_event(into_interval(base(), 0), 100.0, 0.0));
     // A step of more than the ring's span, then corrected.
     history.record(&meter_event(into_interval(base().offset(500), 0), 5.0, 0.0));
@@ -129,7 +127,7 @@ fn the_ring_recovers_after_the_clock_steps_far_ahead_and_back() {
 
 #[test]
 fn an_isolated_late_row_does_not_count_towards_a_rebase() {
-    let mut history = ring();
+    let mut history = interval_ring();
     history.record(&meter_event(into_interval(base(), 0), 100.0, 0.0));
     history.record(&meter_event(
         into_interval(base().offset(-200), 0),
@@ -156,7 +154,7 @@ fn an_isolated_late_row_does_not_count_towards_a_rebase() {
 #[test]
 fn the_repeated_hour_of_a_dst_change_keeps_its_own_intervals() {
     let tz = chrono_tz::Europe::Amsterdam;
-    let mut history = ring();
+    let mut history = interval_ring();
     history.record(&meter_event(utc(24, 22, 0), 50.0, 0.0)); // 00:00 CEST
     history.record(&meter_event(utc(25, 0, 15), 100.0, 0.0)); // 02:15 CEST
     history.record(&meter_event(utc(25, 1, 15), 200.0, 0.0)); // 02:15 CET
@@ -177,7 +175,7 @@ fn the_repeated_hour_of_a_dst_change_keeps_its_own_intervals() {
 #[test]
 fn completed_on_stops_before_the_interval_still_in_progress() {
     let tz = chrono_tz::Europe::Amsterdam;
-    let mut history = ring();
+    let mut history = interval_ring();
     history.record(&meter_event(utc(24, 22, 0), 50.0, 0.0));
     history.record(&meter_event(utc(24, 22, 20), 60.0, 0.0));
 
@@ -190,7 +188,7 @@ fn completed_on_stops_before_the_interval_still_in_progress() {
 
 #[test]
 fn last_24h_is_96_intervals_ending_with_the_current_one() {
-    let mut history = ring();
+    let mut history = interval_ring();
     history.record(&meter_event(into_interval(base(), 0), 100.0, 0.0));
 
     let slots = history.last_24h(into_interval(base(), 30));
@@ -209,11 +207,11 @@ async fn the_journal_seed_equals_the_live_fold() {
     let events = journey::session();
     crate::journal::testing::record(&path, &events).await;
 
-    let mut live = ring();
+    let mut live = interval_ring();
     events.iter().for_each(|event| live.record(event));
     let seeded = seed_interval_history(&path, at(1_000), configured());
 
-    assert_ne!(live, ring());
+    assert_ne!(live, interval_ring());
     assert_eq!(seeded, live);
 }
 
@@ -221,7 +219,7 @@ async fn the_journal_seed_equals_the_live_fold() {
 fn an_unreadable_journal_seeds_an_empty_history() {
     let dir = tempfile::tempdir().unwrap();
     let seeded = seed_interval_history(&dir.path().join("missing.db"), at(0), configured());
-    assert_eq!(seeded, ring());
+    assert_eq!(seeded, interval_ring());
 }
 
 // --- Configured devices -----------------------------------------------------
@@ -242,7 +240,7 @@ fn foreign_update(now: Timestamp) -> Event {
 
 #[test]
 fn a_battery_that_is_not_configured_counts_for_nothing() {
-    let mut history = ring();
+    let mut history = interval_ring();
     history.record(&foreign_update(into_interval(base(), 0)));
     history.record(&battery_event(
         into_interval(base(), 30),
@@ -349,7 +347,7 @@ fn hours_follow_the_clock_when_the_quarters_start_mid_hour() {
 
 #[test]
 fn hourly_of_the_last_24h_lands_every_hour_on_the_hour() {
-    let slots = ring().last_24h(into_interval(base(), 30));
+    let slots = interval_ring().last_24h(into_interval(base(), 30));
     let hours = hourly(&slots);
 
     assert_eq!(hours[0].index, slots[0].index.hour_start());
@@ -358,17 +356,6 @@ fn hourly_of_the_last_24h_lands_every_hour_on_the_hour() {
 }
 
 // --- Packs -------------------------------------------------------------------
-
-/// A poll report as the device journals it: two packs, the first charging
-/// and the second discharging at `power`.
-fn poll_body(device: &str, soc: u32, power: i32, temp: u32) -> String {
-    format!(
-        r#"{{"sn":"{device}","properties":{{"packNum":2}},"packData":[
-            {{"sn":"P1","packType":500,"socLevel":{soc},"state":1,"power":{power},"maxTemp":{temp}}},
-            {{"sn":"P2","packType":501,"socLevel":{soc},"state":2,"power":{power},"maxTemp":{temp}}}
-        ]}}"#
-    )
-}
 
 fn pack(serial: &str) -> PackKey {
     PackKey {
@@ -395,7 +382,7 @@ fn rows(polls: &[(Timestamp, String)]) -> Vec<(Timestamp, &str)> {
 }
 
 fn live_fold(polls: &[(Timestamp, String)]) -> IntervalHistory {
-    let mut history = ring();
+    let mut history = interval_ring();
     for (at, body) in polls {
         let packs = crate::zendure::polled_packs(body).expect("a complete pack list");
         history.record_packs(&DeviceId::new(journey::BATTERY_ID), *at, &packs);
@@ -455,7 +442,7 @@ fn a_pack_ranges_over_its_levels_and_integrates_its_flow() {
 
 #[test]
 fn a_gap_wider_than_an_interval_integrates_nothing() {
-    let mut history = ring();
+    let mut history = interval_ring();
     let id = DeviceId::new(journey::BATTERY_ID);
     let report = |soc| {
         crate::zendure::polled_packs(&poll_body(journey::BATTERY_ID, soc, 600, 2981)).unwrap()
@@ -506,7 +493,7 @@ async fn the_seed_from_poll_captures_equals_the_live_fold() {
 
     let seeded = seed_interval_history(&path, at(10_000), configured());
 
-    assert_ne!(seeded, ring());
+    assert_ne!(seeded, interval_ring());
     assert_eq!(seeded, live_fold(&polls));
 }
 
