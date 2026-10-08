@@ -12,5 +12,5 @@ mod view;
 pub use server::spawn;
 pub use state::{
     ActualSolarHistory, DashboardState, DashboardStateSender, DashboardTelemetry, ForecastSnapshot,
-    seed_decision_log,
+    seed_decision_log, seed_interval_history,
 };

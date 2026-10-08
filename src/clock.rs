@@ -1,4 +1,4 @@
-use chrono::{Datelike, TimeZone, Timelike, Utc, Weekday};
+use chrono::{Datelike, NaiveDate, TimeZone, Timelike, Utc, Weekday};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
@@ -62,15 +62,16 @@ pub fn local_midnight(now: Timestamp, tz: Tz) -> Timestamp {
     let Some(local) = tz.timestamp_millis_opt(now.as_millis()).single() else {
         return now;
     };
-    let Some(midnight_naive) = local.date_naive().and_hms_opt(0, 0, 0) else {
-        return now;
-    };
-    let midnight = tz
-        .from_local_datetime(&midnight_naive)
-        .single()
-        .or_else(|| tz.from_local_datetime(&midnight_naive).earliest())
-        .unwrap_or(local);
-    Timestamp::from(midnight)
+    local_day_start(local.date_naive(), tz).unwrap_or(now)
+}
+
+/// The first instant of `date` in `tz`. The earliest reading wins where DST
+/// makes midnight ambiguous; `None` only where a zone skips midnight itself.
+pub fn local_day_start(date: NaiveDate, tz: Tz) -> Option<Timestamp> {
+    let midnight = date.and_hms_opt(0, 0, 0)?;
+    tz.from_local_datetime(&midnight)
+        .earliest()
+        .map(Timestamp::from)
 }
 
 #[cfg(test)]

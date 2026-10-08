@@ -7,8 +7,8 @@ use crate::models::ControlMode;
 use crate::units::{Elapsed, KiloWattHours, Percent, Soc, SolarForecastPoint, Timestamp, Watts};
 
 use super::state::{
-    ActualSolarHistory, DashboardState, ForecastSnapshot, Plottable, SOLAR_BUCKET_MS,
-    SOLAR_BUCKETS_PER_DAY, Sparkline,
+    ActualSolarHistory, DashboardState, ForecastSnapshot, INTERVALS_PER_HOUR, IntervalAverages,
+    IntervalSlot, Mean, Plottable, SOLAR_BUCKET_MS, SOLAR_BUCKETS_PER_DAY, Sparkline,
 };
 
 pub struct StatCardView {
@@ -509,6 +509,28 @@ fn actual_line_path(
         }
     }
     path
+}
+
+/// The flows chart's 1h resolution, derived rather than stored so it can never
+/// disagree with the 15-minute buckets. `quarters` must start on an hour.
+#[cfg_attr(not(test), allow(dead_code))]
+fn hourly(quarters: &[IntervalSlot]) -> Vec<IntervalSlot> {
+    quarters
+        .chunks(INTERVALS_PER_HOUR)
+        .map(|hour| {
+            let each = || hour.iter().map(|slot| slot.averages);
+            IntervalSlot {
+                index: hour[0].index,
+                averages: IntervalAverages {
+                    solar: Mean::of(each().map(|a| a.solar)),
+                    home: Mean::of(each().map(|a| a.home)),
+                    grid: Mean::of(each().map(|a| a.grid)),
+                    battery: Mean::of(each().map(|a| a.battery)),
+                    soc: each().filter_map(|a| a.soc).next_back(),
+                },
+            }
+        })
+        .collect()
 }
 
 fn forecast_panel_view(

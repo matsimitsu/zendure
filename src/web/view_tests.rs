@@ -644,3 +644,51 @@ fn battery_view_carries_the_limits_and_what_a_full_bar_is_worth() {
     assert!(limits.balance_day);
     assert_eq!(limits.usable_max, "4.0 kWh");
 }
+
+// --- Interval history --------------------------------------------------------
+
+#[test]
+fn an_hour_is_the_mean_of_its_four_quarters() {
+    use crate::units::Soc;
+    use crate::web::state::{IntervalAverages, IntervalIndex, IntervalSlot};
+
+    let first = IntervalIndex::containing(at(0));
+    let quarter = |n: i64, flows: (f64, i32, f64), battery: Option<i32>, soc: Option<u32>| {
+        let (solar, home, grid) = flows;
+        IntervalSlot {
+            index: first.offset(n),
+            averages: IntervalAverages {
+                solar: Some(SolarPower::new(solar)),
+                home: Some(Watts(home)),
+                grid: Some(GridPower(grid)),
+                battery: battery.map(BatteryPower),
+                soc: soc.map(Soc::new),
+            },
+        }
+    };
+    let quarters = [
+        quarter(0, (0.0, 0, 100.0), Some(0), Some(50)),
+        quarter(1, (100.0, 10, -300.0), Some(-40), Some(51)),
+        quarter(2, (200.0, 20, 500.0), None, None),
+        quarter(3, (300.0, 30, 700.0), Some(-120), Some(53)),
+        quarter(4, (0.0, 0, 1.0), None, None),
+    ];
+
+    let hours = hourly(&quarters);
+
+    assert_eq!(hours.len(), 2);
+    assert_eq!(hours[0].index, first);
+    assert_eq!(
+        hours[0].averages,
+        IntervalAverages {
+            solar: Some(SolarPower::new(150.0)),
+            home: Some(Watts(15)),
+            grid: Some(GridPower(250.0)),
+            // The quarter with no battery reading is a gap, not a zero.
+            battery: Some(BatteryPower(-53)),
+            soc: Some(Soc::new(53)),
+        }
+    );
+    assert_eq!(hours[1].index, first.offset(4));
+    assert_eq!(hours[1].averages.grid, Some(GridPower(1.0)));
+}

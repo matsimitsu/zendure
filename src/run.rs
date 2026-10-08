@@ -173,7 +173,10 @@ impl Tick<'_> {
 
             if let Some(tx) = self.dashboard {
                 let snapshot = engine.state();
-                tx.send_modify(|state| state.poll_tick(&snapshot, figures, at.now));
+                tx.send_modify(|state| {
+                    state.intervals.record(&event);
+                    state.poll_tick(&snapshot, figures, at.now);
+                });
             }
         }
 
@@ -306,7 +309,10 @@ impl Tick<'_> {
         if let Some(tx) = self.dashboard {
             let snapshot = engine.state();
             let decision = step.decision.as_ref().map(|d| (d, at.now));
-            tx.send_modify(|state| state.meter_tick(&snapshot, decision, &at, self.timezone));
+            tx.send_modify(|state| {
+                state.intervals.record(&event);
+                state.meter_tick(&snapshot, decision, &at, self.timezone);
+            });
         }
     }
 
@@ -664,6 +670,10 @@ pub async fn run(
                 .with_telemetry(telemetry.figures(
                     startup_soc,
                     telemetry.limits(&engine, startup_clock.weekday),
+                ))
+                .with_intervals(web::seed_interval_history(
+                    &config.journal_path,
+                    startup_clock.now,
                 ));
         let (tx, rx) = tokio::sync::watch::channel(seed);
         web_task = web::spawn(web_cfg, rx, config.timezone, async move {
