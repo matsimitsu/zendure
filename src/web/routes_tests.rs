@@ -29,12 +29,15 @@ fn app_state() -> AppState {
             .state(),
         mqtt_timed_out: false,
     };
+    let now = Timestamp::from_millis(journey::NOW_MS);
+    let mut intervals = IntervalHistory::new([DeviceId::new(journey::BATTERY_ID)]);
+    intervals.record(&journey::meter_event(now, 400.0, 750.0));
     let seeded = DashboardState::seed(
         &engine,
         vec![],
         ActualSolarHistory::default(),
-        IntervalHistory::new([DeviceId::new(journey::BATTERY_ID)]),
-        Timestamp::from_millis(journey::NOW_MS),
+        intervals,
+        now,
     );
     // The sender is dropped: a `watch` receiver keeps serving its last value.
     let (_, dashboard) = tokio::sync::watch::channel(seeded);
@@ -104,4 +107,24 @@ async fn a_plain_request_gets_a_full_page_with_a_way_home() {
     assert!(body.contains("<html"));
     assert!(body.contains("href=\"/\""));
     assert!(!body.contains("modal__close"), "no dialog to close");
+}
+
+#[tokio::test]
+async fn the_solar_detail_charts_its_history_in_the_dialog_and_on_its_own_page() {
+    for htmx in [true, false] {
+        let (status, body) = get("/detail/solar", htmx).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("<line-chart class=\"line-chart line-chart--solar\""),
+            "{body}"
+        );
+        assert!(body.contains("class=\"line-chart__line\" d=\"M"), "{body}");
+        assert!(body.contains("Produced"), "{body}");
+    }
+}
+
+#[tokio::test]
+async fn the_battery_detail_has_no_chart_yet() {
+    let (_, body) = get("/detail/battery", true).await;
+    assert!(!body.contains("line-chart"), "{body}");
 }

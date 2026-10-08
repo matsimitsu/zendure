@@ -14,6 +14,8 @@
 @use "components/energy_flows";
 @use "components/callout";
 @use "components/modal";
+@use "components/line_chart";
+@use "components/detail_view";
 
 body {
   margin: 0;

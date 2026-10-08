@@ -8,6 +8,7 @@ mod components {
     pub mod detail_view;
     pub mod energy_flows;
     pub mod forecast_panel;
+    pub mod line_chart;
     pub mod mini_stat;
     pub mod modal;
     pub mod pack_list;

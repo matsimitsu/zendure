@@ -505,7 +505,11 @@ server-sent events. Three routes: `GET /` (the full page), `GET /events`
 (`solar`, `home`, `grid` or `battery`; anything else is a 404). The solar,
 home and grid cards and the battery panel open `/detail/{entity}` in a modal
 `<dialog>` (Esc, the close button or a click beside it dismisses it); the
-modal is a snapshot taken when opened, not live. With htmx the route returns
+modal is a snapshot taken when opened, not live. The solar, home and grid
+panels summarise the rolling 24 hours of 15-minute averages (now, peak,
+energy produced/consumed or imported/exported/net, and the average) above a
+power chart, where an interval with no readings is a break in the line
+rather than an interpolation. With htmx the route returns
 just the panel; without it (JavaScript off, a pasted link) it returns a full
 page with a link back to the dashboard. The EV card is not clickable. No `[web]` table means no
 HTTP listener at all — the same brokerless-by-default rule `[mqtt]` follows —

@@ -676,6 +676,13 @@ impl Add for WattHours {
     }
 }
 
+impl Sub for WattHours {
+    type Output = WattHours;
+    fn sub(self, rhs: WattHours) -> WattHours {
+        WattHours(self.0 - rhs.0)
+    }
+}
+
 impl std::iter::Sum for WattHours {
     fn sum<I: Iterator<Item = WattHours>>(iter: I) -> WattHours {
         iter.fold(WattHours::ZERO, Add::add)

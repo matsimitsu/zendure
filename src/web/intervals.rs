@@ -15,7 +15,9 @@ use chrono_tz::Tz;
 use crate::device::PackStatus;
 use crate::event::Event;
 use crate::journal::read::{read_events_in_range, read_raw_in_range};
-use crate::units::{BatteryPower, Elapsed, GridPower, Soc, SolarPower, Timestamp, Watts};
+use crate::units::{
+    BatteryPower, Elapsed, GridPower, Soc, SolarPower, Timestamp, WattHours, Watts,
+};
 use crate::world::{DeviceId, World};
 use crate::zendure::{POLL_CAPTURE, packs_in_capture};
 
@@ -134,6 +136,12 @@ impl IntervalIndex {
         // `rem_euclid` by the ring's length is always a valid slot.
         self.0.rem_euclid(INTERVAL_RING as i64) as usize
     }
+}
+
+/// What `power`, held for one whole interval, delivers. An interval's
+/// average stands for its whole span, so this is exact for the bucket.
+pub(crate) fn interval_energy(power: Watts) -> WattHours {
+    WattHours::integrate(power, power, INTERVAL)
 }
 
 /// How many whole [`INTERVAL`]s fit in `span`.
@@ -370,7 +378,6 @@ impl IntervalHistory {
     }
 
     /// The 24 hours up to and including the interval `now` is in, oldest first.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn last_24h(&self, now: Timestamp) -> Vec<IntervalSlot> {
         let until = IntervalIndex::containing(now).offset(1);
         self.slots(until.offset(-intervals_in(ROLLING_DAY)), until)

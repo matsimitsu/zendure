@@ -103,4 +103,8 @@
   --size-chart: 260px;
   --size-axis-gutter: 40px;
   --space-modal-top: 56px;
+
+  // Line chart (detail modal)
+  --color-band: oklch(1 0 0 / 0.04);
+  --size-chart-sm: 180px;
 }

@@ -51,13 +51,13 @@ async fn detail(
     let Ok(entity) = entity.parse::<DetailEntity>() else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
-    let detail = detail_view(entity);
+    let current = state.dashboard.borrow().clone();
+    let detail = detail_view(&current, entity, state.timezone);
     let vary = [(header::VARY, HeaderValue::from_static("HX-Request"))];
 
     if headers.contains_key(HeaderName::from_static("hx-request")) {
         return (vary, layout::detail_fragment(&detail)).into_response();
     }
-    let current = state.dashboard.borrow().clone();
     let dashboard = dashboard_view(&current, state.timezone);
     (vary, layout::detail_page(&dashboard, &detail)).into_response()
 }

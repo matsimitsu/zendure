@@ -1,0 +1,23 @@
+@use "../breakpoints" as *;
+
+// The modal body: a row of mini stats, then the charts, spaced by gap so
+// each chart stays drop-in.
+.detail-view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+
+  &__stats {
+    display: grid;
+    // `minmax(0, …)` so a long figure wraps inside its cell rather than
+    // widening the grid past a phone's width.
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: var(--space-4);
+  }
+}
+
+@include narrow {
+  .detail-view__stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

@@ -7,8 +7,9 @@ use crate::models::ControlMode;
 use crate::units::{Elapsed, KiloWattHours, Percent, Soc, SolarForecastPoint, Timestamp, Watts};
 
 use super::axis::{AxisTick, day_axis};
-use super::detail::DetailEntity;
+use super::detail::{DetailEntity, detail_body};
 use super::flows::{EnergyFlowsView, energy_flows_view};
+use super::line_chart::LineChartView;
 use super::soc_bar::{SocBarView, SocLimitsView};
 use super::state::{
     ActualSolarHistory, DashboardState, ForecastSnapshot, Plottable, SOLAR_BUCKET_MS,
@@ -41,9 +42,21 @@ pub struct DetailHeaderView {
 /// Everything one `/detail/{entity}` panel renders from.
 pub struct DetailView {
     pub header: DetailHeaderView,
+    /// `None` where the entity's history has no view yet.
+    pub body: Option<DetailBodyView>,
 }
 
-pub fn detail_view(entity: DetailEntity) -> DetailView {
+/// A row of mini stats over the window, then a chart per quantity.
+pub struct DetailBodyView {
+    pub stats: Vec<MiniStatView>,
+    pub charts: Vec<LineChartView>,
+}
+
+pub fn detail_view(
+    state: &DashboardState,
+    entity: DetailEntity,
+    timezone: chrono_tz::Tz,
+) -> DetailView {
     let (glyph, title) = match entity {
         DetailEntity::Solar => ("☀", "Solar production"),
         DetailEntity::Home => ("⌂", "Home usage"),
@@ -56,6 +69,7 @@ pub fn detail_view(entity: DetailEntity) -> DetailView {
             glyph,
             title,
         },
+        body: detail_body(state, entity, timezone),
     }
 }
 
@@ -148,7 +162,7 @@ pub struct DashboardView {
 
 /// How a formatted watt figure wears its sign.
 #[derive(Clone, Copy)]
-enum SignStyle {
+pub(super) enum SignStyle {
     /// `-1,234` when negative, `1,234` otherwise.
     Negative,
     /// `-1,234` or `+1,234`, so a flow always reads as a direction.
@@ -157,7 +171,7 @@ enum SignStyle {
     Magnitude,
 }
 
-fn format_watts(watts: Watts, style: SignStyle) -> String {
+pub(super) fn format_watts(watts: Watts, style: SignStyle) -> String {
     let negative = watts.get() < 0;
     let sign = match style {
         SignStyle::Negative if negative => "-",
@@ -335,7 +349,7 @@ fn pack_row(index: usize, pack: &PackStatus, limits: SocLimitsView) -> PackRowVi
     }
 }
 
-fn energy_string(energy: KiloWattHours) -> String {
+pub(super) fn energy_string(energy: KiloWattHours) -> String {
     format!("{:.1} kWh", energy.get())
 }
 
