@@ -622,3 +622,39 @@ fn battery_view_carries_the_limits_and_what_a_full_bar_is_worth() {
     // 80% of 5 kWh, discounted by the 85% round trip a fresh tracker assumes.
     assert_eq!(limits.usable_max, "3.4 kWh");
 }
+
+// --- The detail modal ---------------------------------------------------------
+
+/// A tick swaps the contents of every `sse-swap` wrapper; a dialog inside one
+/// would be rebuilt closed on the next tick.
+#[test]
+fn the_detail_dialog_sits_outside_every_swap_region() {
+    let view = dashboard_view(&state(vec![]), tz());
+    let html = layout::page(&view).into_string();
+
+    assert_eq!(html.matches("id=\"detail-modal\"").count(), 1);
+    // Right after `.page` closes, which is after every swap wrapper does.
+    assert!(
+        html.contains("</div></div><dialog id=\"detail-modal\""),
+        "the dialog is not a sibling of the page"
+    );
+}
+
+#[test]
+fn every_card_but_the_car_opens_its_detail() {
+    let view = dashboard_view(&state(vec![]), tz());
+    let html = layout::stat_cards_inner(&view).into_string();
+
+    for slug in ["solar", "home", "grid"] {
+        assert!(
+            html.contains(&format!("hx-get=\"/detail/{slug}\"")),
+            "{slug}"
+        );
+    }
+    assert_eq!(html.matches("hx-get=").count(), 3);
+    assert!(
+        layout::battery_panel_inner(&view)
+            .into_string()
+            .contains("hx-get=\"/detail/battery\"")
+    );
+}

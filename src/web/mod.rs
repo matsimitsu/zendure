@@ -3,6 +3,7 @@
 //! Grass-compiled, rust-embed'd CSS.
 
 mod axis;
+mod detail;
 mod intervals;
 mod routes;
 mod server;

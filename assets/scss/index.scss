@@ -11,6 +11,7 @@
 @use "components/axis";
 @use "components/forecast_panel";
 @use "components/callout";
+@use "components/modal";
 
 body {
   margin: 0;
@@ -30,6 +31,11 @@ a {
   display: flex;
   flex-direction: column;
   gap: var(--space-6);
+}
+
+.page__back {
+  align-self: flex-start;
+  font-size: var(--text-base);
 }
 
 .stat-row {

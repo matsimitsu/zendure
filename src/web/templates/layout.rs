@@ -12,24 +12,31 @@
 use maud::{DOCTYPE, Markup, html};
 
 use super::components::{
-    battery_panel, callout, decision_log, forecast_panel, page_header, stat_card, top_bar,
+    battery_panel, callout, decision_log, detail_view, forecast_panel, modal, page_header,
+    stat_card, top_bar,
 };
-use crate::web::view::DashboardView;
+use crate::web::view::{DashboardView, DetailView};
+
+fn head() -> Markup {
+    html! {
+    head {
+            meta charset="utf-8";
+            meta name="viewport" content="width=device-width, initial-scale=1";
+            title { "Home energy system" }
+            link rel="preconnect" href="https://fonts.googleapis.com";
+            link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet";
+            link rel="stylesheet" href="/assets/dashboard.css";
+            script src="/assets/htmx.min.js" {}
+            script src="/assets/sse.js" {}
+        }
+    }
+}
 
 pub fn page(view: &DashboardView) -> Markup {
     html! {
         (DOCTYPE)
         html {
-            head {
-                meta charset="utf-8";
-                meta name="viewport" content="width=device-width, initial-scale=1";
-                title { "Home energy system" }
-                link rel="preconnect" href="https://fonts.googleapis.com";
-                link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet";
-                link rel="stylesheet" href="/assets/dashboard.css";
-                script src="/assets/htmx.min.js" {}
-                script src="/assets/sse.js" {}
-            }
+            (head())
             body hx-ext="sse" sse-connect="/events" {
                 div id="top-bar" sse-swap="top-bar" {
                     (top_bar_inner(view))
@@ -52,6 +59,7 @@ pub fn page(view: &DashboardView) -> Markup {
                     }
                     (callout::render())
                 }
+                (modal::shell())
             }
         }
     }
@@ -101,4 +109,33 @@ pub fn decision_log_inner(view: &DashboardView) -> Markup {
 /// payload must match.
 pub fn forecast_panel_inner(view: &DashboardView) -> Markup {
     forecast_panel::render(&view.forecast)
+}
+
+/// The full-page fallback for `/detail/{entity}`, for a browser that followed
+/// the card's link without htmx.
+pub fn detail_page(dashboard: &DashboardView, detail: &DetailView) -> Markup {
+    html! {
+        (DOCTYPE)
+        html {
+            (head())
+            body {
+                (top_bar_inner(dashboard))
+                div class="page" {
+                    a class="page__back" href="/" { "← Dashboard" }
+                    div class="modal__panel modal__panel--page" {
+                        (modal::panel(&detail.header, detail_view::render(detail), modal::Presentation::Page))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// What `/detail/{entity}` swaps into the dialog's panel.
+pub fn detail_fragment(detail: &DetailView) -> Markup {
+    modal::panel(
+        &detail.header,
+        detail_view::render(detail),
+        modal::Presentation::Dialog,
+    )
 }

@@ -1,11 +1,12 @@
 use maud::{Markup, html};
 
+use crate::web::detail::DetailEntity;
 use crate::web::templates::{mini_stat, pack_list};
 use crate::web::view::BatteryPanelView;
 
 pub fn render(view: &BatteryPanelView) -> Markup {
     html! {
-        div class="battery-panel" {
+        a class="battery-panel battery-panel--link" href=(DetailEntity::Battery.path()) hx-get=(DetailEntity::Battery.path()) hx-target="#detail-modal .modal__panel" {
             div class="battery-panel__head" {
                 div class="battery-panel__identity" {
                     div class="battery-panel__icon" {
@@ -24,6 +25,7 @@ pub fn render(view: &BatteryPanelView) -> Markup {
                     (view.mode_label)
                 }
             }
+            div class="battery-panel__history" { "24h history ›" }
             div class="battery-panel__bar" {
                 div class="battery-panel__bar-fill" style=(format!("width: {}%;", view.soc_percent)) {}
             }

@@ -500,8 +500,14 @@ Add `[web]` to run a live browser dashboard (`src/web/`) — solar/home/grid
 stat cards, the battery panel (SOC, mode, RTE, usable energy, capacity, and
 a row per pack with its model, serial, SOC, flow, temperature and capacity),
 and a decision log, all real data, updating every scan tick over
-server-sent events. Two routes: `GET /` (the full page) and `GET /events`
-(the SSE stream fragments it swaps in via htmx). No `[web]` table means no
+server-sent events. Three routes: `GET /` (the full page), `GET /events`
+(the SSE stream fragments it swaps in via htmx) and `GET /detail/{entity}`
+(`solar`, `home`, `grid` or `battery`; anything else is a 404). The solar,
+home and grid cards and the battery panel open `/detail/{entity}` in a modal
+`<dialog>` (Esc, the close button or a click beside it dismisses it); the
+modal is a snapshot taken when opened, not live. With htmx the route returns
+just the panel; without it (JavaScript off, a pasted link) it returns a full
+page with a link back to the dashboard. The EV card is not clickable. No `[web]` table means no
 HTTP listener at all — the same brokerless-by-default rule `[mqtt]` follows —
 and a bind failure warns and runs without the dashboard rather than failing
 startup.

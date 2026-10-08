@@ -7,12 +7,15 @@ use crate::models::ControlMode;
 use crate::units::{Elapsed, KiloWattHours, Percent, Soc, SolarForecastPoint, Timestamp, Watts};
 
 use super::axis::{AxisTick, day_axis};
+use super::detail::DetailEntity;
 use super::state::{
     ActualSolarHistory, DashboardState, ForecastSnapshot, Plottable, SOLAR_BUCKET_MS,
     SOLAR_BUCKETS_PER_DAY, Sparkline,
 };
 
 pub struct StatCardView {
+    /// Where the card opens its detail; `None` leaves it a plain card.
+    pub detail_entity: Option<DetailEntity>,
     /// BEM modifier selecting the semantic color: "solar" | "home" | "grid" | "ev".
     pub variant: &'static str,
     pub glyph: &'static str,
@@ -22,6 +25,36 @@ pub struct StatCardView {
     pub detail: String,
     /// An SVG `path` `d` attribute, already normalized to a 96x28 viewBox.
     pub sparkline_path: String,
+}
+
+/// The modal panel's header: what the entity is called and how its icon is
+/// tinted.
+pub struct DetailHeaderView {
+    /// BEM modifier selecting the icon's color.
+    pub variant: &'static str,
+    pub glyph: &'static str,
+    pub title: &'static str,
+}
+
+/// Everything one `/detail/{entity}` panel renders from.
+pub struct DetailView {
+    pub header: DetailHeaderView,
+}
+
+pub fn detail_view(entity: DetailEntity) -> DetailView {
+    let (glyph, title) = match entity {
+        DetailEntity::Solar => ("☀", "Solar production"),
+        DetailEntity::Home => ("⌂", "Home usage"),
+        DetailEntity::Grid => ("⇄", "Grid"),
+        DetailEntity::Battery => ("▮", "Home battery"),
+    };
+    DetailView {
+        header: DetailHeaderView {
+            variant: entity.slug(),
+            glyph,
+            title,
+        },
+    }
 }
 
 pub struct MiniStatView {
@@ -244,6 +277,7 @@ fn ev_stat_card_view(
         None => ("--".to_string(), "No vehicle configured".to_string()),
     };
     StatCardView {
+        detail_entity: None,
         variant: "ev",
         glyph: "⛽",
         label: "Car Battery",
@@ -255,7 +289,7 @@ fn ev_stat_card_view(
 }
 
 fn stat_card<T: Plottable>(
-    variant: &'static str,
+    entity: DetailEntity,
     glyph: &'static str,
     label: &'static str,
     value: Watts,
@@ -264,7 +298,8 @@ fn stat_card<T: Plottable>(
     spark: &Sparkline<T>,
 ) -> StatCardView {
     StatCardView {
-        variant,
+        detail_entity: Some(entity),
+        variant: entity.slug(),
         glyph,
         label,
         value: format_watts(value, SignStyle::Negative),
@@ -457,7 +492,7 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
     let world = &state.engine.world;
 
     let solar = stat_card(
-        "solar",
+        DetailEntity::Solar,
         "☀",
         "Solar production",
         world.solar.into_watts(),
@@ -466,7 +501,7 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
         &state.sparklines.solar,
     );
     let home = stat_card(
-        "home",
+        DetailEntity::Home,
         "⌂",
         "Home usage",
         world.home_usage(),
@@ -476,7 +511,7 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
     );
     let importing = world.grid.total.importing();
     let grid = stat_card(
-        "grid",
+        DetailEntity::Grid,
         "⇄",
         "Grid",
         importing,

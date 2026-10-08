@@ -1,0 +1,181 @@
+@use "../breakpoints" as *;
+
+body:has(.modal[open]) {
+  overflow: hidden;
+}
+
+// A full-viewport, transparent dialog: the panel sits inside it and the
+// scrim form behind the panel catches a click beside it.
+.modal {
+  position: fixed;
+  inset: 0;
+  width: auto;
+  height: auto;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-secondary);
+
+  &[open] {
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding-top: var(--space-modal-top);
+  }
+
+  &::backdrop {
+    background: var(--color-overlay);
+    backdrop-filter: blur(3px);
+  }
+
+  &__scrim {
+    position: absolute;
+    inset: 0;
+  }
+
+  &__scrim-button {
+    position: absolute;
+    inset: 0;
+    border: 0;
+    background: transparent;
+    cursor: default;
+  }
+
+  &__panel {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    width: min(var(--size-modal), 100%);
+    max-height: calc(100dvh - var(--space-modal-top) - var(--space-6));
+    overflow-y: auto;
+    box-sizing: border-box;
+    background: var(--color-surface-raised);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-2xl);
+    box-shadow: var(--shadow-modal);
+
+    &--page {
+      max-height: none;
+      box-shadow: none;
+    }
+  }
+
+  &__header {
+    position: sticky;
+    top: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-5) var(--space-6);
+    background: var(--color-surface-raised);
+    border-bottom: 1px solid var(--color-border-soft);
+  }
+
+  &__icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--size-icon-button);
+    height: var(--size-icon-button);
+    border-radius: var(--radius-lg);
+    font-size: var(--text-md);
+
+    &--solar {
+      background: var(--color-accent-bg);
+    }
+
+    &--battery {
+      background: var(--color-battery-bg);
+    }
+
+    &--home {
+      background: var(--color-home-bg);
+    }
+
+    &--grid {
+      background: var(--color-info-bg);
+    }
+  }
+
+  &__heading {
+    flex: 1;
+    min-width: 0;
+  }
+
+  &__title {
+    font-size: var(--text-md);
+    font-weight: var(--weight-semibold);
+    color: var(--color-text-primary);
+  }
+
+  &__subtitle {
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+  }
+
+  &__close {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--size-icon-button);
+    height: var(--size-icon-button);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-md);
+    background: transparent;
+    color: var(--color-text-muted);
+    font: inherit;
+    cursor: pointer;
+
+    &:hover,
+    &:focus-visible {
+      color: var(--color-text-primary);
+      background: var(--color-hover-wash);
+      outline: none;
+    }
+  }
+
+  &__body {
+    padding: var(--space-5) var(--space-6) var(--space-6);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-6);
+  }
+}
+
+// A full-screen sheet: the close button stays in the sticky header, so
+// nothing depends on tapping the backdrop.
+@include narrow {
+  .modal[open] {
+    padding-top: 0;
+  }
+
+  .modal__panel {
+    width: 100%;
+    height: 100dvh;
+    max-height: none;
+    border: 0;
+    border-radius: 0;
+
+    &--page {
+      height: auto;
+    }
+  }
+
+  .modal__header {
+    padding-left: var(--space-4);
+    padding-right: var(--space-4);
+  }
+
+  .modal__body {
+    padding-left: var(--space-4);
+    padding-right: var(--space-4);
+  }
+
+  .modal__close {
+    width: var(--size-tap);
+    height: var(--size-tap);
+  }
+}
