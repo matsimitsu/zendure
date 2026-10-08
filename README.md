@@ -532,6 +532,16 @@ The EV card shows the car's own battery state of charge when `[car_battery]`
 is configured — see below — and a "No vehicle configured" placeholder
 otherwise.
 
+The energy flows panel charts today's solar, home, grid and battery power as
+grouped bars on one signed kW scale, per hour (default) or per 15 minutes.
+Grid reads positive while importing and negative while exporting; the
+battery positive while discharging and negative while charging. Only
+finished intervals are drawn, and a dashed line marks the one in progress.
+The legend shows the most recent finished interval's averages. The panel
+reads the dashboard's 15-minute history, which is seeded from the journal at
+startup, so a restart keeps the day's bars. EV charging has no series of its
+own: nothing measures it separately, so it counts as home usage.
+
 The forecast panel shows real solar predictions when `[prediction]` is
 configured — 48 half-hourly bars (Solcast's own resolution) for the
 forecast, a line for today's actual measured production drawn over the same

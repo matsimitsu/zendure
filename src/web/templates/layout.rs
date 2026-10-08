@@ -12,8 +12,8 @@
 use maud::{DOCTYPE, Markup, html};
 
 use super::components::{
-    battery_panel, callout, decision_log, detail_view, forecast_panel, modal, page_header,
-    stat_card, top_bar,
+    battery_panel, callout, decision_log, detail_view, energy_flows, forecast_panel, modal,
+    page_header, stat_card, top_bar,
 };
 use crate::web::view::{DashboardView, DetailView};
 
@@ -50,6 +50,9 @@ pub fn page(view: &DashboardView) -> Markup {
                     }
                     div id="battery-panel" sse-swap="battery-panel" {
                         (battery_panel_inner(view))
+                    }
+                    energy-flows id="energy-flows" class="energy-flows" sse-swap="energy-flows" {
+                        (energy_flows_inner(view))
                     }
                     div id="decision-log" sse-swap="decision-log" {
                         (decision_log_inner(view))
@@ -96,6 +99,12 @@ pub fn battery_panel_inner(view: &DashboardView) -> Markup {
             None => (battery_panel::empty()),
         }
     }
+}
+
+/// The flows chart's contents. Its `<energy-flows>` host is the swap target
+/// rather than a plain `div`, so the state its modifiers carry outlives a tick.
+pub fn energy_flows_inner(view: &DashboardView) -> Markup {
+    energy_flows::render(&view.energy_flows)
 }
 
 /// The decision log's contents — what the `decision-log` SSE event's payload

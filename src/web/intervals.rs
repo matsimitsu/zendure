@@ -83,7 +83,6 @@ impl<T: Averaged> Mean<T> {
     }
 
     /// The mean of whichever `values` are present.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn of(values: impl IntoIterator<Item = Option<T>>) -> Option<T> {
         let mut mean = Mean::default();
         values.into_iter().flatten().for_each(|v| mean.add(v));
@@ -92,9 +91,9 @@ impl<T: Averaged> Mean<T> {
 }
 
 /// The width of one [`IntervalHistory`] bucket.
-const INTERVAL: Duration = Duration::from_secs(15 * 60);
+pub(crate) const INTERVAL: Duration = Duration::from_secs(15 * 60);
 
-const HOUR: Duration = Duration::from_secs(60 * 60);
+pub(crate) const HOUR: Duration = Duration::from_secs(60 * 60);
 
 /// 100 rather than 96 so a 25-hour DST day fits whole.
 const INTERVAL_RING: usize = 100;
@@ -116,7 +115,6 @@ impl IntervalIndex {
         IntervalIndex(at.as_millis().div_euclid(Self::width().as_millis()))
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn start(self) -> Timestamp {
         Timestamp::from_millis(self.0.saturating_mul(Self::width().as_millis()))
     }
@@ -127,7 +125,6 @@ impl IntervalIndex {
     }
 
     /// The first interval of the hour this one falls in.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn hour_start(self) -> Self {
         let per_hour = intervals_in(HOUR);
         IntervalIndex(self.0.div_euclid(per_hour) * per_hour)
@@ -381,7 +378,6 @@ impl IntervalHistory {
 
     /// Every interval of local `date` that had finished by `now`, oldest
     /// first. Empty where `tz` cannot place the day's bounds.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn completed_on(&self, date: NaiveDate, tz: Tz, now: Timestamp) -> Vec<IntervalSlot> {
         let bounds = date.succ_opt().and_then(|next| {
             Some((
@@ -400,7 +396,6 @@ impl IntervalHistory {
 /// The 1h resolution, derived rather than stored so it can never disagree
 /// with the 15-minute buckets. Grouped by the hour each slot falls in, so a
 /// run that starts mid-hour opens with a partial hour.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn hourly(quarters: &[IntervalSlot]) -> Vec<IntervalSlot> {
     quarters
         .chunk_by(|a, b| a.index.hour_start() == b.index.hour_start())

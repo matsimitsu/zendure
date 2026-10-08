@@ -30,6 +30,29 @@
   }
 }
 
+// Upright: the parent stretches the track, labels sit flush right in it, and
+// the end ticks lean inward vertically instead.
+.axis--vertical {
+  height: auto;
+
+  .axis__tick {
+    top: auto;
+    right: 0;
+
+    &--start {
+      transform: translateY(0);
+    }
+
+    &--middle {
+      transform: translateY(-50%);
+    }
+
+    &--end {
+      transform: translateY(-100%);
+    }
+  }
+}
+
 // Only `always` ticks stay, so neighbours cannot collide at 375px.
 @include narrow {
   .axis__tick--wide-only {

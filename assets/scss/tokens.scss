@@ -11,8 +11,6 @@
   --color-border-strong: oklch(1 0 0 / 0.1);
   --color-surface-raised: oklch(0.21 0.015 250);
   --color-overlay: oklch(0.08 0.01 250 / 0.72);
-  --color-hover-wash: oklch(1 0 0 / 0.05);
-  --color-battery-bg: oklch(0.3 0.06 150);
 
   --color-text-primary: oklch(0.96 0.01 250);
   --color-text-secondary: oklch(0.9 0.01 250);
@@ -33,6 +31,14 @@
   --color-home-bg: oklch(0.3 0.06 250);
   --color-ev: oklch(0.72 0.13 300); // purple — EV
   --color-ev-bg: oklch(0.3 0.06 300);
+
+  --color-battery: oklch(0.72 0.14 150);
+  --color-battery-bg: oklch(0.3 0.06 150);
+
+  --color-surface-sunken: oklch(0.18 0.015 250);
+  --color-hover-wash: oklch(1 0 0 / 0.05);
+  --color-grid-line: oklch(1 0 0 / 0.06);
+  --color-zero-line: oklch(1 0 0 / 0.3);
 
   --color-idle: oklch(0.35 0.01 250);
   --color-idle-bg: oklch(1 0 0 / 0.08);
@@ -94,5 +100,7 @@
   --size-modal: 880px;
   --size-icon-button: 32px;
   --size-tap: 44px;
+  --size-chart: 260px;
+  --size-axis-gutter: 40px;
   --space-modal-top: 56px;
 }

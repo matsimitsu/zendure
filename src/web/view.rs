@@ -8,6 +8,7 @@ use crate::units::{Elapsed, KiloWattHours, Percent, Soc, SolarForecastPoint, Tim
 
 use super::axis::{AxisTick, day_axis};
 use super::detail::DetailEntity;
+use super::flows::{EnergyFlowsView, energy_flows_view};
 use super::soc_bar::{SocBarView, SocLimitsView};
 use super::state::{
     ActualSolarHistory, DashboardState, ForecastSnapshot, Plottable, SOLAR_BUCKET_MS,
@@ -142,6 +143,7 @@ pub struct DashboardView {
     pub battery: Option<BatteryPanelView>,
     pub decision_log: Vec<DecisionLogRowView>,
     pub forecast: ForecastPanelView,
+    pub energy_flows: EnergyFlowsView,
 }
 
 /// How a formatted watt figure wears its sign.
@@ -304,7 +306,7 @@ fn efficiency_string(rte: Option<Percent>) -> String {
     }
 }
 
-const MISSING: &str = "—";
+pub(super) const MISSING: &str = "—";
 
 fn pack_row(index: usize, pack: &PackStatus, limits: SocLimitsView) -> PackRowView {
     PackRowView {
@@ -337,7 +339,7 @@ fn energy_string(energy: KiloWattHours) -> String {
     format!("{:.1} kWh", energy.get())
 }
 
-fn format_time(at: Timestamp, timezone: chrono_tz::Tz) -> String {
+pub(super) fn format_time(at: Timestamp, timezone: chrono_tz::Tz) -> String {
     use chrono::TimeZone;
     timezone
         .timestamp_millis_opt(at.as_millis())
@@ -605,6 +607,7 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
         battery,
         decision_log,
         forecast: forecast_panel_view(&state.forecast, &state.actual_solar, state.as_of, timezone),
+        energy_flows: energy_flows_view(&state.intervals, state.as_of, timezone),
     }
 }
 

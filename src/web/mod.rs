@@ -4,6 +4,7 @@
 
 mod axis;
 mod detail;
+mod flows;
 mod intervals;
 mod pack_intervals;
 mod routes;

@@ -6,6 +6,7 @@ mod components {
     pub mod callout;
     pub mod decision_log;
     pub mod detail_view;
+    pub mod energy_flows;
     pub mod forecast_panel;
     pub mod mini_stat;
     pub mod modal;
