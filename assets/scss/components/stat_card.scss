@@ -1,3 +1,5 @@
+@use "../breakpoints" as *;
+
 .stat-card {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
@@ -102,6 +104,17 @@
 
     .stat-card__sparkline path {
       stroke: var(--color-ev);
+    }
+  }
+}
+
+// Two cards share a 375px row, which leaves a 30px "-1,234 W" no room.
+@include narrow {
+  .stat-card {
+    padding: var(--space-4);
+
+    &__value {
+      font-size: var(--text-lg);
     }
   }
 }
