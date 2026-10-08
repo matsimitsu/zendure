@@ -123,6 +123,12 @@ impl Watts {
         Watts(w.min(i32::MAX as u32) as i32)
     }
 
+    /// The nearest whole watt to a fractional figure, such as a mean of
+    /// readings. Saturates at the `i32` range rather than wrapping.
+    pub fn rounded(watts: f64) -> Self {
+        Watts(watts.round() as i32)
+    }
+
     pub fn get(self) -> i32 {
         self.0
     }
@@ -227,7 +233,7 @@ impl SolarPower {
     /// Production as whole [`Watts`], rounded — a reading to display, not a
     /// setpoint to command.
     pub fn into_watts(self) -> Watts {
-        Watts(self.0.round() as i32)
+        Watts::rounded(self.0)
     }
 
     pub fn get(self) -> f64 {
@@ -260,6 +266,12 @@ impl BatteryPower {
     /// The device reports charge and discharge as two non-negative figures.
     pub fn from_flows(discharge: Watts, charge: Watts) -> Self {
         BatteryPower((discharge - charge).get())
+    }
+
+    /// The nearest whole watt to a fractional flow, such as a mean of
+    /// readings.
+    pub fn rounded(watts: f64) -> Self {
+        BatteryPower(Watts::rounded(watts).get())
     }
 
     /// How hard it is currently charging, or zero if it isn't.
@@ -501,10 +513,10 @@ impl Soc {
         Soc::new(tenths / 10)
     }
 
-    /// The fraction of the pack sitting above `floor`, 0.0–1.0. Saturating, so
-    /// an SOC below the floor reads as nothing usable rather than underflowing.
-    pub fn fraction_above(self, floor: Soc) -> f64 {
-        f64::from(self.0.saturating_sub(floor.0)) / 100.0
+    /// The share of the pack sitting above `floor`. Saturating, so an SOC
+    /// below the floor reads as nothing usable rather than underflowing.
+    pub fn fraction_above(self, floor: Soc) -> Fraction {
+        Fraction::new(f64::from(self.0.saturating_sub(floor.0)) / 100.0)
     }
 
     /// A state of charge from `stored / capacity`. Rounds to a whole percent
@@ -524,6 +536,35 @@ impl Soc {
 
     pub fn get(self) -> u32 {
         self.0
+    }
+}
+
+/// A share of a whole, 0.0–1.0: what an energy figure is scaled by.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct Fraction(f64);
+
+impl Fraction {
+    pub const NONE: Fraction = Fraction(0.0);
+
+    /// Clamps to 0–1, with NaN mapped to nothing rather than carried into
+    /// every figure scaled by it.
+    pub fn new(fraction: f64) -> Self {
+        if fraction.is_nan() {
+            return Fraction::NONE;
+        }
+        Fraction(fraction.clamp(0.0, 1.0))
+    }
+
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
+/// A share of a share stays within 0–1, so no re-clamp is needed.
+impl std::ops::Mul for Fraction {
+    type Output = Fraction;
+    fn mul(self, rhs: Fraction) -> Fraction {
+        Fraction(self.0 * rhs.0)
     }
 }
 
@@ -605,6 +646,10 @@ impl WattHours {
         KiloWattHours(self.0 / 1000.0)
     }
 
+    pub fn scale(self, fraction: Fraction) -> Self {
+        WattHours(self.0 * fraction.get())
+    }
+
     /// Energy back to the average power over an interval — the inverse of
     /// [`WattHours::integrate`] for a span `simulation.rs` knows was at
     /// constant power. Guards `dt == 0` (else an infinite/NaN wattage) and
@@ -647,8 +692,8 @@ forward_display!(KiloWattHours, f64);
 impl KiloWattHours {
     pub const ZERO: KiloWattHours = KiloWattHours(0.0);
 
-    pub fn scale(self, fraction: f64) -> Self {
-        KiloWattHours(self.0 * fraction)
+    pub fn scale(self, fraction: Fraction) -> Self {
+        KiloWattHours(self.0 * fraction.get())
     }
 
     pub fn get(self) -> f64 {

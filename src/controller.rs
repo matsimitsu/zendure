@@ -8,14 +8,14 @@ use crate::clock::Clock;
 use crate::config::{Config, SessionConfig};
 use crate::models::{ControlDecision, ControlMode, CycleCounts};
 use crate::units::{
-    Elapsed, Gain, GridPower, KiloWattHours, PowerMargin, RampFactor, Setpoint, SlewLimit, Soc,
-    SolarPower, Timestamp, Watts,
+    Elapsed, Gain, GridPower, PowerMargin, RampFactor, Setpoint, SlewLimit, Soc, SolarPower,
+    Timestamp, Watts,
 };
 use crate::world::World;
 
-/// The SOC window the dashboard draws and sizes its energy figures against.
-/// `min` is the binding floor, so the bar's tick and the "of X kWh" beside it
-/// can never disagree about where usable energy starts.
+/// The SOC window the controller keeps the pack within on a given day. `min`
+/// is the binding floor, so every energy figure measured against it agrees
+/// about where usable energy starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SocLimits {
     pub min: Soc,
@@ -28,11 +28,6 @@ impl SocLimits {
     /// its own `minSoc`, and the controller refuses below `[tuning] min_soc`.
     pub fn binding_floor(device_min: Soc, tuning_min: Soc) -> Soc {
         device_min.max(tuning_min)
-    }
-
-    /// Energy between the two limits, which is what a full bar is worth.
-    pub fn usable_max(&self, capacity: KiloWattHours) -> KiloWattHours {
-        capacity.scale(self.max.fraction_above(self.min))
     }
 }
 

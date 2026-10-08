@@ -540,6 +540,7 @@ async fn a_device_found_down_is_written_to_once_per_outage() {
             meter: None,
             devices: down.clone(),
         },
+        SocLimits::default(),
     )
     .await;
 
@@ -559,6 +560,7 @@ async fn a_device_found_down_is_written_to_once_per_outage() {
             meter: None,
             devices: down,
         },
+        SocLimits::default(),
     )
     .await;
     assert_eq!(

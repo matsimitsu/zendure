@@ -262,8 +262,22 @@ fn soc_from_tenths_names_the_10x_conversion() {
 
 #[test]
 fn fraction_above_saturates_below_the_floor() {
-    assert_eq!(Soc::new(80).fraction_above(Soc::new(10)), 0.70);
-    assert_eq!(Soc::new(5).fraction_above(Soc::new(10)), 0.0);
+    assert_eq!(Soc::new(80).fraction_above(Soc::new(10)).get(), 0.70);
+    assert_eq!(Soc::new(5).fraction_above(Soc::new(10)), Fraction::NONE);
+}
+
+#[test]
+fn a_fraction_is_clamped_to_a_share_of_a_whole() {
+    assert_eq!(Fraction::new(1.5).get(), 1.0);
+    assert_eq!(Fraction::new(-0.2), Fraction::NONE);
+    assert_eq!(Fraction::new(f64::NAN), Fraction::NONE);
+}
+
+#[test]
+fn rounding_constructors_take_the_nearest_whole_watt() {
+    assert_eq!(Watts::rounded(12.5), Watts(13));
+    assert_eq!(Watts::rounded(-12.4), Watts(-12));
+    assert_eq!(BatteryPower::rounded(-52.5), BatteryPower(-53));
 }
 
 #[test]

@@ -3,7 +3,7 @@
 use crate::battery::BatteryState;
 use crate::clock::Clock;
 use crate::event::Event;
-use crate::units::{GridPower, Soc, SolarPower};
+use crate::units::{BatteryPower, GridPower, Soc, SolarPower, Timestamp};
 use crate::world::{DeviceId, Measurement, MeterReading};
 
 /// A run the engine can be folded over, for tests needing a *sequence* rather
@@ -28,17 +28,52 @@ pub mod journey {
         }
     }
 
+    /// The journey's clock, moved to `now` without moving its day.
+    pub fn clock_on(now: Timestamp) -> Clock {
+        Clock { now, ..clock_at(0) }
+    }
+
+    pub fn meter(at: Clock, sampled_at: Option<Timestamp>, grid: f64, solar: f64) -> Event {
+        Event::Meter {
+            at,
+            sampled_at,
+            grid: MeterReading::total_only(GridPower(grid)),
+            solar: SolarPower::new(solar),
+        }
+    }
+
+    pub fn device_update(at: Clock, id: &str, state: BatteryState) -> Event {
+        Event::DeviceUpdate {
+            at,
+            id: DeviceId::new(id),
+            measurement: Measurement::Battery(state),
+        }
+    }
+
+    /// A meter reading sampled at `now`, as the live loop records one.
+    pub fn meter_event(now: Timestamp, grid: f64, solar: f64) -> Event {
+        meter(clock_on(now), Some(now), grid, solar)
+    }
+
+    /// The journey's battery reporting `power` and `soc` at `now`.
+    pub fn battery_event(now: Timestamp, power: BatteryPower, soc: Soc) -> Event {
+        device_update(
+            clock_on(now),
+            BATTERY_ID,
+            BatteryState {
+                current_power: power,
+                soc,
+                ..BatteryState::test_sample()
+            },
+        )
+    }
+
     /// A sequence chosen to write every field of the engine's snapshot: swings
     /// across both start thresholds (mode changes, cooldown stamps, transition
     /// counters), a device update, and a timeout/resume pair, so a snapshot
     /// taken between them has to carry `mqtt_timed_out` too.
     pub fn events() -> Vec<Event> {
-        let meter_at = |secs, total| Event::Meter {
-            at: clock_at(secs),
-            sampled_at: None,
-            grid: MeterReading::total_only(GridPower(total)),
-            solar: SolarPower::new(0.0),
-        };
+        let meter_at = |secs, total| meter(clock_at(secs), None, total, 0.0);
         vec![
             meter_at(0, -500.0),
             meter_at(20, -800.0),
@@ -47,14 +82,14 @@ pub mod journey {
             // an update that changes nothing leaves a restored world
             // indistinguishable from a fresh one, and the snapshot's `world`
             // stops being under test.
-            Event::DeviceUpdate {
-                at: clock_at(60),
-                id: DeviceId::new(BATTERY_ID),
-                measurement: Measurement::Battery(BatteryState {
+            device_update(
+                clock_at(60),
+                BATTERY_ID,
+                BatteryState {
                     soc: Soc::new(81),
                     ..BatteryState::test_sample()
-                }),
-            },
+                },
+            ),
             Event::MqttTimeout { at: clock_at(80) },
             meter_at(100, 250.0),
             meter_at(120, -600.0),
@@ -65,11 +100,7 @@ pub mod journey {
     /// What `main.rs` journals at startup: the world's first battery, arriving
     /// through the fold rather than written into the world behind it.
     pub fn startup() -> Event {
-        Event::DeviceUpdate {
-            at: clock_at(0),
-            id: DeviceId::new(BATTERY_ID),
-            measurement: Measurement::Battery(BatteryState::test_sample()),
-        }
+        device_update(clock_at(0), BATTERY_ID, BatteryState::test_sample())
     }
 
     /// The whole recorded stream as a session actually produces it — the
@@ -77,4 +108,16 @@ pub mod journey {
     pub fn session() -> Vec<Event> {
         std::iter::once(startup()).chain(events()).collect()
     }
+}
+
+/// An instant in October 2026, UTC: a month that holds Europe's autumn DST
+/// change, so one helper serves both plain and DST-crossing tests.
+pub fn utc(day: u32, hour: u32, minute: u32) -> Timestamp {
+    use chrono::TimeZone;
+    Timestamp::from(
+        chrono::Utc
+            .with_ymd_and_hms(2026, 10, day, hour, minute, 0)
+            .single()
+            .expect("a valid UTC instant"),
+    )
 }

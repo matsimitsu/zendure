@@ -190,7 +190,7 @@ impl VirtualBattery {
         // f64 / 100.0`: the fraction-of-the-pack arithmetic already exists on
         // `Soc` for the controller's own floor calculations, and reusing it
         // here means there is one place that says what an SOC fraction is.
-        let stored = WattHours(capacity.get() * soc.fraction_above(Soc::ZERO));
+        let stored = capacity.scale(soc.fraction_above(Soc::ZERO));
         let start = Instant::now();
         VirtualBattery {
             id,

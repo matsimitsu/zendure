@@ -1682,17 +1682,6 @@ fn soc_limits_balance_day_is_full_and_flagged() {
 }
 
 #[test]
-fn soc_limits_usable_max_spans_the_window() {
-    let limits = SocLimits {
-        min: Soc::new(20),
-        max: Soc::new(90),
-        balance_day: false,
-    };
-    let usable = limits.usable_max(KiloWattHours(10.0));
-    assert!((usable.get() - 7.0).abs() < 1e-9);
-}
-
-#[test]
 fn effective_max_soc_unaffected_when_disabled() {
     let mut ctrl = default_controller();
     ctrl.max_soc = Soc::new(95);

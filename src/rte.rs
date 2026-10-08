@@ -5,7 +5,14 @@ use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
-use crate::units::{KiloWattHours, Percent, Soc, WattHours, Watts};
+use crate::units::{Fraction, KiloWattHours, Percent, Soc, WattHours, Watts};
+
+/// How much of the energy stored above the floor a discharge gives back: the
+/// measured RTE, or 85% until there is one. Shared by every usable-energy
+/// figure, so a full bar and the live reading discount alike.
+pub fn recovered_share(rte: Option<Percent>) -> Fraction {
+    Fraction::new(rte.map_or(0.85, Percent::fraction))
+}
 
 /// Persisted energy sample: (unix timestamp, charge_wh, discharge_wh)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,10 +158,9 @@ impl RteTracker {
             return KiloWattHours::ZERO;
         }
 
-        let usable_soc_fraction = soc.fraction_above(min_soc);
-        let rte_factor = self.rte_percent().map_or(0.85, Percent::fraction);
-
-        WattHours(total_capacity_wh.get() * usable_soc_fraction * rte_factor).to_kwh()
+        total_capacity_wh
+            .scale(soc.fraction_above(min_soc) * recovered_share(self.rte_percent()))
+            .to_kwh()
     }
 
     /// Persist current state to disk.

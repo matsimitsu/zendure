@@ -4,7 +4,7 @@
 use super::*;
 
 use crate::battery::BatteryState;
-use crate::fixtures::journey;
+use crate::fixtures::{journey, utc};
 use crate::units::{BatteryPower, GridPower, SolarPower, Timestamp};
 use crate::world::{DeviceId, Measurement, MeterReading, World};
 
@@ -55,6 +55,36 @@ fn telemetry() -> DashboardTelemetry {
     }
 }
 
+/// A meter tick whose event carries nothing the test is about: the
+/// interval ring has tests of its own.
+fn meter_tick(
+    state: &mut DashboardState,
+    engine: &EngineState,
+    decision: Option<(&ControlDecision, Timestamp)>,
+    clock: &Clock,
+    timezone: chrono_tz::Tz,
+) {
+    let event = journey::meter_event(clock.now, 0.0, 0.0);
+    state.meter_tick(
+        engine,
+        &event,
+        decision,
+        clock,
+        timezone,
+        SocLimits::default(),
+    );
+}
+
+fn poll_tick(
+    state: &mut DashboardState,
+    engine: &EngineState,
+    telemetry: DashboardTelemetry,
+    as_of: Timestamp,
+) {
+    let event = journey::battery_event(as_of, BatteryPower::ZERO, Soc::new(50));
+    state.poll_tick(engine, &event, telemetry, as_of);
+}
+
 fn decision() -> ControlDecision {
     ControlDecision::test_sample()
 }
@@ -87,20 +117,22 @@ fn same_command_different_reason(reason: &str, grid: f64) -> ControlDecision {
 fn only_a_meter_tick_extends_the_sparklines() {
     let mut state = seeded();
 
-    state.poll_tick(&engine(), telemetry(), at(1));
-    state.failsafe_tick(&engine(), None, at(2));
+    poll_tick(&mut state, &engine(), telemetry(), at(1));
+    state.failsafe_tick(&engine(), None, at(2), SocLimits::default());
     assert!(state.sparklines.grid.is_empty());
     assert!(state.sparklines.solar.is_empty());
     assert!(state.sparklines.home_usage.is_empty());
 
-    state.meter_tick(
+    meter_tick(
+        &mut state,
         &engine_state(GridPower(100.0), SolarPower::new(10.0)),
         None,
         &clock(3),
         tz(),
     );
-    state.poll_tick(&engine(), telemetry(), at(4));
-    state.meter_tick(
+    poll_tick(&mut state, &engine(), telemetry(), at(4));
+    meter_tick(
+        &mut state,
         &engine_state(GridPower(200.0), SolarPower::new(20.0)),
         None,
         &clock(5),
@@ -122,7 +154,8 @@ fn only_a_meter_tick_extends_the_sparklines() {
 fn a_sparkline_holds_its_capacity_and_no_more() {
     let mut state = seeded();
     for i in 0..SPARKLINE_CAPACITY + 10 {
-        state.meter_tick(
+        meter_tick(
+            &mut state,
             &engine_state(GridPower(i as f64), SolarPower::ZERO),
             None,
             &clock(i as i64),
@@ -157,10 +190,10 @@ fn a_seed_carries_the_startup_polls_own_figures() {
 #[test]
 fn telemetry_survives_the_ticks_that_do_not_carry_it() {
     let mut state = seeded();
-    state.poll_tick(&engine(), telemetry(), at(1));
+    poll_tick(&mut state, &engine(), telemetry(), at(1));
 
-    state.meter_tick(&engine(), None, &clock(2), tz());
-    state.failsafe_tick(&engine(), None, at(3));
+    meter_tick(&mut state, &engine(), None, &clock(2), tz());
+    state.failsafe_tick(&engine(), None, at(3), SocLimits::default());
 
     assert_eq!(state.pack_capacity, KiloWattHours(3.84));
     assert_eq!(state.usable_energy, KiloWattHours(1.8));
@@ -177,13 +210,14 @@ fn the_decision_log_appends_only_real_decisions_and_stays_bounded() {
     let mut state = seeded();
     assert!(state.last_decision.is_none());
 
-    state.meter_tick(&engine(), None, &clock(1), tz());
+    meter_tick(&mut state, &engine(), None, &clock(1), tz());
     assert!(state.recent_decisions.is_empty());
     assert!(state.last_decision.is_none());
 
     for i in 0..DECISION_LOG_CAPACITY + 5 {
         let decision = at_watts(i as i32);
-        state.meter_tick(
+        meter_tick(
+            &mut state,
             &engine(),
             Some((&decision, at(i as i64))),
             &clock(i as i64),
@@ -211,16 +245,19 @@ fn a_repeated_command_extends_the_newest_row_instead_of_pushing_another() {
         &engine(),
         Some((&same_command_different_reason("grid: 150W", 150.5), at(1))),
         at(1),
+        SocLimits::default(),
     );
     state.failsafe_tick(
         &engine(),
         Some((&same_command_different_reason("grid: 162W", 162.25), at(6))),
         at(6),
+        SocLimits::default(),
     );
     state.failsafe_tick(
         &engine(),
         Some((&same_command_different_reason("grid: 171W", 171.75), at(11))),
         at(11),
+        SocLimits::default(),
     );
 
     assert_eq!(state.recent_decisions.len(), 1);
@@ -239,9 +276,24 @@ fn a_repeated_command_extends_the_newest_row_instead_of_pushing_another() {
 fn a_different_command_pushes_a_new_row() {
     let mut state = seeded();
 
-    state.failsafe_tick(&engine(), Some((&at_watts(145), at(1))), at(1));
-    state.failsafe_tick(&engine(), Some((&at_watts(145), at(6))), at(6));
-    state.failsafe_tick(&engine(), Some((&at_watts(900), at(11))), at(11));
+    state.failsafe_tick(
+        &engine(),
+        Some((&at_watts(145), at(1))),
+        at(1),
+        SocLimits::default(),
+    );
+    state.failsafe_tick(
+        &engine(),
+        Some((&at_watts(145), at(6))),
+        at(6),
+        SocLimits::default(),
+    );
+    state.failsafe_tick(
+        &engine(),
+        Some((&at_watts(900), at(11))),
+        at(11),
+        SocLimits::default(),
+    );
 
     assert_eq!(state.recent_decisions.len(), 2);
     assert_eq!(state.recent_decisions.front().unwrap().repeats, 2);
@@ -262,11 +314,13 @@ fn a_collapsed_decision_still_updates_the_badge() {
         &engine(),
         Some((&same_command_different_reason("first", 150.5), at(1))),
         at(1),
+        SocLimits::default(),
     );
     state.failsafe_tick(
         &engine(),
         Some((&same_command_different_reason("newest", 162.25), at(6))),
         at(6),
+        SocLimits::default(),
     );
 
     assert_eq!(state.recent_decisions.len(), 1);
@@ -313,7 +367,7 @@ fn collapsed_runs_still_obey_the_capacity_cap() {
         for repeat in 0..2 {
             let decision = at_watts(i as i32);
             let at = at((i * 2 + repeat) as i64);
-            state.failsafe_tick(&engine(), Some((&decision, at)), at);
+            state.failsafe_tick(&engine(), Some((&decision, at)), at, SocLimits::default());
         }
     }
 
@@ -336,7 +390,12 @@ fn collapsed_runs_still_obey_the_capacity_cap() {
 fn a_failsafe_decision_reaches_the_badge() {
     let mut state = seeded();
     let forced = decision();
-    state.failsafe_tick(&engine(), Some((&forced, at(1))), at(1));
+    state.failsafe_tick(
+        &engine(),
+        Some((&forced, at(1))),
+        at(1),
+        SocLimits::default(),
+    );
 
     assert_eq!(state.recent_decisions.len(), 1);
     assert_eq!(
@@ -361,23 +420,12 @@ fn each_sparkline_carries_its_own_quantity() {
 
 // --- Actual solar history --------------------------------------------------
 
-/// A fixed instant at the given UTC hour/minute on an arbitrary day, so
-/// bucket math in these tests doesn't depend on wall-clock time.
-fn solar_ts(hour: u32, minute: u32) -> Timestamp {
-    use chrono::TimeZone;
-    Timestamp::from(
-        chrono_tz::UTC
-            .with_ymd_and_hms(2026, 1, 1, hour, minute, 0)
-            .unwrap(),
-    )
-}
-
 #[test]
 fn actual_solar_history_buckets_by_half_hour_and_averages() {
     let mut history = ActualSolarHistory::default();
-    history.record(solar_ts(6, 0), tz(), 100, SolarPower::new(1000.0));
-    history.record(solar_ts(6, 10), tz(), 100, SolarPower::new(2000.0));
-    history.record(solar_ts(7, 0), tz(), 100, SolarPower::new(500.0));
+    history.record(utc(1, 6, 0), tz(), 100, SolarPower::new(1000.0));
+    history.record(utc(1, 6, 10), tz(), 100, SolarPower::new(2000.0));
+    history.record(utc(1, 7, 0), tz(), 100, SolarPower::new(500.0));
 
     let averages = history.averages();
     assert_eq!(averages[12], Some(1500.0), "06:00-06:30 is bucket 12");
@@ -393,8 +441,8 @@ fn actual_solar_history_buckets_by_half_hour_and_averages() {
 #[test]
 fn actual_solar_history_resets_on_a_new_day() {
     let mut history = ActualSolarHistory::default();
-    history.record(solar_ts(10, 0), tz(), 100, SolarPower::new(5000.0));
-    history.record(solar_ts(10, 0), tz(), 101, SolarPower::new(1000.0));
+    history.record(utc(1, 10, 0), tz(), 100, SolarPower::new(5000.0));
+    history.record(utc(1, 10, 0), tz(), 101, SolarPower::new(1000.0));
 
     assert_eq!(
         history.averages()[20],
@@ -407,11 +455,12 @@ fn actual_solar_history_resets_on_a_new_day() {
 fn a_meter_tick_records_into_the_actual_solar_history() {
     let mut state = seeded();
     let clock = Clock {
-        now: solar_ts(14, 0),
+        now: utc(1, 14, 0),
         day_ordinal: 200,
         ..Clock::test_at(journey::NOW_MS)
     };
-    state.meter_tick(
+    meter_tick(
+        &mut state,
         &engine_state(GridPower(0.0), SolarPower::new(3000.0)),
         None,
         &clock,
@@ -445,14 +494,15 @@ fn forecast_tick_changes_only_the_forecast_field() {
 }
 
 #[test]
-fn poll_tick_publishes_limits_and_usable_max_from_capacity() {
+fn a_full_bar_is_worth_what_usable_energy_reads_at_max() {
     let mut state = seeded();
     let limits = SocLimits {
         min: Soc::new(20),
         max: Soc::new(70),
         balance_day: false,
     };
-    state.poll_tick(
+    poll_tick(
+        &mut state,
         &engine(),
         DashboardTelemetry {
             soc_limits: limits,
@@ -463,191 +513,35 @@ fn poll_tick_publishes_limits_and_usable_max_from_capacity() {
     );
 
     assert_eq!(state.soc_limits, limits);
-    assert!((state.usable_max().get() - 2.0).abs() < 1e-9);
-}
+    // 50% of 4 kWh, discounted by the 91.4% round trip `telemetry` carries.
+    assert!((state.usable_max().get() - 1.828).abs() < 1e-9);
 
-// --- Interval history ---------------------------------------------------
-
-fn meter_event(now: Timestamp, grid: f64, solar: f64) -> Event {
-    Event::Meter {
-        at: Clock {
-            now,
-            ..journey::clock_at(0)
-        },
-        sampled_at: Some(now),
-        grid: MeterReading::total_only(GridPower(grid)),
-        solar: SolarPower::new(solar),
-    }
-}
-
-fn battery_event(now: Timestamp, power: BatteryPower, soc: u32) -> Event {
-    Event::DeviceUpdate {
-        at: Clock {
-            now,
-            ..journey::clock_at(0)
-        },
-        id: DeviceId::new(journey::BATTERY_ID),
-        measurement: Measurement::Battery(BatteryState {
-            current_power: power,
-            soc: Soc::new(soc),
-            ..BatteryState::test_sample()
-        }),
-    }
-}
-
-fn base() -> IntervalIndex {
-    IntervalIndex::containing(at(0))
-}
-
-fn into_interval(index: IntervalIndex, secs: i64) -> Timestamp {
-    Timestamp::from_millis(index.start().as_millis() + secs * 1000)
-}
-
-fn utc(day: u32, hour: u32, minute: u32) -> Timestamp {
-    use chrono::TimeZone;
-    Timestamp::from(
-        chrono::Utc
-            .with_ymd_and_hms(2026, 10, day, hour, minute, 0)
-            .unwrap(),
-    )
+    let dir = tempfile::tempdir().unwrap();
+    let rte = crate::rte::RteTracker::new(dir.path().join("rte.json"));
+    let at_max = rte.usable_kwh(limits.max, limits.min, crate::units::WattHours(4000.0));
+    let no_history = DashboardState {
+        rte_percent: None,
+        ..state
+    };
+    assert!((no_history.usable_max().get() - at_max.get()).abs() < 1e-9);
 }
 
 #[test]
-fn readings_average_within_an_interval_and_the_next_one_starts_fresh() {
-    let mut history = IntervalHistory::default();
-    history.record(&meter_event(into_interval(base(), 0), 100.0, 200.0));
-    history.record(&meter_event(into_interval(base(), 60), 300.0, 400.0));
-    history.record(&battery_event(
-        into_interval(base(), 90),
-        BatteryPower(-400),
-        60,
-    ));
-    history.record(&battery_event(
-        into_interval(base(), 120),
-        BatteryPower(-200),
-        61,
-    ));
-    history.record(&meter_event(into_interval(base().offset(1), 0), 250.0, 0.0));
-
-    let first = history.averages(base());
-    assert_eq!(first.grid, Some(GridPower(200.0)));
-    assert_eq!(first.solar, Some(SolarPower::new(300.0)));
-    assert_eq!(first.home, Some(Watts(500)));
-    assert_eq!(first.battery, Some(BatteryPower(-300)));
-    assert_eq!(first.soc, Some(Soc::new(61)));
-
-    let second = history.averages(base().offset(1));
-    assert_eq!(second.grid, Some(GridPower(250.0)));
-    assert_eq!(second.battery, None);
-    // The last flow seen, 200 W into the pack, is not the house's demand.
-    assert_eq!(second.home, Some(Watts(50)));
-}
-
-#[test]
-fn an_interval_older_than_the_ring_is_gone() {
-    let mut history = IntervalHistory::default();
-    history.record(&meter_event(into_interval(base(), 0), 100.0, 0.0));
-    history.record(&meter_event(into_interval(base().offset(99), 0), 1.0, 0.0));
-    assert_eq!(history.averages(base()).grid, Some(GridPower(100.0)));
-
-    // Same slot as `base`, one lap later.
-    history.record(&meter_event(into_interval(base().offset(100), 0), 2.0, 0.0));
-    assert_eq!(history.averages(base()), IntervalAverages::default());
-
-    // A slot nothing overwrote, which the ring has moved past all the same.
-    let mut gapped = IntervalHistory::default();
-    gapped.record(&meter_event(into_interval(base(), 0), 100.0, 0.0));
-    gapped.record(&meter_event(into_interval(base().offset(150), 0), 2.0, 0.0));
-    assert_eq!(gapped.averages(base()), IntervalAverages::default());
-}
-
-#[test]
-fn a_late_event_from_before_the_ring_cannot_clobber_its_slot() {
-    let mut history = IntervalHistory::default();
-    history.record(&meter_event(into_interval(base(), 0), 100.0, 0.0));
-    history.record(&meter_event(
-        into_interval(base().offset(-100), 0),
-        9.0,
-        0.0,
-    ));
-
-    assert_eq!(history.averages(base()).grid, Some(GridPower(100.0)));
-    assert_eq!(
-        history.averages(base().offset(-100)),
-        IntervalAverages::default()
+fn a_meter_tick_refreshes_the_limits() {
+    let mut state = seeded();
+    let balance = SocLimits {
+        min: Soc::new(10),
+        max: Soc::FULL,
+        balance_day: true,
+    };
+    state.meter_tick(
+        &engine(),
+        &journey::meter_event(at(1), 0.0, 0.0),
+        None,
+        &clock(1),
+        tz(),
+        balance,
     );
-}
 
-/// 2026-10-25 in Amsterdam runs 02:00–03:00 twice. Keyed on local time the two
-/// 02:15s would share a bucket; keyed on the absolute index they are an hour
-/// apart, and the 25-hour day fills all 100 slots.
-#[test]
-fn the_repeated_hour_of_a_dst_change_keeps_its_own_intervals() {
-    let tz = chrono_tz::Europe::Amsterdam;
-    let mut history = IntervalHistory::default();
-    history.record(&meter_event(utc(24, 22, 0), 50.0, 0.0)); // 00:00 CEST
-    history.record(&meter_event(utc(25, 0, 15), 100.0, 0.0)); // 02:15 CEST
-    history.record(&meter_event(utc(25, 1, 15), 200.0, 0.0)); // 02:15 CET
-    history.record(&meter_event(utc(25, 22, 45), 300.0, 0.0)); // 23:45 CET
-
-    let day = chrono::NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
-    let slots = history.completed_on(day, tz, utc(25, 23, 0));
-
-    assert_eq!(slots.len(), 100);
-    let grid = |i: usize| slots[i].averages.grid;
-    assert_eq!(grid(0), Some(GridPower(50.0)));
-    assert_eq!(grid(9), Some(GridPower(100.0)));
-    assert_eq!(grid(13), Some(GridPower(200.0)));
-    assert_eq!(grid(99), Some(GridPower(300.0)));
-    assert_eq!(slots[13].index, slots[9].index.offset(4));
-}
-
-#[test]
-fn completed_on_stops_before_the_interval_still_in_progress() {
-    let tz = chrono_tz::Europe::Amsterdam;
-    let mut history = IntervalHistory::default();
-    history.record(&meter_event(utc(24, 22, 0), 50.0, 0.0));
-    history.record(&meter_event(utc(24, 22, 20), 60.0, 0.0));
-
-    let day = chrono::NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
-    let slots = history.completed_on(day, tz, utc(24, 22, 20));
-
-    assert_eq!(slots.len(), 1);
-    assert_eq!(slots[0].averages.grid, Some(GridPower(50.0)));
-}
-
-#[test]
-fn last_24h_is_96_intervals_ending_with_the_current_one() {
-    let mut history = IntervalHistory::default();
-    history.record(&meter_event(into_interval(base(), 0), 100.0, 0.0));
-
-    let slots = history.last_24h(into_interval(base(), 30));
-
-    assert_eq!(slots.len(), 96);
-    assert_eq!(slots[0].index, base().offset(-95));
-    assert_eq!(slots[95].index, base());
-    assert_eq!(slots[95].averages.grid, Some(GridPower(100.0)));
-}
-
-/// A restart must show the same chart the process it replaced was showing.
-#[tokio::test]
-async fn the_journal_seed_equals_the_live_fold() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("journal.db");
-    let events = journey::session();
-    crate::journal::testing::record(&path, &events).await;
-
-    let mut live = IntervalHistory::default();
-    events.iter().for_each(|event| live.record(event));
-    let seeded = seed_interval_history(&path, at(1_000));
-
-    assert_ne!(live, IntervalHistory::default());
-    assert_eq!(seeded, live);
-}
-
-#[test]
-fn an_unreadable_journal_seeds_an_empty_history() {
-    let dir = tempfile::tempdir().unwrap();
-    let seeded = seed_interval_history(&dir.path().join("missing.db"), at(0));
-    assert_eq!(seeded, IntervalHistory::default());
+    assert_eq!(state.soc_limits, balance);
 }

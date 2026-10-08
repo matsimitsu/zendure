@@ -8,8 +8,6 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Weekday;
-
 use crate::allocate::Directive;
 use crate::announce::Announcer;
 use crate::car_battery;
@@ -152,13 +150,14 @@ impl Tick<'_> {
                 }
             };
 
-            let figures = telemetry.record_and_publish(
+            telemetry.record(&reading);
+            let limits = engine.soc_limits(at.weekday, telemetry.min_soc);
+            let figures = telemetry.publish(
                 self.publisher,
                 self.announcer,
                 self.prefix,
                 &reading,
-                engine,
-                at.weekday,
+                limits,
             );
 
             // The sample's own clock, not the tick's, so `events.ts_ms` says
@@ -173,10 +172,7 @@ impl Tick<'_> {
 
             if let Some(tx) = self.dashboard {
                 let snapshot = engine.state();
-                tx.send_modify(|state| {
-                    state.intervals.record(&event);
-                    state.poll_tick(&snapshot, figures, at.now);
-                });
+                tx.send_modify(|state| state.poll_tick(&snapshot, &event, figures, at.now));
             }
         }
 
@@ -189,7 +185,7 @@ impl Tick<'_> {
 
     /// Re-asserts idle for the whole fleet. `Step.status` is first-tick-only,
     /// so the lines naming what stopped answering fire once per outage.
-    async fn stand_down(&self, engine: &mut Engine, at: Clock, silent: Silent) {
+    async fn stand_down(&self, engine: &mut Engine, at: Clock, silent: Silent, limits: SocLimits) {
         let event = Event::MqttTimeout { at };
         self.journal.event(&event);
         let step = engine.step(&event);
@@ -243,7 +239,7 @@ impl Tick<'_> {
         if let Some(tx) = self.dashboard {
             let snapshot = engine.state();
             let decision = step.decision.as_ref().map(|d| (d, at.now));
-            tx.send_modify(|state| state.failsafe_tick(&snapshot, decision, at.now));
+            tx.send_modify(|state| state.failsafe_tick(&snapshot, decision, at.now, limits));
         }
     }
 
@@ -255,6 +251,7 @@ impl Tick<'_> {
         at: Clock,
         sampled_at: Timestamp,
         sample: MeterSample,
+        limits: SocLimits,
     ) {
         // Already normalized by the source adapter: whichever meter sent this,
         // the loop sees a signed total, three phases and a production figure,
@@ -310,8 +307,7 @@ impl Tick<'_> {
             let snapshot = engine.state();
             let decision = step.decision.as_ref().map(|d| (d, at.now));
             tx.send_modify(|state| {
-                state.intervals.record(&event);
-                state.meter_tick(&snapshot, decision, &at, self.timezone);
+                state.meter_tick(&snapshot, &event, decision, &at, self.timezone, limits);
             });
         }
     }
@@ -404,24 +400,10 @@ impl PollTelemetry {
         }
     }
 
-    /// The limits in force at `weekday`, with this poll's device floor.
-    fn limits(&self, engine: &Engine, weekday: Weekday) -> SocLimits {
-        engine.soc_limits(weekday, self.min_soc)
-    }
-
-    /// Fold one poll in, then publish what it produced. Not `async`: every publish is a
-    /// synchronous hand-off to the publisher's queue and `save` is a plain file write.
-    /// Takes the
-    /// whole [`BatteryReading`] so both halves come from one adapter call.
-    fn record_and_publish(
-        &mut self,
-        publisher: &dyn Publisher,
-        announcer: &Announcer,
-        prefix: &str,
-        reading: &BatteryReading,
-        engine: &Engine,
-        weekday: Weekday,
-    ) -> web::DashboardTelemetry {
+    /// Folds one poll in. Separate from [`publish`](Self::publish) because the
+    /// limits it publishes against need the device floor this poll may move.
+    /// `save` is a plain file write, so this is not `async`.
+    fn record(&mut self, reading: &BatteryReading) {
         let telemetry = &reading.telemetry;
         self.rte.record(telemetry.charge, telemetry.discharge);
 
@@ -432,7 +414,23 @@ impl PollTelemetry {
             self.min_soc = min_soc;
         }
 
-        let figures = self.figures(reading.state.soc, self.limits(engine, weekday));
+        // Persisted every poll, so the rolling 24h window survives a restart.
+        self.rte.save();
+    }
+
+    /// Publishes what the poll just recorded produced. Not `async`: every
+    /// publish is a synchronous hand-off to the publisher's queue. Takes the
+    /// whole [`BatteryReading`] so both halves come from one adapter call.
+    fn publish(
+        &self,
+        publisher: &dyn Publisher,
+        announcer: &Announcer,
+        prefix: &str,
+        reading: &BatteryReading,
+        limits: SocLimits,
+    ) -> web::DashboardTelemetry {
+        let telemetry = &reading.telemetry;
+        let figures = self.figures(reading.state.soc, limits);
         mqtt::publish_rte(
             publisher,
             prefix,
@@ -452,9 +450,6 @@ impl PollTelemetry {
         mqtt::publish_soc_calibrating(publisher, prefix, reading.state.soc_calibrating);
         mqtt::publish_battery_soc(publisher, prefix, reading.state.soc);
         mqtt::publish_battery_power(publisher, prefix, telemetry.charge, telemetry.discharge);
-
-        // Persisted every poll, so the rolling 24h window survives a restart.
-        self.rte.save();
 
         figures
     }
@@ -669,7 +664,7 @@ pub async fn run(
             web::DashboardState::seed(&engine.state(), history, actual_solar, startup_clock.now)
                 .with_telemetry(telemetry.figures(
                     startup_soc,
-                    telemetry.limits(&engine, startup_clock.weekday),
+                    engine.soc_limits(startup_clock.weekday, telemetry.min_soc),
                 ))
                 .with_intervals(web::seed_interval_history(
                     &config.journal_path,
@@ -847,17 +842,22 @@ pub async fn run(
                     inbox.take_devices(round, scan_now),
                 );
 
+                // After the fold, so a poll that moved the device floor counts.
+                let limits = engine.soc_limits(at.weekday, telemetry.min_soc);
+
                 match (fleet, inbox.take_meter(round, scan_now)) {
                     (Fleet::Silent(down), meter) => {
                         let silent = Silent { meter: meter.down(), devices: down };
-                        tick_context.stand_down(&mut engine, at, silent).await;
+                        tick_context.stand_down(&mut engine, at, silent, limits).await;
                     }
                     (Fleet::Complete | Fleet::Waiting, Delivery::Down(failures)) => {
                         let silent = Silent { meter: Some(failures), devices: Vec::new() };
-                        tick_context.stand_down(&mut engine, at, silent).await;
+                        tick_context.stand_down(&mut engine, at, silent, limits).await;
                     }
                     (Fleet::Complete, Delivery::Fresh(sampled_at, sample)) => {
-                        tick_context.decide(&mut engine, at, sampled_at.now, sample).await;
+                        tick_context
+                            .decide(&mut engine, at, sampled_at.now, sample, limits)
+                            .await;
                     }
                     // A setpoint inverts `battery.current_power + (export −
                     // margin)` exactly, which holds only while both terms

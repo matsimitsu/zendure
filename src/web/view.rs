@@ -1,14 +1,15 @@
 //! Projects a [`DashboardState`] into plain, already-formatted view-model
-//! structs. Newtypes stop here — every Maud template downstream renders
-//! strings, never a `Watts` or a `Soc`.
+//! structs. Newtypes mostly stop here: a template renders strings, never a
+//! `Watts`, and a `Soc` only where it also places something by it.
 
 use crate::device::PackStatus;
 use crate::models::ControlMode;
 use crate::units::{Elapsed, KiloWattHours, Percent, Soc, SolarForecastPoint, Timestamp, Watts};
 
+use super::axis::{AxisTick, day_axis};
 use super::state::{
-    ActualSolarHistory, DashboardState, ForecastSnapshot, INTERVALS_PER_HOUR, IntervalAverages,
-    IntervalSlot, Mean, Plottable, SOLAR_BUCKET_MS, SOLAR_BUCKETS_PER_DAY, Sparkline,
+    ActualSolarHistory, DashboardState, ForecastSnapshot, Plottable, SOLAR_BUCKET_MS,
+    SOLAR_BUCKETS_PER_DAY, Sparkline,
 };
 
 pub struct StatCardView {
@@ -28,11 +29,13 @@ pub struct MiniStatView {
     pub value: String,
 }
 
-/// The SOC window for the bar's limit ticks. Not drawn yet.
-#[expect(dead_code, reason = "consumed by the soc_bar component")]
+/// The SOC window the bar marks with limit ticks. Kept as [`Soc`] because
+/// the template positions by it as well as printing it.
+// Built for the soc_bar component; only the tests read it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct SocLimitsView {
-    pub min_percent: u32,
-    pub max_percent: u32,
+    pub min: Soc,
+    pub max: Soc,
     pub balance_day: bool,
     /// What a full bar is worth, formatted for the "of X kWh" label.
     pub usable_max: String,
@@ -40,7 +43,8 @@ pub struct SocLimitsView {
 
 pub struct BatteryPanelView {
     pub soc_percent: u32,
-    #[expect(dead_code, reason = "consumed by the soc_bar component")]
+    // Built for the soc_bar component; only the tests read it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub limits: SocLimitsView,
     pub mode_label: &'static str,
     /// BEM modifier: "charge" | "discharge" | "idle".
@@ -338,112 +342,6 @@ fn format_log_time(at: Timestamp, now: Timestamp, timezone: chrono_tz::Tz) -> St
     }
 }
 
-// --- Axis ticks: shared by every chart that labels an axis -------------------
-
-/// How far along its track a tick sits, as a fraction of the track.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct AxisPosition(f64);
-
-impl AxisPosition {
-    pub const START: Self = Self(0.0);
-    pub const END: Self = Self(1.0);
-
-    pub fn new(fraction: f64) -> Self {
-        Self(fraction.clamp(0.0, 1.0))
-    }
-
-    pub fn of_day_hour(hour: u32) -> Self {
-        Self::new(f64::from(hour) / 24.0)
-    }
-
-    pub fn percent(self) -> f64 {
-        self.0 * 100.0
-    }
-
-    fn anchor(self) -> AxisAnchor {
-        if self == Self::START {
-            AxisAnchor::Start
-        } else if self == Self::END {
-            AxisAnchor::End
-        } else {
-            AxisAnchor::Middle
-        }
-    }
-}
-
-/// Which point of the label sits on its position. The end ticks lean inward
-/// so their text never crosses the panel edge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AxisAnchor {
-    Start,
-    Middle,
-    End,
-}
-
-impl AxisAnchor {
-    pub fn modifier(self) -> &'static str {
-        match self {
-            Self::Start => "start",
-            Self::Middle => "middle",
-            Self::End => "end",
-        }
-    }
-}
-
-/// Whether a tick survives the narrow layout, where only a few labels fit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AxisDensity {
-    Always,
-    WideOnly,
-}
-
-impl AxisDensity {
-    pub fn modifier(self) -> &'static str {
-        match self {
-            Self::Always => "always",
-            Self::WideOnly => "wide-only",
-        }
-    }
-}
-
-pub struct AxisTick {
-    pub position: AxisPosition,
-    pub anchor: AxisAnchor,
-    pub density: AxisDensity,
-    pub label: String,
-}
-
-impl AxisTick {
-    pub fn new(position: AxisPosition, label: String, density: AxisDensity) -> Self {
-        Self {
-            anchor: position.anchor(),
-            position,
-            density,
-            label,
-        }
-    }
-}
-
-/// Every three hours on a wide screen; only `00:00 · 12:00 · 23:59` on a
-/// narrow one. The last tick is `23:59` so it names the day's final minute
-/// rather than the next midnight.
-pub fn day_axis() -> Vec<AxisTick> {
-    let hourly = (0..24).step_by(3).map(|hour| {
-        let density = if hour % 12 == 0 {
-            AxisDensity::Always
-        } else {
-            AxisDensity::WideOnly
-        };
-        AxisTick::new(
-            AxisPosition::of_day_hour(hour),
-            format!("{hour:02}:00"),
-            density,
-        )
-    });
-    let end = AxisTick::new(AxisPosition::END, "23:59".to_string(), AxisDensity::Always);
-    hourly.chain(std::iter::once(end)).collect()
-}
-
 // --- Forecast panel: a shared-scale bar+line chart --------------------------
 
 /// The panel's viewBox geometry, shared so the bar and line builders agree.
@@ -509,28 +407,6 @@ fn actual_line_path(
         }
     }
     path
-}
-
-/// The flows chart's 1h resolution, derived rather than stored so it can never
-/// disagree with the 15-minute buckets. `quarters` must start on an hour.
-#[cfg_attr(not(test), allow(dead_code))]
-fn hourly(quarters: &[IntervalSlot]) -> Vec<IntervalSlot> {
-    quarters
-        .chunks(INTERVALS_PER_HOUR)
-        .map(|hour| {
-            let each = || hour.iter().map(|slot| slot.averages);
-            IntervalSlot {
-                index: hour[0].index,
-                averages: IntervalAverages {
-                    solar: Mean::of(each().map(|a| a.solar)),
-                    home: Mean::of(each().map(|a| a.home)),
-                    grid: Mean::of(each().map(|a| a.grid)),
-                    battery: Mean::of(each().map(|a| a.battery)),
-                    soc: each().filter_map(|a| a.soc).next_back(),
-                },
-            }
-        })
-        .collect()
 }
 
 fn forecast_panel_view(
@@ -617,8 +493,8 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
         let (mode_label, badge_variant) = panel_badge(state.last_decision.as_ref().map(|d| d.mode));
         BatteryPanelView {
             limits: SocLimitsView {
-                min_percent: state.soc_limits.min.get(),
-                max_percent: state.soc_limits.max.get(),
+                min: state.soc_limits.min,
+                max: state.soc_limits.max,
                 balance_day: state.soc_limits.balance_day,
                 usable_max: energy_string(state.usable_max()),
             },

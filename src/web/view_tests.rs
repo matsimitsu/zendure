@@ -5,6 +5,7 @@
 use super::*;
 
 use crate::battery::BatteryState;
+use crate::controller::SocLimits;
 use crate::device::PackStatus;
 use crate::engine::EngineState;
 use crate::fixtures::journey;
@@ -143,6 +144,7 @@ fn a_collapsed_run_renders_its_repeat_count_and_the_span_it_covers() {
             &engine_state(BatteryPower::ZERO),
             Some((&decision(ControlMode::Idle, "nothing to do"), at(secs))),
             at(secs),
+            SocLimits::default(),
         );
     }
 
@@ -172,9 +174,11 @@ fn the_mode_badge_follows_the_first_real_decision() {
     let mut charging = state(vec![(at(-50_000), decision(ControlMode::Idle, "old"))]);
     charging.meter_tick(
         &engine_state(BatteryPower(-1200)),
+        &journey::meter_event(at(1), 400.0, 750.0),
         Some((&decision(ControlMode::Charge, "solar surplus"), at(1))),
         &clock(1),
         tz(),
+        SocLimits::default(),
     );
 
     let battery = dashboard_view(&charging, tz())
@@ -591,40 +595,10 @@ fn a_new_connection_is_sent_every_fragment_again() {
     );
 }
 
-// --- Axis ticks --------------------------------------------------------------
-
-/// Mobile hides every `wide-only` tick, so what is left is the binding
-/// 00:00 · 12:00 · 23:59 rule, with the ends anchored inward.
-#[test]
-fn the_day_axis_keeps_three_labels_on_a_narrow_screen() {
-    let ticks = day_axis();
-    let narrow: Vec<_> = ticks
-        .iter()
-        .filter(|t| t.density == AxisDensity::Always)
-        .collect();
-
-    let labels: Vec<_> = narrow.iter().map(|t| t.label.as_str()).collect();
-    assert_eq!(labels, ["00:00", "12:00", "23:59"]);
-    assert_eq!(narrow[0].anchor, AxisAnchor::Start);
-    assert_eq!(narrow[1].anchor, AxisAnchor::Middle);
-    assert_eq!(narrow[2].anchor, AxisAnchor::End);
-    assert_eq!(narrow[1].position.percent(), 50.0);
-}
-
-#[test]
-fn the_rendered_axis_places_labels_by_percentage_not_grid_column() {
-    let html = crate::web::templates::axis::render(&day_axis()).into_string();
-
-    assert!(html.contains("axis__tick--start axis__tick--always\" style=\"left: 0.00%\""));
-    assert!(html.contains("left: 100.00%"));
-    assert!(!html.contains("grid"));
-}
-
 // --- SOC limits --------------------------------------------------------------
 
 #[test]
 fn battery_view_carries_the_limits_and_what_a_full_bar_is_worth() {
-    use crate::controller::SocLimits;
     use crate::units::{KiloWattHours, Soc};
 
     let mut seeded = state(vec![]);
@@ -640,55 +614,8 @@ fn battery_view_carries_the_limits_and_what_a_full_bar_is_worth() {
         .expect("the fixture world has a battery")
         .limits;
 
-    assert_eq!((limits.min_percent, limits.max_percent), (20, 100));
+    assert_eq!((limits.min, limits.max), (Soc::new(20), Soc::FULL));
     assert!(limits.balance_day);
-    assert_eq!(limits.usable_max, "4.0 kWh");
-}
-
-// --- Interval history --------------------------------------------------------
-
-#[test]
-fn an_hour_is_the_mean_of_its_four_quarters() {
-    use crate::units::Soc;
-    use crate::web::state::{IntervalAverages, IntervalIndex, IntervalSlot};
-
-    let first = IntervalIndex::containing(at(0));
-    let quarter = |n: i64, flows: (f64, i32, f64), battery: Option<i32>, soc: Option<u32>| {
-        let (solar, home, grid) = flows;
-        IntervalSlot {
-            index: first.offset(n),
-            averages: IntervalAverages {
-                solar: Some(SolarPower::new(solar)),
-                home: Some(Watts(home)),
-                grid: Some(GridPower(grid)),
-                battery: battery.map(BatteryPower),
-                soc: soc.map(Soc::new),
-            },
-        }
-    };
-    let quarters = [
-        quarter(0, (0.0, 0, 100.0), Some(0), Some(50)),
-        quarter(1, (100.0, 10, -300.0), Some(-40), Some(51)),
-        quarter(2, (200.0, 20, 500.0), None, None),
-        quarter(3, (300.0, 30, 700.0), Some(-120), Some(53)),
-        quarter(4, (0.0, 0, 1.0), None, None),
-    ];
-
-    let hours = hourly(&quarters);
-
-    assert_eq!(hours.len(), 2);
-    assert_eq!(hours[0].index, first);
-    assert_eq!(
-        hours[0].averages,
-        IntervalAverages {
-            solar: Some(SolarPower::new(150.0)),
-            home: Some(Watts(15)),
-            grid: Some(GridPower(250.0)),
-            // The quarter with no battery reading is a gap, not a zero.
-            battery: Some(BatteryPower(-53)),
-            soc: Some(Soc::new(53)),
-        }
-    );
-    assert_eq!(hours[1].index, first.offset(4));
-    assert_eq!(hours[1].averages.grid, Some(GridPower(1.0)));
+    // 80% of 5 kWh, discounted by the 85% round trip a fresh tracker assumes.
+    assert_eq!(limits.usable_max, "3.4 kWh");
 }

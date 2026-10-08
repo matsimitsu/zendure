@@ -1,3 +1,5 @@
+@use "../breakpoints" as *;
+
 .battery-panel {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
@@ -104,8 +106,7 @@
   }
 }
 
-// Mobile breakpoint at 860px (see index.scss).
-@media (max-width: 860px) {
+@include narrow {
   .battery-panel__stats {
     grid-template-columns: 1fr 1fr;
   }

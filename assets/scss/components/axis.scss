@@ -1,3 +1,5 @@
+@use "../breakpoints" as *;
+
 // Percentage-placed tick labels. The parent sizes the track's width and any
 // space around it; the track itself is one label line tall.
 .axis {
@@ -28,9 +30,8 @@
   }
 }
 
-// 860px is where the rest of the dashboard collapses. Only `always` ticks
-// stay, so neighbours cannot collide at 375px.
-@media (max-width: 860px) {
+// Only `always` ticks stay, so neighbours cannot collide at 375px.
+@include narrow {
   .axis__tick--wide-only {
     display: none;
   }

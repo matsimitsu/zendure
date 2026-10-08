@@ -1,3 +1,5 @@
+@use "../breakpoints" as *;
+
 .decision-log {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
@@ -93,8 +95,7 @@
   }
 }
 
-// Mobile breakpoint at 860px (see index.scss).
-@media (max-width: 860px) {
+@include narrow {
   .decision-log__row {
     grid-template-columns: auto 1fr auto;
   }

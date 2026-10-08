@@ -81,7 +81,7 @@ crossed a boundary without anyone saying what the conversion meant.
 - `src/replay.rs` — Decision diff: a recorded event stream re-folded through the engine, hermetic
 - `src/analyze.rs` — Integrating a recorded run into daily energy, offline
 - `src/fixtures.rs` — Test scenarios shared across modules
-- `src/web/` — Live dashboard: Axum routes, SSE fan-out, live-state cell, Maud view-models
+- `src/web/` — Live dashboard: Axum routes, SSE fan-out, live-state cell (`state`), the 15-minute flows ring (`intervals`), axis ticks (`axis`), Maud view-models (`view`)
 - `assets/scss/` — Dashboard component stylesheets (Grass), compiled by `build.rs` and served via `rust-embed`
 
 ## Dashboard styling

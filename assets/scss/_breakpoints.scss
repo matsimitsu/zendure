@@ -1,0 +1,7 @@
+// The one width where the dashboard collapses to its narrow layout. A Sass
+// mixin rather than a token: a custom property cannot sit in a media query.
+@mixin narrow {
+  @media (max-width: 860px) {
+    @content;
+  }
+}

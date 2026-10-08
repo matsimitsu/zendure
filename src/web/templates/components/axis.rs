@@ -1,6 +1,6 @@
 use maud::{Markup, html};
 
-use crate::web::view::AxisTick;
+use crate::web::axis::AxisTick;
 
 /// A row of labels placed by percentage along a relative track, so a label's
 /// width can never widen the chart the way a grid column's min-content would.
