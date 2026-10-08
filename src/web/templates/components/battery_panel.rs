@@ -11,7 +11,7 @@ use crate::web::view::BatteryPanelView;
 pub fn render(view: Option<&BatteryPanelView>, swap: &str) -> Markup {
     html! {
         a class="battery-panel battery-panel--link" href=(Entity::Battery.path()) hx-get=(Entity::Battery.path()) hx-target=(modal::TARGET) {
-            div class="battery-panel__live" sse-swap=(swap) { (contents(view)) }
+            div class="battery-panel__live" sse-swap=(swap) hx-target="this" { (contents(view)) }
         }
     }
 }

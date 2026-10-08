@@ -24,7 +24,7 @@ fn main() {
 /// Our own custom elements, one file each. Copying every `assets/js/*.js`
 /// means a new element needs no wiring: it is served at `/assets/<name>.js`
 /// and `app_scripts.txt` (one name per line, sorted for a stable page) is
-/// what `layout::head` loads from, so it gets a `defer` tag too.
+/// what `layout::head` loads from, so it gets a module tag too.
 fn copy_component_scripts(out_dir: &Path) {
     let mut names = Vec::new();
     let entries = std::fs::read_dir("assets/js").expect("failed to read assets/js");

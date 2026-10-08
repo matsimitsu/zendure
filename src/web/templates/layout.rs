@@ -32,9 +32,11 @@ fn head() -> Markup {
             script src="/assets/htmx.min.js" {}
             script src="/assets/sse.js" {}
             @for name in APP_SCRIPTS.lines() {
-                // `defer` so the elements upgrade after the markup is parsed,
-                // in the same order the vendored scripts above ran.
-                script src=(format!("/assets/{name}")) defer {}
+                // A module, so each file's top-level names are its own: classic
+                // scripts share one global scope, where two `const B`s collide
+                // and the second element is never defined. Modules are also
+                // deferred, so elements upgrade after the markup is parsed.
+                script type="module" src=(format!("/assets/{name}")) {}
             }
         }
     }

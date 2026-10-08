@@ -112,6 +112,167 @@ fn no_fragment_repeats_its_own_sse_swap_wrapper() {
     }
 }
 
+// --- What the browser does with the page -------------------------------------
+
+/// One start tag in rendered markup: its name and its raw attribute text.
+#[derive(Clone, Copy)]
+struct StartTag<'a> {
+    name: &'a str,
+    attrs: &'a str,
+}
+
+impl StartTag<'_> {
+    fn attr(&self, name: &str) -> Option<&str> {
+        let needle = format!(" {name}=\"");
+        let start = self.attrs.find(&needle)? + needle.len();
+        self.attrs[start..].split('"').next()
+    }
+}
+
+/// Every start tag in `html`, each with the start tags still open around it,
+/// outermost first. Maud's output is well-formed, so a stack is enough.
+fn start_tags_with_ancestors(html: &str) -> Vec<(StartTag<'_>, Vec<StartTag<'_>>)> {
+    const VOID: [&str; 6] = ["meta", "link", "br", "img", "input", "hr"];
+    let mut open: Vec<StartTag> = Vec::new();
+    let mut found = Vec::new();
+    for chunk in html.split('<').skip(1) {
+        let Some((tag, _)) = chunk.split_once('>') else {
+            continue;
+        };
+        if let Some(closing) = tag.strip_prefix('/') {
+            let position = open.iter().rposition(|t| t.name == closing);
+            open.truncate(position.expect("a closing tag matches an open one"));
+            continue;
+        }
+        if tag.starts_with('!') {
+            continue;
+        }
+        let name_end = tag.find([' ', '/']).unwrap_or(tag.len());
+        let start = StartTag {
+            name: &tag[..name_end],
+            attrs: &tag[name_end..],
+        };
+        found.push((start, open.clone()));
+        if !VOID.contains(&start.name) && !tag.ends_with('/') {
+            open.push(start);
+        }
+    }
+    found
+}
+
+/// The SSE extension swaps into `hx-target` resolved with inheritance, so a
+/// live region inside a link that opens the modal would swap each tick into
+/// the modal instead of itself.
+#[test]
+fn no_sse_swap_inherits_an_hx_target_from_an_ancestor() {
+    let view = dashboard_view(&state(vec![]), tz());
+    let html = layout::page(&view).into_string();
+
+    let mut inside_a_target = 0;
+    for (tag, ancestors) in start_tags_with_ancestors(&html) {
+        let Some(swap) = tag.attr("sse-swap") else {
+            continue;
+        };
+        if !ancestors.iter().any(|a| a.attr("hx-target").is_some()) {
+            continue;
+        }
+        inside_a_target += 1;
+        assert_eq!(
+            tag.attr("hx-target"),
+            Some("this"),
+            "`{swap}` inherits an hx-target from an ancestor"
+        );
+    }
+    assert!(
+        inside_a_target > 0,
+        "no live region sits inside a link, so this test checked nothing"
+    );
+}
+
+/// The app's own scripts as the page loads them: `(is_module, file name)`.
+fn app_script_tags(html: &str) -> Vec<(bool, String)> {
+    const VENDORED: [&str; 2] = ["/assets/htmx.min.js", "/assets/sse.js"];
+    start_tags_with_ancestors(html)
+        .into_iter()
+        .filter(|(tag, _)| tag.name == "script")
+        .filter_map(|(tag, _)| {
+            let src = tag.attr("src")?;
+            if VENDORED.contains(&src) {
+                return None;
+            }
+            let name = src.strip_prefix("/assets/")?.to_string();
+            Some((tag.attr("type") == Some("module"), name))
+        })
+        .collect()
+}
+
+/// Classic scripts share one global lexical scope, so two files declaring the
+/// same top-level `const` throw and the second element is never defined.
+#[test]
+fn every_app_script_loads_as_a_module_with_its_own_scope() {
+    let html = layout::page(&dashboard_view(&state(vec![]), tz())).into_string();
+    let scripts = app_script_tags(&html);
+
+    let names: Vec<&str> = scripts.iter().map(|(_, name)| name.as_str()).collect();
+    assert!(names.contains(&"energy-flows.js"), "{names:?}");
+    assert!(names.contains(&"line-chart.js"), "{names:?}");
+    for (module, name) in &scripts {
+        assert!(module, "{name} loads as a classic script");
+    }
+}
+
+/// Loads every app script into one realm the way the page declares it (a
+/// module import, or a classic script sharing the global scope) and checks
+/// each defined its element. Skips when `node` is not installed.
+#[test]
+fn every_app_script_defines_its_element_when_loaded_together() {
+    const HARNESS: &str = r#"
+        import { readFileSync } from "node:fs";
+        import vm from "node:vm";
+        const defined = [];
+        globalThis.HTMLElement = class {};
+        globalThis.customElements = { define: (name) => defined.push(name) };
+        for (const arg of process.argv.slice(1)) {
+          const split = arg.indexOf(":");
+          const [kind, path] = [arg.slice(0, split), arg.slice(split + 1)];
+          const source = readFileSync(path, "utf8");
+          if (kind === "module") {
+            await import("data:text/javascript," + encodeURIComponent(source));
+          } else {
+            vm.runInThisContext(source, { filename: path });
+          }
+        }
+        console.log(defined.join(","));
+    "#;
+
+    let html = layout::page(&dashboard_view(&state(vec![]), tz())).into_string();
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/js");
+    let args = app_script_tags(&html).into_iter().map(|(module, name)| {
+        let kind = if module { "module" } else { "classic" };
+        format!("{kind}:{}", dir.join(name).display())
+    });
+
+    let output = match std::process::Command::new("node")
+        .args(["--input-type=module", "-e", HARNESS])
+        .args(args)
+        .output()
+    {
+        Ok(output) => output,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("skipped: node is not installed");
+            return;
+        }
+        Err(e) => panic!("failed to run node: {e}"),
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut defined: Vec<&str> = stdout.trim().split(',').collect();
+    defined.sort_unstable();
+    assert_eq!(defined, ["energy-flows", "line-chart"]);
+}
+
 // --- The battery badge is a claim about *now* --------------------------------
 
 /// The badge must not speak for a decision this process did not make: the

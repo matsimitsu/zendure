@@ -6,17 +6,18 @@ use crate::web::view::StatCardView;
 /// The card's shell, rendered once with the page. Only the `__live` wrapper
 /// inside it is an `sse-swap` region: were the link itself swapped each tick,
 /// a click spanning a swap would land on the row instead, and a focused card
-/// would drop focus to `body`.
+/// would drop focus to `body`. `hx-target="this"` because the SSE extension
+/// swaps into the inherited `hx-target`, which on a link is the modal.
 pub fn render(view: &StatCardView, swap: &str) -> Markup {
     let class = format!("stat-card stat-card--{}", view.variant);
     html! {
         @if let Some(entity) = view.detail_entity {
             a class=(format!("{class} stat-card--link")) href=(entity.path()) hx-get=(entity.path()) hx-target=(modal::TARGET) {
-                div class="stat-card__live" sse-swap=(swap) { (contents(view)) }
+                div class="stat-card__live" sse-swap=(swap) hx-target="this" { (contents(view)) }
             }
         } @else {
             div class=(class) {
-                div class="stat-card__live" sse-swap=(swap) { (contents(view)) }
+                div class="stat-card__live" sse-swap=(swap) hx-target="this" { (contents(view)) }
             }
         }
     }
