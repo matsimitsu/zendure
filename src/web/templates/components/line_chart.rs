@@ -20,7 +20,7 @@ pub fn render(view: &LineChartView) -> Markup {
             div class="line-chart__head" {
                 div class="line-chart__heading" {
                     span class="line-chart__title" { (view.title) }
-                    @if let Some(note) = view.note {
+                    @if let Some(note) = &view.note {
                         span class="line-chart__note" { (note) }
                     }
                 }

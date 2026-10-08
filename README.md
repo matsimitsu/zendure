@@ -509,7 +509,12 @@ modal is a snapshot taken when opened, not live. The solar, home and grid
 panels summarise the rolling 24 hours of 15-minute averages (now, peak,
 energy produced/consumed or imported/exported/net, and the average) above a
 power chart, where an interval with no readings is a break in the line
-rather than an interpolation. With htmx the route returns
+rather than an interpolation. The battery panel shows its SOC now, the energy
+charged and discharged, and the SOC range over the same window; a table of
+each pack's SOC range, charged and discharged energy and temperature range
+over the 24 hours; then an SOC chart with the controller's limits dashed and
+the SOC outside them shaded, and a power chart (positive is discharge). Before
+the battery has reported anything it says so instead. With htmx the route returns
 just the panel; without it (JavaScript off, a pasted link) it returns a full
 page with a link back to the dashboard. The EV card is not clickable. No `[web]` table means no
 HTTP listener at all — the same brokerless-by-default rule `[mqtt]` follows —

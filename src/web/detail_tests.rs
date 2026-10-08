@@ -77,3 +77,219 @@ fn import_and_export_split_a_grid_series_by_sign() {
     assert_eq!(exported, WattHours(100.0));
     assert_eq!(kwh(imported - exported), "0.1 kWh");
 }
+
+// --- The battery ---------------------------------------------------------------
+
+use std::time::Duration;
+
+use crate::battery::BatteryState;
+use crate::engine::EngineState;
+use crate::fixtures::journey;
+use crate::units::{Elapsed, Timestamp};
+use crate::web::ActualSolarHistory;
+use crate::web::intervals::IntervalHistory;
+use crate::web::templates::detail_view;
+use crate::web::view::detail_view as detail_view_model;
+use crate::world::{DeviceId, Measurement, World};
+
+fn limits(min: u32, max: u32) -> SocLimits {
+    SocLimits {
+        min: Soc::new(min),
+        max: Soc::new(max),
+        balance_day: false,
+    }
+}
+
+fn engine(battery: Option<Soc>) -> EngineState {
+    let mut world = World::new();
+    if let Some(soc) = battery {
+        world.observe_device(
+            DeviceId::new(journey::BATTERY_ID),
+            Timestamp::from_millis(0),
+            Measurement::Battery(BatteryState {
+                soc,
+                ..BatteryState::test_sample()
+            }),
+        );
+    }
+    EngineState {
+        world,
+        controller: crate::controller::Controller::test_default(journey::NOW_MS, journey::DAY)
+            .state(),
+        mqtt_timed_out: false,
+    }
+}
+
+fn pack(soc: u32, temp: u32) -> PackStatus {
+    PackStatus {
+        model: None,
+        serial: Some("P1".to_string()),
+        capacity: WattHours(1920.0),
+        soc: Some(Soc::new(soc)),
+        power: Some(BatteryPower(-600)),
+        temp: Some(DeciKelvin(temp)),
+    }
+}
+
+/// Starts five minutes into an interval, so the readings ten minutes apart
+/// land in two buckets.
+fn after(minutes: u64) -> Timestamp {
+    let start = IntervalIndex::containing(Timestamp::from_millis(journey::NOW_MS)).start();
+    start + Elapsed::of(Duration::from_secs((5 + minutes) * 60))
+}
+
+/// A battery that charged at 800 W for one bucket and discharged at 400 W
+/// for the next, with one pack charging at 600 W across both.
+fn battery_dashboard() -> DashboardState {
+    let device = DeviceId::new(journey::BATTERY_ID);
+    let mut intervals = IntervalHistory::new([device.clone()]);
+    intervals.record(&journey::battery_event(
+        after(0),
+        BatteryPower(-800),
+        Soc::new(40),
+    ));
+    intervals.record(&journey::battery_event(
+        after(20),
+        BatteryPower(400),
+        Soc::new(50),
+    ));
+    for (minutes, soc, temp) in [(0, 40, 2981), (10, 45, 2991), (20, 50, 3001)] {
+        intervals.record_packs(&device, after(minutes), &[pack(soc, temp)]);
+    }
+    let mut state = DashboardState::seed(
+        &engine(Some(Soc::new(50))),
+        vec![],
+        ActualSolarHistory::default(),
+        intervals,
+        after(20),
+    );
+    state.soc_limits = limits(10, 95);
+    state
+}
+
+fn battery_body(state: &DashboardState) -> DetailBodyView {
+    detail_body(state, DetailEntity::Battery, chrono_tz::UTC).expect("the battery has reported")
+}
+
+#[test]
+fn the_battery_stats_cover_its_charge_discharge_and_soc_range() {
+    let body = battery_body(&battery_dashboard());
+
+    let stats: Vec<(&str, &str)> = body
+        .stats
+        .iter()
+        .map(|s| (s.label, s.value.as_str()))
+        .collect();
+    assert_eq!(
+        stats,
+        vec![
+            ("State of charge", "50%"),
+            ("Charged", "0.2 kWh"),
+            ("Discharged", "0.1 kWh"),
+            ("24h range", "40–50%"),
+        ]
+    );
+}
+
+#[test]
+fn a_pack_row_totals_its_figures_over_the_whole_window() {
+    let state = battery_dashboard();
+    let series = state.intervals.packs_last_24h(state.as_of);
+    let slots = series.values().next().expect("one pack");
+    assert!(
+        slots.iter().filter(|slot| slot.figures.is_some()).count() > 1,
+        "the readings span more than one bucket"
+    );
+
+    let body = battery_body(&state);
+    let [row] = body.packs.as_slice() else {
+        panic!("one row per pack");
+    };
+    assert_eq!(row.name, "Pack 1");
+    assert_eq!(row.serial, "P1");
+    assert_eq!(row.soc_range, "40–50%");
+    assert_eq!(row.charged, "0.2 kWh", "600 W for 20 minutes");
+    assert_eq!(row.discharged, "0.0 kWh");
+    assert_eq!(row.temp_range, "25–27 °C");
+}
+
+#[test]
+fn a_pack_is_named_by_the_model_currently_reporting_its_serial() {
+    let mut state = battery_dashboard();
+    state.packs = vec![
+        PackStatus {
+            serial: Some("P0".to_string()),
+            ..pack(50, 3001)
+        },
+        PackStatus {
+            model: Some("AB3000X"),
+            ..pack(50, 3001)
+        },
+    ];
+
+    assert_eq!(battery_body(&state).packs[0].name, "AB3000X");
+    state.packs[1].model = None;
+    assert_eq!(battery_body(&state).packs[0].name, "Pack 2");
+}
+
+#[test]
+fn the_soc_chart_dashes_the_limits_and_shades_outside_them() {
+    let body = battery_body(&battery_dashboard());
+
+    let [soc, power] = body.charts.as_slice() else {
+        panic!("an SOC chart and a power chart");
+    };
+    assert_eq!(soc.series, ChartSeries::Battery);
+    assert_eq!(soc.note.as_deref(), Some("dashed: limits 10% / 95%"));
+    assert_eq!(soc.limit_lines.len(), 2);
+    assert_eq!(soc.bands.len(), 2);
+    assert_eq!(power.note.as_deref(), Some("+ discharge · − charge"));
+    assert!(power.limit_lines.is_empty() && power.bands.is_empty());
+}
+
+#[test]
+fn a_limit_at_the_edge_of_the_scale_leaves_no_band() {
+    let spec = soc_chart(limits(0, 95));
+
+    assert_eq!(spec.limits, vec![Soc::ZERO, Soc::new(95)]);
+    assert_eq!(spec.bands, vec![(Soc::new(95), Soc::FULL)]);
+}
+
+#[test]
+fn the_battery_detail_renders_stats_packs_and_both_charts() {
+    let state = battery_dashboard();
+    let html = detail_view::render(&detail_view_model(
+        &state,
+        DetailEntity::Battery,
+        chrono_tz::UTC,
+    ))
+    .into_string();
+
+    assert!(html.contains("State of charge"), "{html}");
+    assert!(html.contains("class=\"pack-table\""), "{html}");
+    assert!(html.contains("Temp range"), "{html}");
+    assert_eq!(html.matches("line-chart--battery").count(), 2, "{html}");
+    assert_eq!(html.matches("class=\"line-chart__band\"").count(), 2);
+    assert_eq!(html.matches("class=\"line-chart__limit\"").count(), 2);
+}
+
+#[test]
+fn a_battery_that_has_never_reported_shows_an_empty_state() {
+    let state = DashboardState::seed(
+        &engine(None),
+        vec![],
+        ActualSolarHistory::default(),
+        IntervalHistory::new([DeviceId::new(journey::BATTERY_ID)]),
+        after(0),
+    );
+
+    assert!(detail_body(&state, DetailEntity::Battery, chrono_tz::UTC).is_none());
+    let html = detail_view::render(&detail_view_model(
+        &state,
+        DetailEntity::Battery,
+        chrono_tz::UTC,
+    ))
+    .into_string();
+    assert!(html.contains("detail-view__empty"), "{html}");
+    assert!(!html.contains("line-chart"), "{html}");
+}

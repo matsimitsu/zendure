@@ -67,7 +67,6 @@ pub struct PackInterval {
 
 impl PackInterval {
     /// Several spans as one, for a figure over a longer window than a bucket.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn combined(spans: impl IntoIterator<Item = PackInterval>) -> Option<PackInterval> {
         spans.into_iter().reduce(|a, b| PackInterval {
             soc: Extent::widen(a.soc, b.soc),

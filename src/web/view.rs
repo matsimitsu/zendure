@@ -42,14 +42,27 @@ pub struct DetailHeaderView {
 /// Everything one `/detail/{entity}` panel renders from.
 pub struct DetailView {
     pub header: DetailHeaderView,
-    /// `None` where the entity's history has no view yet.
+    /// `None` while the entity has reported nothing to summarise.
     pub body: Option<DetailBodyView>,
 }
 
-/// A row of mini stats over the window, then a chart per quantity.
+/// A row of mini stats over the window, then a chart per quantity. Only the
+/// battery has packs; every other entity leaves them empty.
 pub struct DetailBodyView {
     pub stats: Vec<MiniStatView>,
+    pub packs: Vec<PackSummaryView>,
     pub charts: Vec<LineChartView>,
+}
+
+/// One pack over the rolling 24 hours, as the battery detail tabulates it.
+pub struct PackSummaryView {
+    pub name: String,
+    /// Empty where the pack is keyed by position rather than serial.
+    pub serial: String,
+    pub soc_range: String,
+    pub charged: String,
+    pub discharged: String,
+    pub temp_range: String,
 }
 
 pub fn detail_view(

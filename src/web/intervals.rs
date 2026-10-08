@@ -363,7 +363,6 @@ impl IntervalHistory {
     /// Each pack seen in the 24 hours [`last_24h`](Self::last_24h) covers,
     /// with one slot per interval of that window. [`PackInterval::combined`]
     /// over a pack's slots gives its figures for the whole day.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn packs_last_24h(&self, now: Timestamp) -> BTreeMap<PackKey, Vec<PackSlot>> {
         let indices: Vec<IntervalIndex> = self.last_24h(now).iter().map(|s| s.index).collect();
         let buckets: Vec<Option<&IntervalBucket>> =

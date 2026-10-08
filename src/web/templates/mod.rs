@@ -12,6 +12,7 @@ mod components {
     pub mod mini_stat;
     pub mod modal;
     pub mod pack_list;
+    pub mod pack_table;
     pub mod page_header;
     pub mod soc_bar;
     pub mod stat_card;

@@ -24,7 +24,6 @@ pub enum ChartSeries {
     Solar,
     Home,
     Grid,
-    #[cfg_attr(not(test), allow(dead_code))]
     Battery,
 }
 
@@ -119,7 +118,7 @@ fn format_kw(watts: f64) -> String {
 pub struct LineChartSpec<T> {
     pub series: ChartSeries,
     pub title: &'static str,
-    pub note: Option<&'static str>,
+    pub note: Option<String>,
     /// Drawn as dashed horizontal lines.
     pub limits: Vec<T>,
     /// Shaded horizontal zones, each between two values in either order.
@@ -137,8 +136,8 @@ impl<T> LineChartSpec<T> {
         }
     }
 
-    pub fn note(mut self, note: &'static str) -> Self {
-        self.note = Some(note);
+    pub fn note(mut self, note: impl Into<String>) -> Self {
+        self.note = Some(note.into());
         self
     }
 }
@@ -164,7 +163,7 @@ pub struct LinePointView {
 pub struct LineChartView {
     pub series: ChartSeries,
     pub title: &'static str,
-    pub note: Option<&'static str>,
+    pub note: Option<String>,
     pub y_ticks: Vec<AxisTick>,
     /// Viewbox `y` of each grid line, in the order of `y_ticks`.
     pub grid_lines: Vec<f64>,

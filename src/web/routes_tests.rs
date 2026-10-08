@@ -124,7 +124,13 @@ async fn the_solar_detail_charts_its_history_in_the_dialog_and_on_its_own_page()
 }
 
 #[tokio::test]
-async fn the_battery_detail_has_no_chart_yet() {
-    let (_, body) = get("/detail/battery", true).await;
-    assert!(!body.contains("line-chart"), "{body}");
+async fn the_battery_detail_charts_soc_and_power_in_the_dialog_and_on_its_own_page() {
+    for htmx in [true, false] {
+        let (status, body) = get("/detail/battery", htmx).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.contains("<html"), !htmx, "{body}");
+        assert!(body.contains("State of charge"), "{body}");
+        assert_eq!(body.matches("line-chart--battery").count(), 2, "{body}");
+        assert!(body.contains("+ discharge · − charge"), "{body}");
+    }
 }

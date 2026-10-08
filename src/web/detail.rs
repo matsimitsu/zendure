@@ -5,15 +5,19 @@ use std::str::FromStr;
 
 use chrono_tz::Tz;
 
-use crate::units::{SolarPower, WattHours, Watts};
+use crate::controller::SocLimits;
+use crate::device::PackStatus;
+use crate::units::{BatteryPower, DeciKelvin, Soc, SolarPower, WattHours, Watts};
 
 use super::intervals::{
     Averaged, IntervalAverages, IntervalIndex, IntervalSlot, Mean, interval_energy,
 };
 use super::line_chart::{ChartSeries, LineChartSpec, LineChartView};
+use super::pack_intervals::{Extent, PackId, PackInterval};
 use super::state::{DashboardState, Plottable};
 use super::view::{
-    DetailBodyView, MISSING, MiniStatView, SignStyle, energy_string, format_time, format_watts,
+    DetailBodyView, MISSING, MiniStatView, PackSummaryView, SignStyle, energy_string, format_time,
+    format_watts,
 };
 
 /// Parsed from the URL once, at the route, so everything past it holds a
@@ -144,8 +148,8 @@ fn kwh(energy: WattHours) -> String {
 
 const POWER_TITLE: &str = "Power (kW)";
 
-/// The stats and chart over the rolling 24 hours for `entity`. The battery
-/// has no view here yet.
+/// The stats and charts over the rolling 24 hours for `entity`; `None` while
+/// there is nothing yet to summarise.
 pub fn detail_body(state: &DashboardState, entity: DetailEntity, tz: Tz) -> Option<DetailBodyView> {
     let slots = state.intervals.last_24h(state.as_of);
     let world = &state.engine.world;
@@ -154,6 +158,7 @@ pub fn detail_body(state: &DashboardState, entity: DetailEntity, tz: Tz) -> Opti
             let solar = |a: &IntervalAverages| a.solar;
             let solar_watts = |a: &IntervalAverages| a.solar.map(SolarPower::into_watts);
             DetailBodyView {
+                packs: Vec::new(),
                 stats: vec![
                     stat("Now", watts_or_missing(Some(world.solar.into_watts()))),
                     stat("Peak", peak_string(peak(&slots, solar_watts), tz)),
@@ -174,6 +179,7 @@ pub fn detail_body(state: &DashboardState, entity: DetailEntity, tz: Tz) -> Opti
         DetailEntity::Home => {
             let home = |a: &IntervalAverages| a.home;
             DetailBodyView {
+                packs: Vec::new(),
                 stats: vec![
                     stat("Now", watts_or_missing(Some(world.home_usage()))),
                     stat("Peak", peak_string(peak(&slots, home), tz)),
@@ -191,6 +197,7 @@ pub fn detail_body(state: &DashboardState, entity: DetailEntity, tz: Tz) -> Opti
         DetailEntity::Grid => {
             let (imported, exported) = (imported(&slots), exported(&slots));
             DetailBodyView {
+                packs: Vec::new(),
                 stats: vec![
                     stat(
                         "Now",
@@ -211,9 +218,127 @@ pub fn detail_body(state: &DashboardState, entity: DetailEntity, tz: Tz) -> Opti
                 )],
             }
         }
-        DetailEntity::Battery => return None,
+        DetailEntity::Battery => return battery_body(state, &slots, tz),
     };
     Some(body)
+}
+
+/// `None` until a battery has reported, live or anywhere in the window: the
+/// panel links here before the first poll lands.
+fn battery_body(state: &DashboardState, slots: &[IntervalSlot], tz: Tz) -> Option<DetailBodyView> {
+    let soc_now = state.engine.world.battery().map(|battery| battery.soc);
+    let packs = pack_summaries(state);
+    let has_history = slots
+        .iter()
+        .any(|slot| slot.averages.soc.is_some() || slot.averages.battery.is_some());
+    if soc_now.is_none() && !has_history && packs.is_empty() {
+        return None;
+    }
+    let charging = |a: &IntervalAverages| a.battery.map(BatteryPower::charging);
+    let discharging = |a: &IntervalAverages| a.battery.map(BatteryPower::discharging);
+    Some(DetailBodyView {
+        stats: vec![
+            stat(
+                "State of charge",
+                soc_now.map_or_else(|| MISSING.to_string(), |soc| format!("{soc}%")),
+            ),
+            stat("Charged", kwh(energy(slots, charging))),
+            stat("Discharged", kwh(energy(slots, discharging))),
+            stat("24h range", soc_range(soc_extent(slots))),
+        ],
+        packs,
+        charts: vec![
+            LineChartView::build(soc_chart(state.soc_limits), slots, |a| a.soc, tz),
+            LineChartView::build(
+                LineChartSpec::new(ChartSeries::Battery, POWER_TITLE)
+                    .note("+ discharge · − charge"),
+                slots,
+                |a| a.battery,
+                tz,
+            ),
+        ],
+    })
+}
+
+/// Dashed at the controller's SOC window, with the SOC it will not use
+/// shaded. A limit at the scale's edge leaves no band to shade.
+fn soc_chart(limits: SocLimits) -> LineChartSpec<Soc> {
+    let bands = [(Soc::ZERO, limits.min), (limits.max, Soc::FULL)]
+        .into_iter()
+        .filter(|(from, to)| from != to)
+        .collect();
+    LineChartSpec {
+        limits: vec![limits.min, limits.max],
+        bands,
+        ..LineChartSpec::new(ChartSeries::Battery, "State of charge (%)")
+            .note(format!("dashed: limits {}% / {}%", limits.min, limits.max))
+    }
+}
+
+fn soc_extent(slots: &[IntervalSlot]) -> Option<Extent<Soc>> {
+    slots.iter().filter_map(|slot| slot.averages.soc).fold(
+        None,
+        |extent: Option<Extent<Soc>>, soc| {
+            Some(extent.map_or(Extent { min: soc, max: soc }, |e| Extent {
+                min: e.min.min(soc),
+                max: e.max.max(soc),
+            }))
+        },
+    )
+}
+
+fn soc_range(extent: Option<Extent<Soc>>) -> String {
+    extent.map_or_else(|| MISSING.to_string(), |e| format!("{}–{}%", e.min, e.max))
+}
+
+fn temp_range(extent: Option<Extent<DeciKelvin>>) -> String {
+    extent.map_or_else(
+        || MISSING.to_string(),
+        |e| format!("{:.0}–{:.0} °C", e.min.to_celsius().0, e.max.to_celsius().0),
+    )
+}
+
+/// One row per pack seen in the window, its figures combined over the
+/// whole 24 hours.
+fn pack_summaries(state: &DashboardState) -> Vec<PackSummaryView> {
+    state
+        .intervals
+        .packs_last_24h(state.as_of)
+        .into_iter()
+        .enumerate()
+        .map(|(row, (key, slots))| {
+            let day = PackInterval::combined(slots.into_iter().filter_map(|slot| slot.figures))
+                .unwrap_or_default();
+            PackSummaryView {
+                name: pack_name(&key.pack, &state.packs, row),
+                serial: match key.pack {
+                    PackId::Serial(serial) => serial,
+                    PackId::Position(_) => String::new(),
+                },
+                soc_range: soc_range(day.soc),
+                charged: kwh(day.charged),
+                discharged: kwh(day.discharged),
+                temp_range: temp_range(day.temp),
+            }
+        })
+        .collect()
+}
+
+/// Named as the battery panel names it, from the pack the latest poll
+/// reported with the same identity. A pack that has since left the report
+/// falls back to its row in the table.
+fn pack_name(pack: &PackId, current: &[PackStatus], row: usize) -> String {
+    let (position, status) = match pack {
+        PackId::Serial(serial) => current
+            .iter()
+            .enumerate()
+            .find(|(_, status)| status.serial.as_ref() == Some(serial))
+            .map_or((row, None), |(position, status)| (position, Some(status))),
+        PackId::Position(position) => (*position, current.get(*position)),
+    };
+    status
+        .and_then(|status| status.model)
+        .map_or_else(|| format!("Pack {}", position + 1), str::to_string)
 }
 
 #[cfg(test)]
