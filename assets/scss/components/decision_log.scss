@@ -92,3 +92,15 @@
     padding: var(--space-2);
   }
 }
+
+// Mobile breakpoint at 860px (see index.scss).
+@media (max-width: 860px) {
+  .decision-log__row {
+    grid-template-columns: auto 1fr auto;
+  }
+
+  .decision-log__reason {
+    grid-column: 1 / -1;
+    order: 1;
+  }
+}

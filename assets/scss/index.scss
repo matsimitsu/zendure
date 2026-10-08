@@ -37,7 +37,13 @@ a {
   gap: var(--space-4);
 }
 
+// Mobile breakpoint at 860px (see CLAUDE.md Dashboard styling rules).
+// Update here first; other components reference this same value via comments.
 @media (max-width: 860px) {
+  .page {
+    padding: var(--space-5) var(--space-4) 48px;
+  }
+
   .stat-row {
     grid-template-columns: 1fr 1fr;
   }

@@ -103,3 +103,10 @@
     text-align: center;
   }
 }
+
+// Mobile breakpoint at 860px (see index.scss).
+@media (max-width: 860px) {
+  .battery-panel__stats {
+    grid-template-columns: 1fr 1fr;
+  }
+}
