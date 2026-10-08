@@ -183,6 +183,16 @@ $series: (
     row-gap: var(--space-2);
   }
 
+  // Holds the chart's place, so the panel does not jump when it reads again.
+  &__unreadable {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: var(--size-chart);
+    color: var(--color-text-muted);
+    font-size: var(--text-base);
+  }
+
   &__y-axis {
     display: flex;
     flex-direction: column;

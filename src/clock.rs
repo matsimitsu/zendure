@@ -1,4 +1,4 @@
-use chrono::{Datelike, NaiveDate, TimeZone, Timelike, Utc, Weekday};
+use chrono::{Datelike, NaiveDate, TimeDelta, TimeZone, Timelike, Utc, Weekday};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
@@ -66,11 +66,15 @@ pub fn local_midnight(now: Timestamp, tz: Tz) -> Timestamp {
 }
 
 /// The first instant of `date` in `tz`. The earliest reading wins where DST
-/// makes midnight ambiguous; `None` only where a zone skips midnight itself.
+/// makes midnight ambiguous; where a zone skips midnight itself (Santiago,
+/// Havana) the day starts where the gap ends.
 pub fn local_day_start(date: NaiveDate, tz: Tz) -> Option<Timestamp> {
     let midnight = date.and_hms_opt(0, 0, 0)?;
-    tz.from_local_datetime(&midnight)
-        .earliest()
+    // DST gaps open and close on a whole minute, so stepping by one finds the
+    // gap's end exactly.
+    (0..24 * 60)
+        .map_while(|minute| midnight.checked_add_signed(TimeDelta::minutes(minute)))
+        .find_map(|local| tz.from_local_datetime(&local).earliest())
         .map(Timestamp::from)
 }
 
@@ -133,5 +137,27 @@ mod tests {
 
         assert_eq!(local.date_naive(), early_morning.date_naive());
         assert_eq!((local.hour(), local.minute()), (0, 0));
+    }
+
+    /// Both zones spring forward from 00:00 straight to 01:00.
+    #[test]
+    fn a_day_whose_midnight_is_skipped_starts_when_the_gap_ends() {
+        for (tz, date) in [
+            (chrono_tz::America::Havana, (2026, 3, 8)),
+            (chrono_tz::America::Santiago, (2026, 9, 6)),
+        ] {
+            let date = NaiveDate::from_ymd_opt(date.0, date.1, date.2).unwrap();
+            let midnight = date.and_hms_opt(0, 0, 0).unwrap();
+            assert!(
+                tz.from_local_datetime(&midnight).earliest().is_none(),
+                "{tz} keeps midnight on {date}"
+            );
+
+            let start = local_day_start(date, tz).expect("the day has a start");
+            let local = tz.timestamp_millis_opt(start.as_millis()).single().unwrap();
+            assert_eq!(local.date_naive(), date, "{tz}");
+            assert_eq!((local.hour(), local.minute()), (1, 0), "{tz}");
+            assert!(local_day_bounds(date, tz).is_some(), "{tz}");
+        }
     }
 }

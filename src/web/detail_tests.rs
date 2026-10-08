@@ -20,6 +20,13 @@ fn slots(values: &[Option<Watts>]) -> Vec<IntervalSlot> {
         .collect()
 }
 
+/// A `now` after every slot in `window` has finished.
+fn done(window: &[IntervalSlot]) -> Timestamp {
+    window
+        .last()
+        .map_or(utc(8, 12, 0), |slot| slot.index.offset(1).start())
+}
+
 fn home(a: &IntervalAverages) -> Option<Watts> {
     a.home
 }
@@ -38,7 +45,15 @@ fn the_peak_is_the_highest_bucket_and_names_its_interval() {
 fn energy_counts_each_bucket_as_a_quarter_hour_and_a_gap_as_nothing() {
     let window = slots(&[Some(Watts(400)), None, Some(Watts(1200))]);
 
-    assert_eq!(energy(&window, home), WattHours(400.0));
+    assert_eq!(energy(&window, done(&window), home), WattHours(400.0));
+}
+
+#[test]
+fn the_interval_in_progress_counts_only_the_part_that_has_elapsed() {
+    let window = slots(&[Some(Watts(400)), Some(Watts(1200))]);
+    let five_minutes_in = window[1].index.start() + Elapsed::of(Duration::from_secs(5 * 60));
+
+    assert_eq!(energy(&window, five_minutes_in, home), WattHours(200.0));
 }
 
 #[test]
@@ -54,7 +69,7 @@ fn an_empty_window_has_no_peak_or_average_and_no_energy() {
 
     assert_eq!(peak(&window, home), None);
     assert_eq!(average(&window, home), None);
-    assert_eq!(energy(&window, home), WattHours::ZERO);
+    assert_eq!(energy(&window, done(&window), home), WattHours::ZERO);
     assert_eq!(peak_string(None, chrono_tz::UTC), "—");
 }
 
@@ -72,7 +87,10 @@ fn import_and_export_split_a_grid_series_by_sign() {
         })
         .collect();
 
-    let (imported, exported) = (imported(&window), exported(&window));
+    let (imported, exported) = (
+        imported(&window, done(&window)),
+        exported(&window, done(&window)),
+    );
     assert_eq!(imported, WattHours(200.0));
     assert_eq!(exported, WattHours(100.0));
     assert_eq!(kwh(imported - exported), "0.1 kWh");

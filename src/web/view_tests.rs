@@ -455,6 +455,15 @@ fn zero_never_carries_a_minus() {
 }
 
 #[test]
+fn energy_takes_the_typographic_minus_and_never_a_negative_zero() {
+    use crate::units::KiloWattHours;
+
+    assert_eq!(energy_string(KiloWattHours(-1.26)), "−1.3 kWh");
+    assert_eq!(energy_string(KiloWattHours(-0.04)), "0.0 kWh");
+    assert_eq!(energy_string(KiloWattHours(2.0)), "2.0 kWh");
+}
+
+#[test]
 fn a_positive_reads_the_same_as_its_magnitude_except_when_signed() {
     assert_eq!(format_watts(Watts(1_234), SignStyle::Negative), "1,234");
     assert_eq!(format_watts(Watts(1_234), SignStyle::Explicit), "+1,234");

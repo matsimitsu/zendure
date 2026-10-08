@@ -119,25 +119,33 @@ class EnergyFlows extends HTMLElement {
       item.setAttribute("aria-pressed", String(!hidden));
     }
 
+    // The server's readout is kept before anything overwrites it: it is the
+    // only fallback when no interval has completed (just after midnight, or
+    // a past day with no history).
+    const readouts = this.querySelectorAll(`.${B}__readout-time, .${B}__readout-value`);
+    for (const out of readouts) out.dataset.default ??= out.textContent;
+
     const hits = this.hits();
     const index = this.hover ?? this.pinned;
     // Falls back to the latest completed interval when nothing is hovered,
     // or when the remembered index no longer exists after a swap.
     const active = index !== null && hits[index] !== undefined;
     const shown = active ? hits[index] : hits.find((h) => h.classList.contains(`${B}__hit--latest`));
-    if (!shown) return;
 
     const time = this.querySelector(`.${B}__readout-time`);
-    if (time) time.textContent = `${shown.dataset.label} · kW`;
+    if (time) time.textContent = shown ? `${shown.dataset.label} · kW` : time.dataset.default;
     for (const s of SERIES) {
       const out = this.querySelector(`.${B}__readout-value[data-series="${s}"]`);
-      if (out) out.textContent = shown.dataset[s];
+      if (out) out.textContent = shown ? shown.dataset[s] : out.dataset.default;
     }
 
-    // Only a deliberate hover or pin is highlighted, not the default column.
-    const highlight = this.plot()?.querySelector(`.${B}__highlight`);
-    highlight?.setAttribute("x", active ? shown.getAttribute("x") : "0");
-    highlight?.setAttribute("width", active ? shown.getAttribute("width") : "0");
+    // Only a deliberate hover or pin is highlighted, not the default column;
+    // every plot is reset so the hidden one holds no stale column either.
+    for (const highlight of this.querySelectorAll(`.${B}__highlight`)) {
+      const on = active && highlight.closest(`.${B}__plot`) === this.plot();
+      highlight.setAttribute("x", on ? shown.getAttribute("x") : "0");
+      highlight.setAttribute("width", on ? shown.getAttribute("width") : "0");
+    }
   }
 }
 

@@ -5,21 +5,26 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use chrono::NaiveDate;
 use chrono_tz::Tz;
 
-use crate::clock::local_date;
-use crate::journal::read::read_oldest_event_at;
+use crate::clock::{local_date, local_day_bounds};
+use crate::journal::read::{ReadError, read_oldest_event_at};
 use crate::sync::guard;
-use crate::units::Timestamp;
+use crate::units::{Elapsed, Timestamp};
 use crate::world::DeviceId;
 
 use super::flows::{EnergyFlowsView, FlowResolution, FlowsRequest, requested_flows_view};
 use super::intervals::{IntervalHistory, history_of_day};
 
-/// A week of stepping back and forth at both intervals stays warm.
+/// A week of stepping back and forth stays warm.
 const CACHED_DAYS: usize = 8;
+
+/// How long after a day's end it is first cached: the journal is written
+/// behind the live loop, so the day's last rows can land after its midnight.
+const SETTLE: Duration = Duration::from_secs(5 * 60);
 
 /// A query string the panel cannot show; the caller answers 400.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,12 +86,12 @@ struct RenderedFor {
     earliest: Option<NaiveDate>,
 }
 
-/// A least-recently-used cache of at most `capacity` entries.
+/// A least-recently-used cache of at most `capacity` days.
 struct DayCache<V> {
     capacity: usize,
     rendered_for: Option<RenderedFor>,
     /// Most recently used last.
-    entries: VecDeque<(FlowsRequest, V)>,
+    entries: VecDeque<(NaiveDate, V)>,
 }
 
 impl<V: Clone> DayCache<V> {
@@ -98,7 +103,7 @@ impl<V: Clone> DayCache<V> {
         }
     }
 
-    fn get(&mut self, context: RenderedFor, key: FlowsRequest) -> Option<V> {
+    fn get(&mut self, context: RenderedFor, key: NaiveDate) -> Option<V> {
         if self.rendered_for != Some(context) {
             self.entries.clear();
             self.rendered_for = Some(context);
@@ -111,7 +116,7 @@ impl<V: Clone> DayCache<V> {
         Some(value)
     }
 
-    fn insert(&mut self, context: RenderedFor, key: FlowsRequest, value: V) {
+    fn insert(&mut self, context: RenderedFor, key: NaiveDate, value: V) {
         if self.rendered_for != Some(context) {
             self.entries.clear();
             self.rendered_for = Some(context);
@@ -149,42 +154,58 @@ impl PastDays {
 
     /// The panel for `request`, a day before today. Blocks on SQLite.
     ///
-    /// A journal that cannot be read renders an empty day rather than an
-    /// error, and is not cached, so the next visit tries again.
+    /// A journal that cannot be read renders the day as unreadable, and is
+    /// not cached, so the next visit tries again.
     pub fn view(&self, request: FlowsRequest, now: Timestamp, tz: Tz) -> EnergyFlowsView {
+        let today = local_date(now, tz).unwrap_or_default();
         let earliest = self.earliest(tz);
-        let context = RenderedFor {
-            today: local_date(now, tz).unwrap_or_default(),
-            earliest,
-        };
-        if let Some(view) = guard(&self.cache).get(context, request) {
-            return view;
+        let context = earliest
+            .as_ref()
+            .ok()
+            .map(|&earliest| RenderedFor { today, earliest });
+        if let Some(context) = context
+            && let Some(view) = guard(&self.cache).get(context, request.day)
+        {
+            return view.at_interval(request.interval);
         }
+        // With the oldest day unknown, a step back could lead anywhere,
+        // including to days the journal no longer holds.
+        let earliest = earliest.unwrap_or(Some(request.day));
         match history_of_day(&self.journal, request.day, tz, self.devices.clone()) {
             Ok(history) => {
                 let view = requested_flows_view(&history, request, earliest, now, tz);
-                guard(&self.cache).insert(context, request, view.clone());
+                if let Some(context) = context
+                    && settled(request.day, now, tz)
+                {
+                    guard(&self.cache).insert(context, request.day, view.clone());
+                }
                 view
             }
             Err(e) => {
                 tracing::warn!("Dashboard: cannot read {} from journal: {e}", request.day);
                 let empty = IntervalHistory::new(self.devices.clone());
-                requested_flows_view(&empty, request, earliest, now, tz)
+                EnergyFlowsView {
+                    unreadable: true,
+                    ..requested_flows_view(&empty, request, earliest, now, tz)
+                }
             }
         }
     }
 
-    /// The oldest local day the journal still holds; `None` when it holds
-    /// nothing or cannot be read, which leaves the step back enabled.
-    fn earliest(&self, tz: Tz) -> Option<NaiveDate> {
-        match read_oldest_event_at(&self.journal) {
-            Ok(oldest) => oldest.and_then(|at| local_date(at, tz)),
-            Err(e) => {
-                tracing::debug!("Dashboard: cannot read the journal's oldest day: {e}");
-                None
-            }
-        }
+    /// The oldest local day the journal still holds; `Ok(None)` when it holds
+    /// nothing.
+    fn earliest(&self, tz: Tz) -> Result<Option<NaiveDate>, ReadError> {
+        read_oldest_event_at(&self.journal)
+            .map(|oldest| oldest.and_then(|at| local_date(at, tz)))
+            .inspect_err(|e| {
+                tracing::debug!("Dashboard: cannot read the journal's oldest day: {e}")
+            })
     }
+}
+
+/// Whether `day` ended long enough before `now` that its journal is complete.
+fn settled(day: NaiveDate, now: Timestamp, tz: Tz) -> bool {
+    local_day_bounds(day, tz).is_some_and(|(_, end)| end + Elapsed::of(SETTLE) <= now)
 }
 
 #[cfg(test)]

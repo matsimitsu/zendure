@@ -1,6 +1,8 @@
 //! Axis ticks, shared by every chart that labels an axis: where each label
 //! sits along its track, and which ones survive a narrow screen.
 
+use crate::units::Watts;
+
 /// How far along its track a tick sits, as a fraction of the track.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AxisPosition(f64);
@@ -104,6 +106,23 @@ pub fn day_axis() -> Vec<AxisTick> {
     });
     let end = AxisTick::new(AxisPosition::END, "23:59".to_string(), AxisDensity::Always);
     hourly.chain(std::iter::once(end)).collect()
+}
+
+/// The finest round step a power axis can use for which `fits` holds:
+/// 500 W, 1 kW, 2 kW, then doubling, so however wide the range its label
+/// count stays bounded.
+pub fn power_step(fits: impl Fn(Watts) -> bool) -> Watts {
+    let doubling = std::iter::successors(Some(Watts(2000)), |step| {
+        step.get().checked_mul(2).map(Watts)
+    });
+    let mut largest = Watts(500);
+    for step in [Watts(500), Watts(1000)].into_iter().chain(doubling) {
+        if fits(step) {
+            return step;
+        }
+        largest = step;
+    }
+    largest
 }
 
 #[cfg(test)]

@@ -71,6 +71,17 @@ fn a_positive_flow_stands_on_the_zero_line_and_a_negative_one_hangs_from_it() {
 }
 
 #[test]
+fn a_wide_range_steps_coarser_than_two_kilowatts_rather_than_crowding_labels() {
+    let mut history = interval_ring();
+    history.record(&meter_event(utc(8, 8, 1), -16000.0, 16000.0));
+
+    let view = energy_flows_view(&history, utc(8, 8, 20), tz());
+
+    let labels: Vec<_> = view.y_axis.iter().map(|t| t.label.as_str()).collect();
+    assert_eq!(labels, ["16.0", "8.0", "0", "−8.0", "−16.0"]);
+}
+
+#[test]
 fn zero_sits_where_the_scale_puts_it() {
     let mut history = interval_ring();
     history.record(&meter_event(utc(8, 8, 1), 900.0, 0.0));

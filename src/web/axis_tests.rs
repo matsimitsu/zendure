@@ -26,3 +26,13 @@ fn the_rendered_axis_places_labels_by_percentage_not_grid_column() {
     assert!(html.contains("left: 100.00%"));
     assert!(!html.contains("grid"));
 }
+
+#[test]
+fn a_power_step_past_two_kilowatts_keeps_doubling() {
+    let fits = |range: i32| move |step: Watts| range / step.get() <= 6;
+
+    assert_eq!(power_step(fits(2_500)), Watts(500));
+    assert_eq!(power_step(fits(6_000)), Watts(1000));
+    assert_eq!(power_step(fits(16_000)), Watts(4000));
+    assert_eq!(power_step(fits(40_000)), Watts(8000));
+}

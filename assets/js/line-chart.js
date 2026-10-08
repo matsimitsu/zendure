@@ -18,8 +18,10 @@ class LineChart extends HTMLElement {
     // modal body rather than on each chart.
     this.scope = this.closest(".modal__body") ?? this;
     this.onSync = (e) => this.show(e.detail.index);
+    // A tap on any chart is not "outside": that chart announces its own
+    // index, which a reset from here would overwrite with "now".
     this.onOutside = (e) => {
-      if (this.pinned && !this.contains(e.target)) {
+      if (this.pinned && !e.target.closest?.(B)) {
         this.pinned = false;
         this.announce(null);
       }

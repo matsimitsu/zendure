@@ -84,6 +84,14 @@ fn the_range_includes_zero_and_rounds_out_to_a_whole_step() {
 }
 
 #[test]
+fn a_wide_range_steps_coarser_than_two_kilowatts_rather_than_crowding_labels() {
+    let chart = solar_chart(&[Some(9000.0), Some(16000.0)]);
+
+    let labels: Vec<&str> = chart.y_ticks.iter().map(|t| t.label.as_str()).collect();
+    assert_eq!(labels, ["0", "4", "8", "12", "16"]);
+}
+
+#[test]
 fn a_negative_flow_puts_zero_inside_the_plot_and_labels_with_a_minus_sign() {
     let slots: Vec<IntervalSlot> = solar_slots(&[None, None])
         .into_iter()

@@ -45,6 +45,16 @@ pub fn render(view: &EnergyFlowsView) -> Markup {
                 }
             }
         }
+        @if view.unreadable {
+            div class="energy-flows__unreadable" role="status" { "Couldn’t read this day’s history" }
+        } @else {
+            (chart(view))
+        }
+    }
+}
+
+fn chart(view: &EnergyFlowsView) -> Markup {
+    html! {
         div class="energy-flows__chart" {
             div class="energy-flows__y-axis" { (axis::render_vertical(&view.y_axis)) }
             div class="energy-flows__plots" {

@@ -561,10 +561,14 @@ own: nothing measures it separately, so it counts as home usage.
 The `‹`/`›` buttons in the panel's header step to earlier days, and `Today`
 returns. A past day is read from the journal, folded through the same
 history as the live chart and counting only the configured batteries, and
-the last few rendered days are cached since a finished day does not change.
+the last few rendered days are cached since a finished day does not change
+(from a few minutes after its midnight, once its last rows have landed). A
+day the journal cannot be read for says so instead of drawing an empty chart.
 Days follow the configured timezone, so a DST change gives 23 or 25 hourly
-bars (92 or 100 quarters) with the time labels over the hours they name.
-`‹` is disabled on the oldest day the journal still holds, `›` on today.
+bars (92 or 100 quarters) with the time labels over the hours they name; in
+a zone that skips midnight itself, the day starts when the gap ends.
+`‹` is disabled on the oldest day the journal still holds (or on any day,
+when the journal's oldest day cannot be read), `›` on today.
 Only today is live: while a past day is shown the stream's updates to the
 panel are ignored, and going back to today resumes them. The buttons are
 plain links to `/?day=…` too, so they work without JavaScript; the interval

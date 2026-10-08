@@ -5,7 +5,7 @@ use chrono_tz::Tz;
 
 use crate::controller::SocLimits;
 use crate::device::PackStatus;
-use crate::units::{BatteryPower, DeciKelvin, Soc, SolarPower, WattHours, Watts};
+use crate::units::{BatteryPower, DeciKelvin, Soc, SolarPower, Timestamp, WattHours, Watts};
 
 use super::entity::Entity;
 use super::intervals::{
@@ -45,27 +45,33 @@ pub(crate) fn peak<T: Plottable>(
         })
 }
 
-/// Energy across the slots that have a reading; a gap adds nothing rather
-/// than being guessed at.
+/// Energy across the slots that have a reading, up to `now`; a gap adds
+/// nothing rather than being guessed at.
 pub(crate) fn energy(
     slots: &[IntervalSlot],
+    now: Timestamp,
     pick: impl Fn(&IntervalAverages) -> Option<Watts>,
 ) -> WattHours {
     slots
         .iter()
-        .filter_map(|slot| pick(&slot.averages))
-        .map(interval_energy)
+        .filter_map(|slot| {
+            pick(&slot.averages).map(|power| interval_energy(power, slot.index, now))
+        })
         .sum()
 }
 
 /// Only the importing buckets count; an exporting one adds nothing rather
 /// than cancelling an import.
-fn imported(slots: &[IntervalSlot]) -> WattHours {
-    energy(slots, |a| a.grid.map(|g| g.importing().max(Watts::ZERO)))
+fn imported(slots: &[IntervalSlot], now: Timestamp) -> WattHours {
+    energy(slots, now, |a| {
+        a.grid.map(|g| g.importing().max(Watts::ZERO))
+    })
 }
 
-fn exported(slots: &[IntervalSlot]) -> WattHours {
-    energy(slots, |a| a.grid.map(|g| g.exporting().max(Watts::ZERO)))
+fn exported(slots: &[IntervalSlot], now: Timestamp) -> WattHours {
+    energy(slots, now, |a| {
+        a.grid.map(|g| g.exporting().max(Watts::ZERO))
+    })
 }
 
 pub(crate) fn average<T: Averaged>(
@@ -108,7 +114,8 @@ const POWER_TITLE: &str = "Power (kW)";
 /// The stats and charts over the rolling 24 hours for `entity`; `None` while
 /// there is nothing yet to summarise.
 pub fn detail_body(state: &DashboardState, entity: Entity, tz: Tz) -> Option<DetailBodyView> {
-    let slots = state.intervals.last_24h(state.as_of);
+    let now = state.as_of;
+    let slots = state.intervals.last_24h(now);
     let world = &state.engine.world;
     let body = match entity {
         Entity::Solar => {
@@ -119,7 +126,7 @@ pub fn detail_body(state: &DashboardState, entity: Entity, tz: Tz) -> Option<Det
                 stats: vec![
                     stat("Now", watts_or_missing(Some(world.solar.into_watts()))),
                     stat("Peak", peak_string(peak(&slots, solar_watts), tz)),
-                    stat("Produced", kwh(energy(&slots, solar_watts))),
+                    stat("Produced", kwh(energy(&slots, now, solar_watts))),
                     stat(
                         "Average",
                         watts_or_missing(average(&slots, solar).map(SolarPower::into_watts)),
@@ -140,7 +147,7 @@ pub fn detail_body(state: &DashboardState, entity: Entity, tz: Tz) -> Option<Det
                 stats: vec![
                     stat("Now", watts_or_missing(Some(world.home_usage()))),
                     stat("Peak", peak_string(peak(&slots, home), tz)),
-                    stat("Consumed", kwh(energy(&slots, home))),
+                    stat("Consumed", kwh(energy(&slots, now, home))),
                     stat("Average", watts_or_missing(average(&slots, home))),
                 ],
                 charts: vec![LineChartView::build(
@@ -152,7 +159,7 @@ pub fn detail_body(state: &DashboardState, entity: Entity, tz: Tz) -> Option<Det
             }
         }
         Entity::Grid => {
-            let (imported, exported) = (imported(&slots), exported(&slots));
+            let (imported, exported) = (imported(&slots, now), exported(&slots, now));
             DetailBodyView {
                 packs: Vec::new(),
                 stats: vec![
@@ -199,8 +206,8 @@ fn battery_body(state: &DashboardState, slots: &[IntervalSlot], tz: Tz) -> Optio
                 "State of charge",
                 soc_now.map_or_else(|| MISSING.to_string(), |soc| format!("{soc}%")),
             ),
-            stat("Charged", kwh(energy(slots, charging))),
-            stat("Discharged", kwh(energy(slots, discharging))),
+            stat("Charged", kwh(energy(slots, state.as_of, charging))),
+            stat("Discharged", kwh(energy(slots, state.as_of, discharging))),
             stat("24h range", soc_range(soc_extent(slots))),
         ],
         packs,

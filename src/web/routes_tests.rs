@@ -45,8 +45,8 @@ fn app_state() -> AppState {
     AppState {
         dashboard,
         timezone: chrono_tz::UTC,
-        // Unreadable on purpose: a past day then renders empty, which is
-        // all the routing tests need.
+        // Unreadable on purpose: a past day then renders as unreadable,
+        // which is all the routing tests need.
         past_days: Arc::new(PastDays::new(
             std::path::PathBuf::from("/nonexistent/journal.db"),
             [DeviceId::new(journey::BATTERY_ID)],
@@ -98,7 +98,7 @@ async fn an_htmx_request_gets_the_panel_without_a_page_around_it() {
 async fn every_component_script_is_loaded_deferred_and_served() {
     let (_, page) = get("/", false).await;
     assert!(
-        page.contains(r#"<script src="/assets/energy-flows.js" defer></script>"#),
+        page.contains(r#"<script type="module" src="/assets/energy-flows.js"></script>"#),
         "the page must load the energy flows element"
     );
 

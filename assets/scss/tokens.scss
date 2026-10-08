@@ -78,9 +78,12 @@
   // Small-caps headings and labels
   --tracking-caps: 0.05em;
 
-  // One line of text at the element's own line height, for a box that only
-  // holds absolutely placed labels
-  --size-line: 1lh;
+  // One line of text, for a box that only holds absolutely placed labels.
+  // Resolved where it is used, so `1em` is that element's font size; the box
+  // must set `line-height: var(--leading-tight)` for the two to agree. Not
+  // `1lh`, which older Safari, Chrome and Firefox drop.
+  --leading-tight: 1;
+  --size-line: calc(var(--leading-tight) * 1em);
 
   // Spacing / radius (4px base grid)
   --space-1: 4px;

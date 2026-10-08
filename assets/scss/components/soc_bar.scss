@@ -65,7 +65,7 @@
     height: var(--size-line);
     font-family: var(--font-mono);
     font-size: var(--text-xs);
-    line-height: 1;
+    line-height: var(--leading-tight);
     color: var(--color-text-muted);
 
     // A second line for the max label when the limits sit close together.

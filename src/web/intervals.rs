@@ -139,10 +139,13 @@ impl IntervalIndex {
     }
 }
 
-/// What `power`, held for one whole interval, delivers. An interval's
-/// average stands for its whole span, so this is exact for the bucket.
-pub(crate) fn interval_energy(power: Watts) -> WattHours {
-    WattHours::integrate(power, power, INTERVAL)
+/// What `power`, averaged over `index`'s interval, delivers in the part of it
+/// that had elapsed by `now`: the bucket in progress has averaged only that.
+pub(crate) fn interval_energy(power: Watts, index: IntervalIndex, now: Timestamp) -> WattHours {
+    let elapsed = Duration::try_from_secs_f64((now - index.start()).as_secs_f64())
+        .unwrap_or(Duration::ZERO)
+        .min(INTERVAL);
+    WattHours::integrate(power, power, elapsed)
 }
 
 /// How many whole [`INTERVAL`]s fit in `span`.
@@ -308,8 +311,10 @@ impl IntervalHistory {
     /// for good. A single event behind the window is indistinguishable from a
     /// late journal row, so it is dropped; a second one that lands within the
     /// window of the first is a clock that has settled there, and the ring
-    /// rebases onto it. The price is the one event dropped, and that two late
-    /// rows in a row from the same stretch of the past also rebase the ring.
+    /// rebases onto it: buckets past it are dropped, and those still inside
+    /// its window (the stretch before the step) are kept. The price is the
+    /// one event dropped, and that two late rows in a row from the same
+    /// stretch of the past also rebase the ring.
     fn bucket_mut(&mut self, index: IntervalIndex) -> Option<&mut IntervalBucket> {
         match self.latest {
             Some(latest) if index < latest && !Self::within(latest, index) => {
@@ -320,7 +325,11 @@ impl IntervalHistory {
                     self.stale = Some(index);
                     return None;
                 }
-                self.ring = std::array::from_fn(|_| None);
+                for slot in &mut self.ring {
+                    if slot.as_ref().is_some_and(|b| !Self::within(index, b.index)) {
+                        *slot = None;
+                    }
+                }
                 self.latest = None;
             }
             _ => {}

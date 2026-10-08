@@ -126,6 +126,31 @@ fn the_ring_recovers_after_the_clock_steps_far_ahead_and_back() {
 }
 
 #[test]
+fn a_rebase_keeps_what_was_recorded_before_the_clock_stepped_ahead() {
+    let mut history = interval_ring();
+    history.record(&meter_event(into_interval(base(), 0), 100.0, 0.0));
+    history.record(&meter_event(into_interval(base().offset(1), 0), 110.0, 0.0));
+    history.record(&meter_event(into_interval(base().offset(150), 0), 5.0, 0.0));
+    history.record(&meter_event(into_interval(base().offset(2), 0), 7.0, 0.0));
+    history.record(&meter_event(into_interval(base().offset(2), 60), 9.0, 0.0));
+
+    assert_eq!(history.averages(base()).grid, Some(GridPower(100.0)));
+    assert_eq!(
+        history.averages(base().offset(1)).grid,
+        Some(GridPower(110.0))
+    );
+    assert_eq!(
+        history.averages(base().offset(2)).grid,
+        Some(GridPower(9.0)),
+        "the one event dropped before the rebase was confirmed"
+    );
+    assert_eq!(
+        history.averages(base().offset(150)),
+        IntervalAverages::default()
+    );
+}
+
+#[test]
 fn an_isolated_late_row_does_not_count_towards_a_rebase() {
     let mut history = interval_ring();
     history.record(&meter_event(into_interval(base(), 0), 100.0, 0.0));

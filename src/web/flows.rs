@@ -12,7 +12,7 @@ use chrono_tz::Tz;
 use crate::clock::{local_date, local_day_bounds};
 use crate::units::{BatteryPower, Elapsed, GridPower, SolarPower, Timestamp, Watts};
 
-use super::axis::{AxisDensity, AxisPosition, AxisTick, day_axis};
+use super::axis::{AxisDensity, AxisPosition, AxisTick, day_axis, power_step};
 use super::entity::Entity;
 use super::intervals::{
     HOUR, INTERVAL, IntervalAverages, IntervalHistory, IntervalIndex, IntervalSlot, merged,
@@ -27,9 +27,7 @@ pub(super) const FLOWS_CHART_HEIGHT: f64 = 260.0;
 /// Keeps a non-zero flow visible on a scale sized for kilowatts.
 const MIN_BAR_HEIGHT: f64 = 0.6;
 
-const NICE_STEPS: [Watts; 3] = [Watts(500), Watts(1000), Watts(2000)];
-
-/// The most steps a scale may span before the next nice step up is tried.
+/// The most steps a scale may span before the next step up is tried.
 const MAX_STEPS: i32 = 6;
 
 /// One series' flow over an interval, as the chart draws it. Grid is positive
@@ -205,11 +203,9 @@ impl FlowScale {
                 .div_ceil(step.get().unsigned_abs());
             i32::try_from(count).unwrap_or(i32::MAX)
         };
-        let largest = NICE_STEPS[NICE_STEPS.len() - 1];
-        let step = NICE_STEPS
-            .into_iter()
-            .find(|&step| steps(step, high).max(1).saturating_add(steps(step, -low)) <= MAX_STEPS)
-            .unwrap_or(largest);
+        let step = power_step(|step| {
+            steps(step, high).max(1).saturating_add(steps(step, -low)) <= MAX_STEPS
+        });
         FlowScale {
             top: Watts(step.get().saturating_mul(steps(step, high).max(1))),
             bottom: Watts(step.get().saturating_mul(-steps(step, -low))),
@@ -389,6 +385,17 @@ pub struct EnergyFlowsView {
     pub plots: [FlowPlotView; 2],
     /// The default plot's most recent completed slot.
     pub readout: FlowReadoutView,
+    /// The journal could not be read for this day. Drawn as an empty chart it
+    /// would claim nothing was measured.
+    pub unreadable: bool,
+}
+
+impl EnergyFlowsView {
+    /// The same day shown at `interval`: both plots are always rendered, so
+    /// the interval only picks which one is shown.
+    pub fn at_interval(self, interval: FlowResolution) -> Self {
+        EnergyFlowsView { interval, ..self }
+    }
 }
 
 /// One slot of the day as a plot draws it: `None` until it has finished.
@@ -583,6 +590,7 @@ pub fn requested_flows_view(
         zero_y: scale.y(Watts::ZERO),
         plots: [hourly_plot, quarterly_plot],
         readout,
+        unreadable: false,
     }
 }
 

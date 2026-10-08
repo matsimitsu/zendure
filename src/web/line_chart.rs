@@ -6,7 +6,7 @@ use chrono_tz::Tz;
 
 use crate::units::{BatteryPower, GridPower, Soc, SolarPower, Watts};
 
-use super::axis::{AxisDensity, AxisPosition, AxisTick};
+use super::axis::{AxisDensity, AxisPosition, AxisTick, power_step};
 use super::entity::Entity;
 use super::intervals::{IntervalAverages, IntervalSlot};
 use super::view::{SignStyle, format_kw, format_time};
@@ -176,7 +176,11 @@ impl Domain {
             ChartScale::Power => {
                 let (low, high) =
                     values.fold((0.0_f64, 0.0_f64), |(lo, hi), v| (lo.min(v), hi.max(v)));
-                let step = nice_step(high - low);
+                let step = power_step(|step| {
+                    let step = step.as_f64();
+                    (high / step).ceil() - (low / step).floor() <= MAX_POWER_STEPS
+                })
+                .as_f64();
                 // `+ 0.0` keeps a floored `-0.0` from labelling as "−0".
                 let low = (low / step).floor() * step + 0.0;
                 let high = ((high / step).ceil() * step).max(low + step);
@@ -198,17 +202,8 @@ impl Domain {
     }
 }
 
-/// Coarse enough that a 180-unit-tall plot never carries more than about
-/// seven labels.
-fn nice_step(range: f64) -> f64 {
-    if range > 6000.0 {
-        2000.0
-    } else if range > 3000.0 {
-        1000.0
-    } else {
-        500.0
-    }
-}
+/// Few enough that a 180-unit-tall plot never carries more than seven labels.
+const MAX_POWER_STEPS: f64 = 6.0;
 
 fn tick_label(scale: ChartScale, value: f64) -> String {
     match scale {

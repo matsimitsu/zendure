@@ -50,7 +50,10 @@ async fn index(State(state): State<AppState>, RawQuery(query): RawQuery) -> Resp
     };
     let current = state.dashboard.borrow().clone();
     let mut view = dashboard_view(&current, state.timezone);
-    view.energy_flows = flows_view(&state, &current, query).await;
+    view.energy_flows = match flows_view(&state, &current, query).await {
+        Ok(flows) => flows,
+        Err(failed) => return failed.into_response(),
+    };
     layout::page(&view).into_response()
 }
 
@@ -62,8 +65,10 @@ async fn energy_flows(State(state): State<AppState>, RawQuery(query): RawQuery) 
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
     let current = state.dashboard.borrow().clone();
-    let view = flows_view(&state, &current, query).await;
-    energy_flows::render(&view).into_response()
+    match flows_view(&state, &current, query).await {
+        Ok(view) => energy_flows::render(&view).into_response(),
+        Err(failed) => failed.into_response(),
+    }
 }
 
 /// Today from the live ring, which the stream keeps current; any earlier day
@@ -72,20 +77,35 @@ async fn flows_view(
     state: &AppState,
     current: &DashboardState,
     query: FlowsQuery,
-) -> EnergyFlowsView {
+) -> Result<EnergyFlowsView, PastDayFailed> {
     let (now, tz) = (current.as_of, state.timezone);
     let today = local_date(now, tz).unwrap_or_default();
     let request = query.resolve(today);
     if request.day == today {
-        return requested_flows_view(&current.intervals, request, None, now, tz);
+        return Ok(requested_flows_view(
+            &current.intervals,
+            request,
+            None,
+            now,
+            tz,
+        ));
     }
     let past_days = Arc::clone(&state.past_days);
-    match tokio::task::spawn_blocking(move || past_days.view(request, now, tz)).await {
-        Ok(view) => view,
-        Err(e) => {
+    tokio::task::spawn_blocking(move || past_days.view(request, now, tz))
+        .await
+        .map_err(|e| {
             tracing::warn!("Dashboard: reading a past day failed: {e}");
-            requested_flows_view(&current.intervals, request, None, now, tz)
-        }
+            PastDayFailed
+        })
+}
+
+/// The task reading a past day panicked. Answered 500: the live ring under a
+/// past day's label would be a lie.
+struct PastDayFailed;
+
+impl IntoResponse for PastDayFailed {
+    fn into_response(self) -> Response {
+        (StatusCode::INTERNAL_SERVER_ERROR, "reading that day failed").into_response()
     }
 }
 

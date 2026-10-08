@@ -372,8 +372,15 @@ fn pack_row(index: usize, pack: &PackStatus, limits: SocLimits) -> PackRowView {
     }
 }
 
+/// To one decimal, signed like [`format_kw`]: by the figure as shown, so a
+/// net that rounds to zero reads `0.0 kWh`, never `-0.0 kWh`.
 pub(super) fn energy_string(energy: KiloWattHours) -> String {
-    format!("{:.1} kWh", energy.get())
+    let shown = (energy.get() * 10.0).round() / 10.0;
+    format!(
+        "{}{:.1} kWh",
+        SignStyle::Negative.sign(shown < 0.0),
+        shown.abs()
+    )
 }
 
 pub(super) fn format_time(at: Timestamp, timezone: chrono_tz::Tz) -> String {

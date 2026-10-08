@@ -79,52 +79,26 @@ fn context(today: u32) -> RenderedFor {
 fn the_cache_keeps_at_most_its_capacity_and_drops_the_least_recent() {
     let mut cache = DayCache::new(3);
     for day in 1..=3 {
-        cache.insert(context(9), request(day, FlowResolution::Hour), day);
+        cache.insert(context(9), date(day), day);
     }
     // Reading day 1 makes day 2 the least recently used.
-    assert_eq!(
-        cache.get(context(9), request(1, FlowResolution::Hour)),
-        Some(1)
-    );
+    assert_eq!(cache.get(context(9), date(1)), Some(1));
 
-    cache.insert(context(9), request(4, FlowResolution::Hour), 4);
+    cache.insert(context(9), date(4), 4);
 
     assert_eq!(cache.len(), 3);
-    assert_eq!(
-        cache.get(context(9), request(2, FlowResolution::Hour)),
-        None
-    );
-    assert_eq!(
-        cache.get(context(9), request(1, FlowResolution::Hour)),
-        Some(1)
-    );
-    assert_eq!(
-        cache.get(context(9), request(4, FlowResolution::Hour)),
-        Some(4)
-    );
-}
-
-#[test]
-fn the_cache_keys_on_the_interval_too() {
-    let mut cache = DayCache::new(3);
-    cache.insert(context(9), request(1, FlowResolution::Hour), "1h");
-
-    assert_eq!(
-        cache.get(context(9), request(1, FlowResolution::Quarter)),
-        None
-    );
+    assert_eq!(cache.get(context(9), date(2)), None);
+    assert_eq!(cache.get(context(9), date(1)), Some(1));
+    assert_eq!(cache.get(context(9), date(4)), Some(4));
 }
 
 /// "Yesterday" stops being yesterday at midnight.
 #[test]
 fn a_new_today_empties_the_cache() {
     let mut cache = DayCache::new(3);
-    cache.insert(context(9), request(8, FlowResolution::Hour), 8);
+    cache.insert(context(9), date(8), 8);
 
-    assert_eq!(
-        cache.get(context(10), request(8, FlowResolution::Hour)),
-        None
-    );
+    assert_eq!(cache.get(context(10), date(8)), None);
     assert_eq!(cache.len(), 0);
 }
 
@@ -190,14 +164,56 @@ async fn the_oldest_journal_day_has_no_step_back() {
     assert!(!next.nav.live());
 }
 
+/// Both plots are rendered either way, so one entry serves both intervals.
+#[tokio::test]
+async fn a_cached_day_serves_either_interval() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("journal.db");
+    crate::journal::testing::record(&path, &two_days()).await;
+    let past = PastDays::new(path, configured());
+    let now = utc(8, 10, 0);
+
+    let hourly = past.view(request(7, FlowResolution::Hour), now, tz());
+    let quarterly = past.view(request(7, FlowResolution::Quarter), now, tz());
+
+    assert_eq!(guard(&past.cache).len(), 1);
+    assert_eq!(hourly.interval, FlowResolution::Hour);
+    assert_eq!(quarterly.interval, FlowResolution::Quarter);
+    assert_eq!(
+        energy_flows::host_class(&quarterly),
+        "energy-flows energy-flows--15m"
+    );
+}
+
+/// The journal is written behind the live loop, so yesterday read just
+/// after midnight may still be missing its last rows.
+#[tokio::test]
+async fn a_day_that_has_only_just_ended_is_not_cached() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("journal.db");
+    crate::journal::testing::record(&path, &two_days()).await;
+    let past = PastDays::new(path, configured());
+
+    // 00:02 CEST on 8 October.
+    past.view(request(7, FlowResolution::Hour), utc(7, 22, 2), tz());
+    assert_eq!(guard(&past.cache).len(), 0);
+
+    past.view(request(7, FlowResolution::Hour), utc(7, 22, 10), tz());
+    assert_eq!(guard(&past.cache).len(), 1);
+}
+
 #[test]
-fn an_unreadable_journal_renders_an_empty_day() {
+fn an_unreadable_journal_says_so_and_offers_no_step_back() {
     let dir = tempfile::tempdir().unwrap();
     let past = PastDays::new(dir.path().join("missing.db"), configured());
 
     let view = past.view(request(7, FlowResolution::Hour), utc(8, 10, 0), tz());
 
-    assert!(view.plots.iter().all(|plot| plot.bars.is_empty()));
+    assert!(view.unreadable);
     assert_eq!(view.nav.shown, date(7));
+    assert_eq!(view.nav.previous, None);
     assert_eq!(guard(&past.cache).len(), 0, "a failed read is not cached");
+    let html = energy_flows::render(&view).into_string();
+    assert!(html.contains("energy-flows__unreadable"), "{html}");
+    assert!(!html.contains("energy-flows__plot"), "{html}");
 }
