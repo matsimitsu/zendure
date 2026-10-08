@@ -2,6 +2,7 @@
 //! structs. Newtypes stop here — every Maud template downstream renders
 //! strings, never a `Watts` or a `Soc`.
 
+use crate::device::PackStatus;
 use crate::models::ControlMode;
 use crate::units::{Elapsed, KiloWattHours, Percent, Soc, SolarForecastPoint, Timestamp, Watts};
 
@@ -36,6 +37,21 @@ pub struct BatteryPanelView {
     pub usable_energy: MiniStatView,
     pub capacity: MiniStatView,
     pub round_trip_efficiency: MiniStatView,
+    /// One row per pack, in the device's order; empty until a complete
+    /// report has listed them.
+    pub packs: Vec<PackRowView>,
+}
+
+pub struct PackRowView {
+    /// The model, or the pack's position when this build cannot identify it.
+    pub name: String,
+    pub serial: String,
+    /// The SOC bar's fill; `None` draws it empty.
+    pub soc_percent: Option<u32>,
+    pub soc: String,
+    pub power: String,
+    pub temperature: String,
+    pub capacity: String,
 }
 
 /// The forecast panel's contents: a shared-scale bar chart (predicted
@@ -246,6 +262,35 @@ fn efficiency_string(rte: Option<Percent>) -> String {
     match rte {
         Some(rte) => format!("{:.0}%", rte.get()),
         None => "—".to_string(),
+    }
+}
+
+const MISSING: &str = "—";
+
+fn pack_row(index: usize, pack: &PackStatus) -> PackRowView {
+    PackRowView {
+        name: pack
+            .model
+            .map_or_else(|| format!("Pack {}", index + 1), str::to_string),
+        serial: pack.serial.clone().unwrap_or_default(),
+        soc_percent: pack.soc.map(Soc::get),
+        soc: pack
+            .soc
+            .map_or_else(|| MISSING.to_string(), |soc| format!("{soc}%")),
+        power: pack.power.map_or_else(
+            || MISSING.to_string(),
+            |power| {
+                format!(
+                    "{} W",
+                    format_watts(power.into_watts(), SignStyle::Explicit)
+                )
+            },
+        ),
+        temperature: pack.temp.map_or_else(
+            || MISSING.to_string(),
+            |temp| format!("{:.1} °C", temp.to_celsius().0),
+        ),
+        capacity: energy_string(pack.capacity.to_kwh()),
     }
 }
 
@@ -465,6 +510,12 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
                 label: "Round-trip eff.",
                 value: efficiency_string(state.rte_percent),
             },
+            packs: state
+                .packs
+                .iter()
+                .enumerate()
+                .map(|(index, pack)| pack_row(index, pack))
+                .collect(),
         }
     });
 

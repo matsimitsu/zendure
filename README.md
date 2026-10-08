@@ -497,8 +497,9 @@ battery:
 ## Dashboard
 
 Add `[web]` to run a live browser dashboard (`src/web/`) — solar/home/grid
-stat cards, the battery panel (SOC, mode, RTE, usable energy, capacity), and
-a decision log, all real data, updating every scan tick over
+stat cards, the battery panel (SOC, mode, RTE, usable energy, capacity, and
+a row per pack with its model, serial, SOC, flow, temperature and capacity),
+and a decision log, all real data, updating every scan tick over
 server-sent events. Two routes: `GET /` (the full page) and `GET /events`
 (the SSE stream fragments it swaps in via htmx). No `[web]` table means no
 HTTP listener at all — the same brokerless-by-default rule `[mqtt]` follows —

@@ -6,6 +6,7 @@ mod components {
     pub mod decision_log;
     pub mod forecast_panel;
     pub mod mini_stat;
+    pub mod pack_list;
     pub mod page_header;
     pub mod stat_card;
     pub mod top_bar;

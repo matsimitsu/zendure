@@ -241,7 +241,7 @@ fn battery_reading() -> BatteryReading {
         telemetry: BatteryTelemetry {
             charge: Watts::ZERO,
             discharge: Watts::ZERO,
-            pack_capacities: None,
+            packs: None,
             pack_temps: Vec::new(),
             enclosure_temp: None,
             min_soc: None,

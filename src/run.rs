@@ -13,7 +13,7 @@ use crate::announce::Announcer;
 use crate::car_battery;
 use crate::clock::Clock;
 use crate::config::Config;
-use crate::device::{Applied, BatteryMonitor, BatteryReading, ControlPath};
+use crate::device::{Applied, BatteryMonitor, BatteryReading, ControlPath, PackStatus};
 use crate::engine::Engine;
 use crate::event::Event;
 use crate::journal::Journal;
@@ -357,38 +357,34 @@ struct PollTelemetry {
     rte: rte::RteTracker,
     /// Sticky: a report that carries no pack data leaves the last known set in
     /// place rather than publishing a capacity of zero.
-    pack_capacities: Vec<WattHours>,
+    packs: Vec<PackStatus>,
     /// The device's own floor, which it reports in tenths of a percent.
     min_soc: Soc,
 }
 
 impl PollTelemetry {
-    fn new(state_path: std::path::PathBuf, pack_capacities: Vec<WattHours>, min_soc: Soc) -> Self {
+    fn new(state_path: std::path::PathBuf, packs: Vec<PackStatus>, min_soc: Soc) -> Self {
         PollTelemetry {
             rte: rte::RteTracker::new(state_path),
-            pack_capacities,
+            packs,
             min_soc,
         }
     }
 
     fn pack_count(&self) -> usize {
-        self.pack_capacities.len()
+        self.packs.len()
     }
 
-    /// RTE%, usable energy and pack capacity at `soc`. The one computation
-    /// behind both the MQTT publish below and the dashboard panel.
+    /// RTE%, usable energy, pack capacity and the packs themselves at `soc`.
+    /// The one computation behind both the MQTT publish below and the
+    /// dashboard panel.
     fn figures(&self, soc: Soc) -> web::DashboardTelemetry {
+        let capacity: WattHours = self.packs.iter().map(|pack| pack.capacity).sum();
         web::DashboardTelemetry {
             rte: self.rte.rte_percent(),
-            usable: self
-                .rte
-                .usable_kwh(soc, self.min_soc, &self.pack_capacities),
-            capacity: self
-                .pack_capacities
-                .iter()
-                .copied()
-                .sum::<WattHours>()
-                .to_kwh(),
+            usable: self.rte.usable_kwh(soc, self.min_soc, capacity),
+            capacity: capacity.to_kwh(),
+            packs: self.packs.clone(),
         }
     }
 
@@ -406,8 +402,8 @@ impl PollTelemetry {
         let telemetry = &reading.telemetry;
         self.rte.record(telemetry.charge, telemetry.discharge);
 
-        if let Some(pack_capacities) = &telemetry.pack_capacities {
-            self.pack_capacities = pack_capacities.clone();
+        if let Some(packs) = &telemetry.packs {
+            self.packs = packs.clone();
         }
         if let Some(min_soc) = telemetry.min_soc {
             self.min_soc = min_soc;
@@ -542,7 +538,7 @@ pub async fn run(
 
     let mut telemetry = PollTelemetry::new(
         config.rte_state_path.clone(),
-        initial_telemetry.pack_capacities.unwrap_or_default(),
+        initial_telemetry.packs.unwrap_or_default(),
         initial_telemetry.min_soc.unwrap_or(Soc::ZERO),
     );
     let startup_soc = battery_state.soc;

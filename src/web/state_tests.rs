@@ -50,6 +50,7 @@ fn telemetry() -> DashboardTelemetry {
         rte: Some(Percent(91.4)),
         usable: KiloWattHours(1.8),
         capacity: KiloWattHours(3.84),
+        packs: Vec::new(),
     }
 }
 

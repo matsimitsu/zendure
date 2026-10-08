@@ -145,9 +145,8 @@ impl RteTracker {
         &self,
         soc: Soc,
         min_soc: Soc,
-        pack_capacities: &[WattHours],
+        total_capacity_wh: WattHours,
     ) -> KiloWattHours {
-        let total_capacity_wh: WattHours = pack_capacities.iter().copied().sum();
         if total_capacity_wh.get() <= 0.0 || soc <= min_soc {
             return KiloWattHours::ZERO;
         }
@@ -323,7 +322,7 @@ mod tests {
             .usable_kwh(
                 Soc::new(80),
                 Soc::new(10),
-                &[WattHours(1920.0), WattHours(1920.0)],
+                WattHours(1920.0) + WattHours(1920.0),
             )
             .get();
         assert!(
@@ -337,7 +336,7 @@ mod tests {
         let tracker = RteTracker::new(temp_path());
         assert_eq!(
             tracker
-                .usable_kwh(Soc::new(10), Soc::new(10), &[WattHours(1920.0)])
+                .usable_kwh(Soc::new(10), Soc::new(10), WattHours(1920.0))
                 .get(),
             0.0
         );

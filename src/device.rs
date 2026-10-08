@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::battery::BatteryState;
 use crate::command::Command;
-use crate::units::{DeciKelvin, PackTemperature, PowerCap, Soc, WattHours, Watts};
+use crate::units::{BatteryPower, DeciKelvin, PackTemperature, PowerCap, Soc, WattHours, Watts};
 use crate::world::DeviceId;
 
 /// A battery model's rated limits. What the hardware can do, as distinct from
@@ -63,12 +63,30 @@ pub struct RawCapture {
 pub struct BatteryTelemetry {
     pub charge: Watts,
     pub discharge: Watts,
-    /// `None` when this report carried none — the caller keeps its last known
-    /// set rather than publishing a capacity of zero.
-    pub pack_capacities: Option<Vec<WattHours>>,
+    /// `None` when this report carried none, or fewer than the device says it
+    /// has — the caller keeps its last known set rather than publishing a
+    /// capacity of zero or a pack list missing a member.
+    pub packs: Option<Vec<PackStatus>>,
     pub pack_temps: Vec<PackTemperature>,
     pub enclosure_temp: Option<DeciKelvin>,
     pub min_soc: Option<Soc>,
+}
+
+/// One pack as a poll found it, for display alongside the box-level figures.
+///
+/// Every reading is optional because a pack can omit any of them, and a
+/// simulated pack has no per-pack SOC or flow to report at all: `None` shows
+/// as a dash rather than a confident zero.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackStatus {
+    /// The product name, `None` for a pack type this build cannot identify.
+    pub model: Option<&'static str>,
+    pub serial: Option<String>,
+    /// Nominal, and a guess for an unidentified pack — see the adapter's table.
+    pub capacity: WattHours,
+    pub soc: Option<Soc>,
+    pub power: Option<BatteryPower>,
+    pub temp: Option<DeciKelvin>,
 }
 
 /// One reading: what the controller decides on, plus everything else a poll

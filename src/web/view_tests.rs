@@ -5,6 +5,7 @@
 use super::*;
 
 use crate::battery::BatteryState;
+use crate::device::PackStatus;
 use crate::engine::EngineState;
 use crate::fixtures::journey;
 use crate::models::ControlDecision;
@@ -314,6 +315,62 @@ fn millions_group_on_both_boundaries() {
 fn a_missing_round_trip_efficiency_reads_as_unknown_not_as_zero() {
     assert_eq!(efficiency_string(None), "—");
     assert_eq!(efficiency_string(Some(Percent(91.4))), "91%");
+}
+
+// --- Per-pack rows ---------------------------------------------------------
+
+fn pack_status(model: Option<&'static str>, power: Option<BatteryPower>) -> PackStatus {
+    PackStatus {
+        model,
+        serial: Some("GO2ALP1P1008296".to_string()),
+        capacity: crate::units::WattHours(2880.0),
+        soc: Some(Soc::new(68)),
+        power,
+        temp: Some(crate::units::DeciKelvin(2911)),
+    }
+}
+
+/// A charging pack reads as a negative flow, the same sign convention the
+/// panel's own rate uses, so the rows and the total above them agree.
+#[test]
+fn a_pack_row_shows_what_its_pack_reported() {
+    let charging = BatteryPower::from_flows(Watts::ZERO, Watts(1240));
+
+    let row = pack_row(1, &pack_status(Some("AB3000L"), Some(charging)));
+
+    assert_eq!(row.name, "AB3000L");
+    assert_eq!(row.serial, "GO2ALP1P1008296");
+    assert_eq!(row.soc_percent, Some(68));
+    assert_eq!(row.soc, "68%");
+    assert_eq!(row.power, "-1,240 W");
+    assert_eq!(row.temperature, "18.0 °C");
+    assert_eq!(row.capacity, "2.9 kWh");
+}
+
+/// An unidentified pack is named by its position, counted from one as a
+/// person would, and a flow it never reported reads as unknown, not as idle.
+#[test]
+fn an_unidentified_pack_row_is_named_by_position_and_dashes_what_is_missing() {
+    let row = pack_row(1, &pack_status(None, None));
+
+    assert_eq!(row.name, "Pack 2");
+    assert_eq!(row.power, "—");
+}
+
+#[test]
+fn the_battery_panel_lists_every_pack_in_order() {
+    let mut state = state(vec![]);
+    state.packs = vec![
+        pack_status(Some("AC2400+"), None),
+        pack_status(Some("AB3000L"), None),
+    ];
+
+    let battery = dashboard_view(&state, tz())
+        .battery
+        .expect("the fixture world has a battery");
+
+    let names: Vec<_> = battery.packs.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["AC2400+", "AB3000L"]);
 }
 
 /// An empty buffer draws nothing rather than a degenerate path, and a single

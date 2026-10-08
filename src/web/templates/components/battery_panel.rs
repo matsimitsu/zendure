@@ -1,6 +1,6 @@
 use maud::{Markup, html};
 
-use crate::web::templates::mini_stat;
+use crate::web::templates::{mini_stat, pack_list};
 use crate::web::view::BatteryPanelView;
 
 pub fn render(view: &BatteryPanelView) -> Markup {
@@ -32,6 +32,9 @@ pub fn render(view: &BatteryPanelView) -> Markup {
                 (mini_stat::render(&view.usable_energy))
                 (mini_stat::render(&view.capacity))
                 (mini_stat::render(&view.round_trip_efficiency))
+            }
+            @if !view.packs.is_empty() {
+                (pack_list::render(&view.packs))
             }
         }
     }

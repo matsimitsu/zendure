@@ -9,6 +9,7 @@ use chrono_tz::Tz;
 
 use crate::clock::Clock;
 use crate::command::Command;
+use crate::device::PackStatus;
 use crate::engine::EngineState;
 use crate::journal::read::read_recent_decisions;
 use crate::models::ControlDecision;
@@ -131,17 +132,18 @@ pub struct SparklineHistory {
     pub grid: Sparkline<GridPower>,
 }
 
-/// The three figures a device poll produces for the dashboard, which
-/// [`EngineState`] never carries: that type is journalled and replayed
-/// byte-for-byte, and none of this is a decision input.
+/// What a device poll produces for the dashboard, which [`EngineState`]
+/// never carries: that type is journalled and replayed byte-for-byte, and
+/// none of this is a decision input.
 ///
-/// Named rather than a tuple because two of the three are `KiloWattHours`
+/// Named rather than a tuple because two of the figures are `KiloWattHours`
 /// and adjacent, so a swap would be invisible (`RUST-2`).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DashboardTelemetry {
     pub rte: Option<Percent>,
     pub usable: KiloWattHours,
     pub capacity: KiloWattHours,
+    pub packs: Vec<PackStatus>,
 }
 
 /// Today's *actual* measured solar production, bucketed into the same 48
@@ -230,6 +232,8 @@ pub struct DashboardState {
     pub rte_percent: Option<Percent>,
     pub usable_energy: KiloWattHours,
     pub pack_capacity: KiloWattHours,
+    /// Each pack as the last complete report listed it, in the device's order.
+    pub packs: Vec<PackStatus>,
     pub sparklines: SparklineHistory,
     /// Today's actual solar production, seeded from the journal at startup
     /// and extended by every `meter_tick` thereafter.
@@ -271,6 +275,7 @@ impl DashboardState {
             rte_percent: None,
             usable_energy: KiloWattHours::ZERO,
             pack_capacity: KiloWattHours::ZERO,
+            packs: Vec::new(),
             sparklines: SparklineHistory::default(),
             actual_solar,
             forecast: ForecastSnapshot::default(),
@@ -351,6 +356,7 @@ impl DashboardState {
         self.rte_percent = telemetry.rte;
         self.usable_energy = telemetry.usable;
         self.pack_capacity = telemetry.capacity;
+        self.packs = telemetry.packs;
     }
 
     fn refresh(

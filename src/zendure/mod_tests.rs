@@ -195,16 +195,18 @@ async fn a_landed_charge_records_the_ac_mode_only_after_the_write_succeeds() {
 
 #[test]
 fn the_pack_type_table_knows_the_packs_this_build_ships_with() {
-    assert_eq!(known_pack_type_capacity(500), Some(WattHours(2400.0)));
-    assert_eq!(known_pack_type_capacity(501), Some(WattHours(1920.0)));
+    let capacity = |pack_type| known_pack_type(pack_type).map(|model| model.capacity);
+    assert_eq!(capacity(500), Some(WattHours(2400.0)));
+    assert_eq!(capacity(501), Some(WattHours(1920.0)));
+    assert_eq!(capacity(350), Some(WattHours(2880.0)));
 }
 
-/// The case this exists for: an expansion pack newer than the table. An
-/// AB3000 holds 2880 Wh, so until its `packType` is added here the total is
-/// a guess — one the controller keeps running on, but never silently.
+/// The case this exists for: an expansion pack newer than the table. Until
+/// its `packType` is added here the total is a guess — one the controller
+/// keeps running on, but never silently.
 #[test]
 fn an_unrecognised_pack_type_is_not_in_the_table() {
-    assert_eq!(known_pack_type_capacity(999), None);
+    assert_eq!(known_pack_type(999), None);
 }
 
 /// Loud and running beats silent and stopped: an unidentified pack still
@@ -228,17 +230,63 @@ fn a_pack_with_no_pack_type_is_also_unidentified() {
     );
 }
 
-/// The shape the AB3000 arrives in: a second pack alongside the built-in
-/// one, each mapped on its own type rather than the first pack's standing
-/// for both.
+/// The shape an expansion pack arrives in: a second pack alongside the
+/// built-in one, each mapped on its own type rather than the first pack's
+/// standing for both.
 #[test]
 fn each_pack_is_mapped_on_its_own_type() {
-    let packs = [pack(r#"{"packType":500}"#), pack(r#"{"packType":501}"#)];
+    let packs = [pack(r#"{"packType":500}"#), pack(r#"{"packType":350}"#)];
+
+    let statuses: Vec<_> = packs.iter().map(pack_status).collect();
 
     assert_eq!(
-        pack_capacities(&packs),
-        vec![WattHours(2400.0), WattHours(1920.0)]
+        statuses.iter().map(|p| p.capacity).collect::<Vec<_>>(),
+        vec![WattHours(2400.0), WattHours(2880.0)]
     );
+    assert_eq!(
+        statuses.iter().map(|p| p.model).collect::<Vec<_>>(),
+        vec![Some("AC2400+"), Some("AB3000L")]
+    );
+}
+
+/// Read off a live AC2400+ with an AB3000L attached, charging: every field the
+/// dashboard shows comes through under its own unit.
+#[test]
+fn a_pack_status_carries_what_the_pack_reported() {
+    let status = pack_status(&pack(
+        r#"{"sn":"GO2ALP1P1008296","packType":350,"socLevel":68,"state":1,"power":24,"maxTemp":2911}"#,
+    ));
+
+    assert_eq!(
+        status,
+        PackStatus {
+            model: Some("AB3000L"),
+            serial: Some("GO2ALP1P1008296".to_string()),
+            capacity: WattHours(2880.0),
+            soc: Some(Soc::new(68)),
+            power: Some(BatteryPower::from_flows(Watts::ZERO, Watts(24))),
+            temp: Some(DeciKelvin(2911)),
+        }
+    );
+}
+
+/// The pack reports `power` as a magnitude, so `state` is what says which
+/// way it flows: the same 144 W is a discharge in one state and a charge in
+/// the other.
+#[test]
+fn pack_state_gives_pack_power_its_direction() {
+    let power = |json| pack_power(&pack(json));
+
+    assert_eq!(
+        power(r#"{"state":2,"power":144}"#),
+        Some(BatteryPower::from_flows(Watts(144), Watts::ZERO))
+    );
+    assert_eq!(
+        power(r#"{"state":1,"power":144}"#),
+        Some(BatteryPower::from_flows(Watts::ZERO, Watts(144)))
+    );
+    assert_eq!(power(r#"{"state":0,"power":0}"#), Some(BatteryPower::ZERO));
+    assert_eq!(power(r#"{"power":144}"#), None);
 }
 
 /// The property `PollError` exists for: a response we failed to decode is
@@ -262,16 +310,16 @@ fn a_parse_failure_carries_the_raw_body() {
     assert!(err.error.contains("parse error"));
 }
 
-/// A report with no `packData` at all leaves `pack_capacities` as `None`
+/// A report with no `packData` at all leaves `packs` as `None`
 /// rather than `Some(vec![])` — the caller's cue to keep its last known
 /// set instead of publishing a capacity of zero.
 #[test]
-fn a_report_with_no_pack_data_reports_no_pack_capacities() {
+fn a_report_with_no_pack_data_reports_no_packs() {
     let report: ZendureReport = serde_json::from_str(r#"{"properties":{}}"#).unwrap();
 
     let reading = reading_from_report(&report, None, &AC2400_PLUS);
 
-    assert_eq!(reading.telemetry.pack_capacities, None);
+    assert_eq!(reading.telemetry.packs, None);
     assert!(reading.telemetry.pack_temps.is_empty());
 }
 
@@ -287,7 +335,7 @@ fn pack_data_matching_pack_num_reports_full_capacity() {
     let reading = reading_from_report(&report, None, &AC2400_PLUS);
 
     assert_eq!(
-        reading.telemetry.pack_capacities,
+        capacities(&reading),
         Some(vec![WattHours(2400.0), WattHours(1920.0)])
     );
 }
@@ -297,14 +345,14 @@ fn pack_data_matching_pack_num_reports_full_capacity() {
 /// no pack data so the caller keeps its last known capacity instead of
 /// publishing an undersized figure.
 #[test]
-fn pack_data_short_of_pack_num_reports_no_pack_capacities() {
+fn pack_data_short_of_pack_num_reports_no_packs() {
     let report: ZendureReport =
         serde_json::from_str(r#"{"properties":{"packNum":2},"packData":[{"packType":500}]}"#)
             .unwrap();
 
     let reading = reading_from_report(&report, None, &AC2400_PLUS);
 
-    assert_eq!(reading.telemetry.pack_capacities, None);
+    assert_eq!(reading.telemetry.packs, None);
 }
 
 /// When the device omits `packNum` entirely, `packData` is trusted as-is
@@ -316,10 +364,15 @@ fn pack_data_without_pack_num_is_trusted_as_is() {
 
     let reading = reading_from_report(&report, None, &AC2400_PLUS);
 
-    assert_eq!(
-        reading.telemetry.pack_capacities,
-        Some(vec![WattHours(2400.0)])
-    );
+    assert_eq!(capacities(&reading), Some(vec![WattHours(2400.0)]));
+}
+
+fn capacities(reading: &BatteryReading) -> Option<Vec<WattHours>> {
+    reading
+        .telemetry
+        .packs
+        .as_ref()
+        .map(|packs| packs.iter().map(|p| p.capacity).collect())
 }
 
 /// A failed write leaves what it attempted unknown rather than as it was. A

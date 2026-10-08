@@ -14,7 +14,8 @@ use tokio::time::{Duration, Instant};
 use crate::battery::BatteryState;
 use crate::command::Command;
 use crate::device::{
-    BatteryController, BatteryMonitor, BatteryReading, BatterySpec, BatteryTelemetry, PollError,
+    BatteryController, BatteryMonitor, BatteryReading, BatterySpec, BatteryTelemetry, PackStatus,
+    PollError,
 };
 use crate::sync::guard;
 use crate::units::{BatteryPower, Efficiency, Setpoint, Soc, WattHours, Watts};
@@ -391,17 +392,31 @@ impl BatteryMonitor for VirtualBattery {
 
 impl VirtualBattery {
     /// Builds the [`BatteryReading`] `prepare`/`poll` hand back, honest about
-    /// what a simulated pack doesn't have. `pack_capacities` is always
-    /// `Some` (this model never fails to report them, so `run.rs`'s "keep the last
-    /// known set" fallback never engages); no temperatures or `min_soc`, so both read
-    /// as the caller's defaults.
+    /// what a simulated pack doesn't have. `packs` is always `Some` (this model
+    /// never fails to report them, so `run.rs`'s "keep the last known set"
+    /// fallback never engages), but each carries only its capacity: the model
+    /// integrates one SOC and one flow for the whole box, so a per-pack figure
+    /// would be invented. No temperatures or `min_soc`, so both read as the
+    /// caller's defaults.
     fn reading_as_battery_reading(&self) -> BatteryReading {
         let state = self.reading();
         BatteryReading {
             telemetry: BatteryTelemetry {
                 charge: state.current_power.charging(),
                 discharge: state.current_power.discharging(),
-                pack_capacities: Some(self.packs.clone()),
+                packs: Some(
+                    self.packs
+                        .iter()
+                        .map(|&capacity| PackStatus {
+                            model: None,
+                            serial: None,
+                            capacity,
+                            soc: None,
+                            power: None,
+                            temp: None,
+                        })
+                        .collect(),
+                ),
                 pack_temps: Vec::new(),
                 enclosure_temp: None,
                 min_soc: None,

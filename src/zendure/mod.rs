@@ -11,11 +11,11 @@ use crate::battery::BatteryState;
 use crate::command::Command;
 use crate::device::{
     AC2400_PLUS, BatteryController, BatteryMonitor, BatteryReading, BatterySpec, BatteryTelemetry,
-    PollError, RawCapture,
+    PackStatus, PollError, RawCapture,
 };
 use crate::models::{PackData, StorageMode, ZendureReport, ZendureWriteRequest};
 use crate::scan::http_client;
-use crate::units::{DeciKelvin, PackTemperature, Soc, WattHours, Watts};
+use crate::units::{BatteryPower, DeciKelvin, PackTemperature, Soc, WattHours, Watts};
 use crate::world::DeviceId;
 
 mod ledger;
@@ -497,7 +497,7 @@ fn reading_from_report(
     let charge = Watts::from_device(report.properties.output_pack_power.unwrap_or(0));
     let discharge = Watts::from_device(report.properties.pack_input_power.unwrap_or(0));
 
-    let pack_capacities = complete_pack_capacities(&report.pack_data, report.properties.pack_num);
+    let packs = complete_packs(&report.pack_data, report.properties.pack_num);
 
     let pack_temps = report
         .pack_data
@@ -521,7 +521,7 @@ fn reading_from_report(
         telemetry: BatteryTelemetry {
             charge,
             discharge,
-            pack_capacities,
+            packs,
             pack_temps,
             enclosure_temp: report.properties.hyper_tmp.map(DeciKelvin),
             min_soc: report.properties.min_soc.map(Soc::from_tenths),
@@ -530,17 +530,29 @@ fn reading_from_report(
     }
 }
 
-/// Nominal capacity for a `pack_type` this build recognises, `None` for one it
-/// does not. Pure and total, so the table stays a table: what an unidentified
-/// pack costs is [`pack_capacity`]'s decision, and it says so out loud.
-fn known_pack_type_capacity(pack_type: u32) -> Option<WattHours> {
-    match pack_type {
+/// A pack type this build recognises: what to call it, and what it holds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PackModel {
+    name: &'static str,
+    capacity: WattHours,
+}
+
+/// The [`PackModel`] for a `pack_type` this build recognises, `None` for one
+/// it does not. Pure and total, so the table stays a table: what an
+/// unidentified pack costs is [`pack_capacity`]'s decision, and it says so out
+/// loud.
+fn known_pack_type(pack_type: u32) -> Option<PackModel> {
+    let (name, wh) = match pack_type {
         // AC2400 Plus's own built-in pack
-        500 => Some(WattHours(2400.0)),
-        // AB2000 / AB2000S
-        501 => Some(WattHours(1920.0)),
-        _ => None,
-    }
+        500 => ("AC2400+", 2400.0),
+        501 => ("AB2000", 1920.0),
+        350 => ("AB3000L", 2880.0),
+        _ => return None,
+    };
+    Some(PackModel {
+        name,
+        capacity: WattHours(wh),
+    })
 }
 
 /// What a pack this build cannot identify is assumed to hold: the smallest in
@@ -551,8 +563,8 @@ const UNIDENTIFIED_PACK_CAPACITY: WattHours = WattHours(1920.0);
 
 /// One pack's nominal capacity, naming anything this build cannot identify.
 ///
-/// An expansion pack newer than the table — an AB3000 holds 2880 Wh — is
-/// otherwise counted as [`UNIDENTIFIED_PACK_CAPACITY`], and a total that is
+/// An expansion pack newer than the table is otherwise counted as
+/// [`UNIDENTIFIED_PACK_CAPACITY`] — for a 2880 Wh pack, a total that is
 /// quietly ~1 kWh short reaches `RteTracker::usable_kwh`, the published
 /// capacity and the dashboard alike with nothing to say it was a guess.
 fn pack_capacity(pack: &PackData) -> WattHours {
@@ -560,10 +572,13 @@ fn pack_capacity(pack: &PackData) -> WattHours {
         report_unidentified_pack(None, pack.sn.as_deref());
         return UNIDENTIFIED_PACK_CAPACITY;
     };
-    known_pack_type_capacity(pack_type).unwrap_or_else(|| {
-        report_unidentified_pack(Some(pack_type), pack.sn.as_deref());
-        UNIDENTIFIED_PACK_CAPACITY
-    })
+    known_pack_type(pack_type).map_or_else(
+        || {
+            report_unidentified_pack(Some(pack_type), pack.sn.as_deref());
+            UNIDENTIFIED_PACK_CAPACITY
+        },
+        |model| model.capacity,
+    )
 }
 
 /// Warn once per distinct `pack_type`, not once per poll.
@@ -595,7 +610,7 @@ fn report_unidentified_pack(pack_type: Option<u32>, sn: Option<&str>) {
             pack_type,
             sn,
             assumed_wh,
-            "unrecognised packType; capacity is a guess — add it to known_pack_type_capacity"
+            "unrecognised packType; capacity is a guess — add it to known_pack_type"
         ),
         None => tracing::warn!(
             sn,
@@ -605,22 +620,48 @@ fn report_unidentified_pack(pack_type: Option<u32>, sn: Option<&str>) {
     }
 }
 
-/// Extract per-pack capacities from a report's `pack_data`.
-fn pack_capacities(packs: &[PackData]) -> Vec<WattHours> {
-    packs.iter().map(pack_capacity).collect()
+/// `PackData::state` values that say which way `power` flows. The pack
+/// reports `power` as a magnitude, so without these a charging and a
+/// discharging pack read the same.
+const PACK_CHARGING: u32 = 1;
+const PACK_DISCHARGING: u32 = 2;
+
+/// A pack's signed flow, `None` when its state says neither direction it
+/// could be flowing in is known.
+fn pack_power(pack: &PackData) -> Option<BatteryPower> {
+    let flow = Watts(pack.power?.saturating_abs());
+    match pack.state? {
+        PACK_CHARGING => Some(BatteryPower::from_flows(Watts::ZERO, flow)),
+        PACK_DISCHARGING => Some(BatteryPower::from_flows(flow, Watts::ZERO)),
+        _ => Some(BatteryPower::ZERO),
+    }
 }
 
-/// Sum pack capacities, but only once `packData` looks complete. `pack_num`
-/// is the device's own count of registered packs; a `packData` shorter than
-/// that is a pack that hasn't reported in yet, not the true total, so it's
-/// treated like `None` (the caller keeps its last known capacity) rather
-/// than being published as a smaller-than-real figure. Absent `pack_num`
-/// means the device didn't say how many packs to expect, so `packData` is
-/// trusted as-is.
-fn complete_pack_capacities(
+fn pack_status(pack: &PackData) -> PackStatus {
+    PackStatus {
+        model: pack
+            .pack_type
+            .and_then(known_pack_type)
+            .map(|model| model.name),
+        serial: pack.sn.clone(),
+        capacity: pack_capacity(pack),
+        soc: pack.soc_level.map(Soc::new),
+        power: pack_power(pack),
+        temp: pack.max_temp.map(DeciKelvin),
+    }
+}
+
+/// Every pack in a report's `pack_data`, but only once `packData` looks
+/// complete. `pack_num` is the device's own count of registered packs; a
+/// `packData` shorter than that is a pack that hasn't reported in yet, not
+/// the true set, so it's treated like `None` (the caller keeps its last known
+/// packs) rather than published as a smaller-than-real capacity or a list
+/// missing a pack. Absent `pack_num` means the device didn't say how many
+/// packs to expect, so `packData` is trusted as-is.
+fn complete_packs(
     pack_data: &Option<Vec<PackData>>,
     pack_num: Option<u32>,
-) -> Option<Vec<WattHours>> {
+) -> Option<Vec<PackStatus>> {
     let packs = pack_data.as_ref()?;
     if let Some(expected) = pack_num {
         match u32::try_from(packs.len()) {
@@ -634,5 +675,5 @@ fn complete_pack_capacities(
             Err(_) => return None,
         }
     }
-    Some(pack_capacities(packs))
+    Some(packs.iter().map(pack_status).collect())
 }
