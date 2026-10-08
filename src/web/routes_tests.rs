@@ -85,6 +85,19 @@ async fn an_htmx_request_gets_the_panel_without_a_page_around_it() {
 }
 
 #[tokio::test]
+async fn every_component_script_is_loaded_deferred_and_served() {
+    let (_, page) = get("/", false).await;
+    assert!(
+        page.contains(r#"<script src="/assets/energy-flows.js" defer></script>"#),
+        "the page must load the energy flows element"
+    );
+
+    let (status, script) = get("/assets/energy-flows.js", false).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(script.contains("customElements.define(\"energy-flows\""));
+}
+
+#[tokio::test]
 async fn a_plain_request_gets_a_full_page_with_a_way_home() {
     let (status, body) = get("/detail/battery", false).await;
     assert_eq!(status, StatusCode::OK);

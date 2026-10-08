@@ -3,6 +3,7 @@ use std::path::Path;
 fn main() {
     println!("cargo:rerun-if-changed=assets/scss");
     println!("cargo:rerun-if-changed=assets/vendor");
+    println!("cargo:rerun-if-changed=assets/js");
 
     let out_dir = std::env::var("OUT_DIR").expect("cargo sets OUT_DIR");
     let out_dir = Path::new(&out_dir);
@@ -17,6 +18,31 @@ fn main() {
         .expect("failed to write compiled dashboard.css to OUT_DIR");
 
     copy_vendored_scripts(out_dir);
+    copy_component_scripts(out_dir);
+}
+
+/// Our own custom elements, one file each. Copying every `assets/js/*.js`
+/// means a new element needs no wiring: it is served at `/assets/<name>.js`
+/// and `app_scripts.txt` (one name per line, sorted for a stable page) is
+/// what `layout::head` loads from, so it gets a `defer` tag too.
+fn copy_component_scripts(out_dir: &Path) {
+    let mut names = Vec::new();
+    let entries = std::fs::read_dir("assets/js").expect("failed to read assets/js");
+
+    for entry in entries {
+        let path = entry.expect("failed to read assets/js entry").path();
+        if path.extension().is_none_or(|ext| ext != "js") {
+            continue;
+        }
+        let name = path.file_name().expect("a file path has a name");
+        std::fs::copy(&path, out_dir.join(name))
+            .unwrap_or_else(|e| panic!("failed to copy {} to OUT_DIR: {e}", path.display()));
+        names.push(name.to_string_lossy().into_owned());
+    }
+
+    names.sort();
+    std::fs::write(out_dir.join("app_scripts.txt"), names.join("\n"))
+        .expect("failed to write app_scripts.txt to OUT_DIR");
 }
 
 /// Vendored so the dashboard works on a LAN with no internet: htmx 2.0.4 and

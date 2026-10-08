@@ -17,6 +17,9 @@ use super::components::{
 };
 use crate::web::view::{DashboardView, DetailView};
 
+/// The `assets/js/*.js` file names `build.rs` copied, one per line.
+const APP_SCRIPTS: &str = include_str!(concat!(env!("OUT_DIR"), "/app_scripts.txt"));
+
 fn head() -> Markup {
     html! {
     head {
@@ -28,6 +31,11 @@ fn head() -> Markup {
             link rel="stylesheet" href="/assets/dashboard.css";
             script src="/assets/htmx.min.js" {}
             script src="/assets/sse.js" {}
+            @for name in APP_SCRIPTS.lines() {
+                // `defer` so the elements upgrade after the markup is parsed,
+                // in the same order the vendored scripts above ran.
+                script src=(format!("/assets/{name}")) defer {}
+            }
         }
     }
 }
