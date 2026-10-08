@@ -151,8 +151,7 @@ pub struct BandView {
 
 /// One bucket, kept whether or not it has data so a hover can address every
 /// slot by index. The server renders no per-bucket markup: these are the
-/// strings a hover readout copies, so nothing on the page reads them yet.
-#[cfg_attr(not(test), allow(dead_code))]
+/// strings a hover readout copies.
 pub struct LinePointView {
     /// `13:15–13:30`.
     pub time: String,
@@ -177,7 +176,6 @@ pub struct LineChartView {
     /// The same runs, each closed down to the zero line.
     pub area_path: String,
     pub x_ticks: Vec<AxisTick>,
-    #[cfg_attr(not(test), allow(dead_code))]
     pub points: Vec<LinePointView>,
 }
 
@@ -343,6 +341,11 @@ fn time_range(slot: &IntervalSlot, tz: Tz) -> String {
 }
 
 impl LineChartView {
+    /// The readout a chart shows when nothing is hovered: the latest bucket.
+    pub fn default_value(&self) -> &str {
+        self.points.last().map_or("—", |p| p.value.as_str())
+    }
+
     /// `pick` chooses the series out of each slot's averages, so one call
     /// site names which quantity it charts.
     pub(crate) fn build<T: Charted>(

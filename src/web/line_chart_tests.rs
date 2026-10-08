@@ -167,3 +167,45 @@ fn the_narrow_time_axis_keeps_the_windows_start_middle_and_end() {
     );
     assert_eq!(chart.x_ticks.len(), 9, "three-hourly on a wide screen");
 }
+
+fn rendered(values: &[Option<f64>]) -> String {
+    crate::web::templates::line_chart::render(&solar_chart(values)).into_string()
+}
+
+fn attr(html: &str, name: &str) -> Vec<serde_json::Value> {
+    let start = html.find(&format!("{name}=\"")).expect(name) + name.len() + 2;
+    let end = start + html[start..].find('"').unwrap();
+    serde_json::from_str(&html[start..end].replace("&quot;", "\"")).unwrap()
+}
+
+#[test]
+fn the_hover_arrays_hold_one_entry_per_bucket() {
+    let html = rendered(&[Some(1420.0), None, Some(500.0)]);
+
+    assert_eq!(attr(&html, "data-times").len(), 3);
+    assert_eq!(attr(&html, "data-values").len(), 3);
+    let ys = attr(&html, "data-y");
+    assert_eq!(ys.len(), 3);
+    assert!(ys[1].is_null(), "a gap has no y");
+}
+
+#[test]
+fn a_gap_bucket_reads_as_a_dash_in_the_data() {
+    let html = rendered(&[Some(1420.0), None]);
+
+    assert_eq!(attr(&html, "data-values")[1], "—");
+}
+
+#[test]
+fn the_default_readout_is_the_latest_bucket_labelled_now() {
+    let html = rendered(&[Some(1420.0), Some(500.0)]);
+
+    assert!(
+        html.contains("<span class=\"line-chart__readout-time\">now</span>"),
+        "{html}"
+    );
+    assert!(
+        html.contains("<span class=\"line-chart__readout-value\">+0.50 kW</span>"),
+        "{html}"
+    );
+}

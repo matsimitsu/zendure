@@ -73,11 +73,65 @@
     min-width: 0;
   }
 
+  &__readout {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    font-family: var(--font-mono);
+  }
+
+  &__readout-time {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  &__readout-value {
+    font-size: var(--text-sm);
+    font-weight: var(--weight-semibold);
+    color: var(--color-text-primary);
+  }
+
+  // The dot is HTML, not SVG, so the stretched viewBox cannot squash it
+  // into an ellipse; it is placed by percentage over the canvas instead.
+  &__canvas {
+    position: relative;
+  }
+
   &__svg {
     display: block;
     width: 100%;
     height: var(--size-chart-sm);
     overflow: visible;
+    // Horizontal drags scrub the readout; vertical ones still scroll the modal.
+    touch-action: pan-y;
+  }
+
+  &__crosshair {
+    stroke: var(--color-crosshair);
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+    visibility: hidden;
+  }
+
+  &__dot {
+    position: absolute;
+    width: var(--size-chart-dot);
+    height: var(--size-chart-dot);
+    border-radius: 50%;
+    background: currentColor;
+    box-shadow: 0 0 0 2px var(--color-surface-raised);
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    visibility: hidden;
+  }
+
+  &--hover &__crosshair {
+    visibility: visible;
+  }
+
+  // A gap bucket has a crosshair but nothing to put a dot on.
+  &--hover:not(&--gap) &__dot {
+    visibility: visible;
   }
 
   // The plot is stretched to its box, so every stroke opts out of the
