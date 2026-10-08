@@ -20,7 +20,7 @@ use crate::units::{
 /// Solcast's own resolution (see `SolcastEntry`'s doc comment in
 /// `prediction/solcast.rs`) — the forecast panel's bars and
 /// [`ActualSolarHistory`]'s buckets both use this, so the two series share
-/// one axis. `forecast-panel__axis`'s column count has to match.
+/// one axis.
 pub(super) const SOLAR_BUCKETS_PER_DAY: usize = 48;
 
 /// One bucket's width: the half-hour [`SOLAR_BUCKETS_PER_DAY`] divides the

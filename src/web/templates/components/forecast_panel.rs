@@ -1,5 +1,6 @@
 use maud::{Markup, html};
 
+use crate::web::templates::axis;
 use crate::web::view::{FORECAST_CHART_BASELINE, FORECAST_CHART_WIDTH, ForecastPanelView};
 
 /// The predicted-vs-actual solar chart: bars for the forecast, a line for
@@ -30,12 +31,7 @@ pub fn render(view: &ForecastPanelView) -> Markup {
                     path class="forecast-panel__line" d=(view.line_path) fill="none" {}
                 }
 
-                div class="forecast-panel__axis" {
-                    div class="forecast-panel__axis-gutter" {}
-                    @for label in &view.hour_labels {
-                        div class="forecast-panel__axis-label" { (label) }
-                    }
-                }
+                (axis::render(&view.axis))
             } @else {
                 p class="forecast-panel__empty" { (view.as_of) }
             }

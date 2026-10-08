@@ -46,22 +46,6 @@
     margin-bottom: var(--space-3);
   }
 
-  &__axis {
-    display: grid;
-    // One column per bucket in `SOLAR_BUCKETS_PER_DAY`, plus the gutter.
-    grid-template-columns: 60px repeat(48, 1fr);
-    gap: 0 1px;
-    margin-bottom: var(--space-3);
-  }
-
-  &__axis-label {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    color: var(--color-text-faint);
-    text-align: center;
-    line-height: 1;
-  }
-
   &__bar {
     fill: var(--color-accent);
     opacity: 0.35;
@@ -71,13 +55,5 @@
     stroke: var(--color-accent);
     stroke-width: 2;
     stroke-linejoin: round;
-  }
-}
-
-@media (max-width: 860px) {
-  .forecast-panel {
-    &__axis {
-      grid-template-columns: 44px repeat(48, 1fr);
-    }
   }
 }

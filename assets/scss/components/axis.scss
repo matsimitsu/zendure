@@ -1,0 +1,37 @@
+// Percentage-placed tick labels. The parent sizes the track's width and any
+// space around it; the track itself is one label line tall.
+.axis {
+  position: relative;
+  // Absolutely placed ticks leave the track empty, so it needs a height.
+  height: var(--text-xs);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1;
+  color: var(--color-text-faint);
+
+  &__tick {
+    position: absolute;
+    top: 0;
+    white-space: nowrap;
+
+    &--start {
+      transform: translateX(0);
+    }
+
+    &--middle {
+      transform: translateX(-50%);
+    }
+
+    &--end {
+      transform: translateX(-100%);
+    }
+  }
+}
+
+// 860px is where the rest of the dashboard collapses. Only `always` ticks
+// stay, so neighbours cannot collide at 375px.
+@media (max-width: 860px) {
+  .axis__tick--wide-only {
+    display: none;
+  }
+}
