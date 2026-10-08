@@ -96,6 +96,60 @@ fn a_late_event_from_before_the_ring_cannot_clobber_its_slot() {
     );
 }
 
+#[test]
+fn the_ring_recovers_after_the_clock_steps_far_ahead_and_back() {
+    let mut history = ring();
+    history.record(&meter_event(into_interval(base(), 0), 100.0, 0.0));
+    // A step of more than the ring's span, then corrected.
+    history.record(&meter_event(into_interval(base().offset(500), 0), 5.0, 0.0));
+
+    // The first corrected event is indistinguishable from a late row.
+    history.record(&meter_event(into_interval(base().offset(1), 0), 7.0, 0.0));
+    assert_eq!(
+        history.averages(base().offset(1)),
+        IntervalAverages::default()
+    );
+
+    // The second says the clock has settled here.
+    history.record(&meter_event(into_interval(base().offset(2), 0), 8.0, 0.0));
+    history.record(&meter_event(into_interval(base().offset(3), 0), 9.0, 0.0));
+    assert_eq!(
+        history.averages(base().offset(2)).grid,
+        Some(GridPower(8.0))
+    );
+    assert_eq!(
+        history.averages(base().offset(3)).grid,
+        Some(GridPower(9.0))
+    );
+    assert_eq!(
+        history.averages(base().offset(500)),
+        IntervalAverages::default()
+    );
+}
+
+#[test]
+fn an_isolated_late_row_does_not_count_towards_a_rebase() {
+    let mut history = ring();
+    history.record(&meter_event(into_interval(base(), 0), 100.0, 0.0));
+    history.record(&meter_event(
+        into_interval(base().offset(-200), 0),
+        1.0,
+        0.0,
+    ));
+    history.record(&meter_event(into_interval(base().offset(1), 0), 2.0, 0.0));
+    history.record(&meter_event(
+        into_interval(base().offset(-200), 0),
+        3.0,
+        0.0,
+    ));
+
+    assert_eq!(history.averages(base()).grid, Some(GridPower(100.0)));
+    assert_eq!(
+        history.averages(base().offset(1)).grid,
+        Some(GridPower(2.0))
+    );
+}
+
 /// 2026-10-25 in Amsterdam runs 02:00–03:00 twice. Keyed on local time the two
 /// 02:15s would share a bucket; keyed on the absolute index they are an hour
 /// apart, and the 25-hour day fills all 100 slots.

@@ -226,6 +226,9 @@ pub struct IntervalHistory {
     world: World,
     packs: PackTrace,
     latest: Option<IntervalIndex>,
+    /// An interval seen once from beyond the window's back edge, not yet
+    /// believed. See [`bucket_mut`](Self::bucket_mut).
+    stale: Option<IntervalIndex>,
     ring: [Option<IntervalBucket>; INTERVAL_RING],
 }
 
@@ -236,6 +239,7 @@ impl IntervalHistory {
             world: World::new(),
             packs: PackTrace::default(),
             latest: None,
+            stale: None,
             ring: std::array::from_fn(|_| None),
         }
     }
@@ -297,13 +301,30 @@ impl IntervalHistory {
 
     /// The bucket for `index`, recycling its slot if an older interval held
     /// it. `None` for an interval that has already left the ring.
+    ///
+    /// `latest` only moves forward, so one event stamped far in the future
+    /// (a bad clock step) would leave every correct event behind the window
+    /// for good. A single event behind the window is indistinguishable from a
+    /// late journal row, so it is dropped; a second one that lands within the
+    /// window of the first is a clock that has settled there, and the ring
+    /// rebases onto it. The price is the one event dropped, and that two late
+    /// rows in a row from the same stretch of the past also rebase the ring.
     fn bucket_mut(&mut self, index: IntervalIndex) -> Option<&mut IntervalBucket> {
-        if self
-            .latest
-            .is_some_and(|latest| index < latest && !Self::within(latest, index))
-        {
-            return None;
+        match self.latest {
+            Some(latest) if index < latest && !Self::within(latest, index) => {
+                let confirmed = self
+                    .stale
+                    .is_some_and(|seen| Self::within(seen, index) || Self::within(index, seen));
+                if !confirmed {
+                    self.stale = Some(index);
+                    return None;
+                }
+                self.ring = std::array::from_fn(|_| None);
+                self.latest = None;
+            }
+            _ => {}
         }
+        self.stale = None;
         self.latest = self.latest.max(Some(index));
         let slot = &mut self.ring[index.slot()];
         if slot.as_ref().is_none_or(|bucket| bucket.index != index) {
