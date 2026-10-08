@@ -5,18 +5,21 @@
 //! past day read back from the journal, and the last two replay history the
 //! engine's world has already moved past.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 use std::time::Duration;
 
 use chrono::NaiveDate;
 use chrono_tz::Tz;
 
+use crate::device::PackStatus;
 use crate::event::Event;
-use crate::journal::read::read_events_in_range;
+use crate::journal::read::{read_events_in_range, read_raw_in_range};
 use crate::units::{BatteryPower, Elapsed, GridPower, Soc, SolarPower, Timestamp, Watts};
 use crate::world::{DeviceId, World};
+use crate::zendure::{POLL_CAPTURE, packs_in_capture};
 
+use super::pack_intervals::{PackInterval, PackIntervals, PackKey, PackTrace};
 use super::state::Plottable;
 
 /// A [`Plottable`] that can be rebuilt from a mean of its scalars, so an
@@ -161,6 +164,13 @@ pub struct IntervalSlot {
     pub averages: IntervalAverages,
 }
 
+/// One pack's figures for one interval, `None` where it reported nothing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PackSlot {
+    pub index: IntervalIndex,
+    pub figures: Option<PackInterval>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct IntervalBucket {
     index: IntervalIndex,
@@ -169,6 +179,7 @@ struct IntervalBucket {
     grid: Mean<GridPower>,
     battery: Mean<BatteryPower>,
     soc: Option<Soc>,
+    packs: PackIntervals,
 }
 
 impl IntervalBucket {
@@ -180,6 +191,7 @@ impl IntervalBucket {
             grid: Mean::default(),
             battery: Mean::default(),
             soc: None,
+            packs: BTreeMap::new(),
         }
     }
 
@@ -207,6 +219,7 @@ impl IntervalBucket {
 pub struct IntervalHistory {
     devices: BTreeSet<DeviceId>,
     world: World,
+    packs: PackTrace,
     latest: Option<IntervalIndex>,
     ring: [Option<IntervalBucket>; INTERVAL_RING],
 }
@@ -216,8 +229,24 @@ impl IntervalHistory {
         IntervalHistory {
             devices: devices.into_iter().collect(),
             world: World::new(),
+            packs: PackTrace::default(),
             latest: None,
             ring: std::array::from_fn(|_| None),
+        }
+    }
+
+    /// One poll's packs, as `device` reported them at `at`. Kept apart from
+    /// [`record`](Self::record) because an [`Event`] carries only the box's
+    /// totals, never its packs.
+    pub fn record_packs(&mut self, device: &DeviceId, at: Timestamp, packs: &[PackStatus]) {
+        if !self.devices.contains(device) {
+            return;
+        }
+        let samples = self.packs.observe(device, at, packs);
+        if let Some(bucket) = self.bucket_mut(IntervalIndex::containing(at)) {
+            for sample in samples {
+                sample.apply(bucket.packs.entry(sample.key().clone()).or_default());
+            }
         }
     }
 
@@ -285,12 +314,52 @@ impl IntervalHistory {
     /// Checks the window as well as the key: a slot nothing has overwritten
     /// can still hold an interval the ring has moved past.
     pub fn averages(&self, index: IntervalIndex) -> IntervalAverages {
+        self.bucket(index)
+            .map(IntervalBucket::averages)
+            .unwrap_or_default()
+    }
+
+    fn bucket(&self, index: IntervalIndex) -> Option<&IntervalBucket> {
         self.latest
             .filter(|&latest| Self::within(latest, index))
             .and_then(|_| self.ring[index.slot()].as_ref())
             .filter(|bucket| bucket.index == index)
-            .map(IntervalBucket::averages)
+    }
+
+    /// Every pack's figures for one interval.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn packs(&self, index: IntervalIndex) -> BTreeMap<PackKey, PackInterval> {
+        self.bucket(index)
+            .map(|bucket| bucket.packs.clone())
             .unwrap_or_default()
+    }
+
+    /// Each pack seen in the 24 hours [`last_24h`](Self::last_24h) covers,
+    /// with one slot per interval of that window. [`PackInterval::combined`]
+    /// over a pack's slots gives its figures for the whole day.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn packs_last_24h(&self, now: Timestamp) -> BTreeMap<PackKey, Vec<PackSlot>> {
+        let indices: Vec<IntervalIndex> = self.last_24h(now).iter().map(|s| s.index).collect();
+        let buckets: Vec<Option<&IntervalBucket>> =
+            indices.iter().map(|&index| self.bucket(index)).collect();
+        let keys: BTreeSet<&PackKey> = buckets
+            .iter()
+            .flatten()
+            .flat_map(|bucket| bucket.packs.keys())
+            .collect();
+        keys.into_iter()
+            .map(|key| {
+                let slots = indices
+                    .iter()
+                    .zip(&buckets)
+                    .map(|(&index, bucket)| PackSlot {
+                        index,
+                        figures: bucket.and_then(|b| b.packs.get(key).copied()),
+                    })
+                    .collect();
+                (key.clone(), slots)
+            })
+            .collect()
     }
 
     fn slots(&self, from: IntervalIndex, until: IntervalIndex) -> Vec<IntervalSlot> {
@@ -351,10 +420,10 @@ pub fn hourly(quarters: &[IntervalSlot]) -> Vec<IntervalSlot> {
         .collect()
 }
 
-/// Folds the journal's last ring's worth of events into a fresh
-/// [`IntervalHistory`] over `devices`, so a restart keeps the flows chart.
-/// Degrades to an empty history on a read failure, as `seed_decision_log`
-/// does.
+/// Folds the journal's last ring's worth of events and poll captures into a
+/// fresh [`IntervalHistory`] over `devices`, so a restart keeps the flows
+/// chart and the pack figures. Degrades to an empty history on a read
+/// failure, as `seed_decision_log` does.
 pub fn seed_interval_history(
     journal_path: &std::path::Path,
     now: Timestamp,
@@ -366,7 +435,26 @@ pub fn seed_interval_history(
         Ok(events) => events.iter().for_each(|event| history.record(event)),
         Err(e) => tracing::warn!("Dashboard: cannot seed interval history from journal: {e}"),
     }
+    // Packs are folded after the events rather than interleaved: no event
+    // reads them, so the order between the two streams changes nothing.
+    match read_raw_in_range(journal_path, POLL_CAPTURE, now - span, now) {
+        Ok(captures) => captures
+            .iter()
+            .for_each(|(at, body)| seed_packs(&mut history, *at, body)),
+        Err(e) => tracing::warn!("Dashboard: cannot seed pack history from journal: {e}"),
+    }
     history
+}
+
+fn seed_packs(history: &mut IntervalHistory, at: Timestamp, body: &str) {
+    match packs_in_capture(body) {
+        Ok(captured) => {
+            if let (Some(device), Some(packs)) = (captured.device, captured.packs) {
+                history.record_packs(&device, at, &packs);
+            }
+        }
+        Err(e) => tracing::debug!("Dashboard: skipped a poll capture that no longer parses: {e}"),
+    }
 }
 
 #[cfg(test)]

@@ -623,6 +623,35 @@ pub(crate) mod testing {
     pub(crate) async fn record(path: &Path, events: &[Event]) -> crate::config::SessionConfig {
         record_with(path, events, None).await
     }
+
+    /// Pre-parse captures as a sampler journals them, each restamped to the
+    /// instant given: [`Journal::raw`] stamps the wall clock, which a test
+    /// cannot place inside its own window.
+    pub(crate) async fn record_raw(path: &Path, captures: &[(Timestamp, &'static str, &str)]) {
+        let config = crate::config::SessionConfig::test_default();
+        let (j, writer) = Journal::open(path, days(3650), "0.0.0-test", &config);
+        let writer = writer.expect("journal opens in a temp dir");
+        for (_, kind, body) in captures {
+            j.raw(kind, body);
+        }
+        close(j, writer).await;
+
+        let conn = Connection::open(path).unwrap();
+        let ids: Vec<i64> = conn
+            .prepare("SELECT id FROM events ORDER BY seq DESC LIMIT ?1")
+            .unwrap()
+            .query_map([i64::try_from(captures.len()).unwrap()], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        for (id, (at, ..)) in ids.iter().rev().zip(captures) {
+            conn.execute(
+                "UPDATE events SET ts_ms = ?1 WHERE id = ?2",
+                [at.as_millis(), *id],
+            )
+            .unwrap();
+        }
+    }
 }
 
 /// Ages every row so `prune` can be exercised against a real date boundary

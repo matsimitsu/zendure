@@ -490,6 +490,31 @@ pub fn read_events_in_range(path: &Path, from: Timestamp, to: Timestamp) -> Resu
     Ok(events)
 }
 
+/// Every pre-parse capture of `kind` between two instants, oldest first, with
+/// the time it was written. Handed over unparsed: what the bytes mean is the
+/// adapter's business, and a body that no longer parses is the caller's to
+/// skip.
+pub fn read_raw_in_range(
+    path: &Path,
+    kind: &str,
+    from: Timestamp,
+    to: Timestamp,
+) -> Result<Vec<(Timestamp, String)>> {
+    let conn = open_for_reading(path)?;
+    let mut stmt = conn.prepare(
+        "SELECT ts_ms, payload_json FROM events \
+         WHERE kind = ?1 AND ts_ms >= ?2 AND ts_ms <= ?3 \
+         ORDER BY seq",
+    )?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![kind, from.as_millis(), to.as_millis()],
+            |row| Ok((Timestamp::from_millis(row.get(0)?), row.get(1)?)),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 #[cfg(test)]
 #[path = "read_tests.rs"]
 mod tests;

@@ -172,7 +172,10 @@ impl Tick<'_> {
 
             if let Some(tx) = self.dashboard {
                 let snapshot = engine.state();
-                tx.send_modify(|state| state.poll_tick(&snapshot, &event, figures, at.now));
+                let polled_packs = reading.telemetry.packs.as_deref();
+                tx.send_modify(|state| {
+                    state.poll_tick(&snapshot, &event, polled_packs, figures, at.now)
+                });
             }
         }
 

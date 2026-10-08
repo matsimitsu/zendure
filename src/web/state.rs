@@ -359,14 +359,20 @@ impl DashboardState {
     }
 
     /// A device poll: SOC, RTE and pack figures move here and nowhere else.
+    /// `polled_packs` is what this poll itself reported, not the sticky set
+    /// in `telemetry`, so a report without packs adds nothing to the history.
     pub fn poll_tick(
         &mut self,
         engine: &EngineState,
         event: &Event,
+        polled_packs: Option<&[PackStatus]>,
         telemetry: DashboardTelemetry,
         as_of: Timestamp,
     ) {
         self.intervals.record(event);
+        if let (Event::DeviceUpdate { at, id, .. }, Some(packs)) = (event, polled_packs) {
+            self.intervals.record_packs(id, at.now, packs);
+        }
         self.apply_telemetry(telemetry);
         self.refresh(engine, None, as_of);
     }

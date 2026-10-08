@@ -421,3 +421,18 @@ async fn a_failed_idle_forgets_both_limits() {
     let state = client.ledger.tracked_state();
     assert_eq!((state.input_limit, state.output_limit), (None, None));
 }
+
+/// A journalled body read back must report the packs the live poll of the
+/// same bytes did, including holding back an incomplete set.
+#[test]
+fn a_capture_read_back_reports_the_packs_its_poll_did() {
+    for body in [
+        r#"{"sn":"HEC1","properties":{"packNum":1},"packData":[{"sn":"P1","packType":500,"socLevel":40,"state":2,"power":300,"maxTemp":2990}]}"#,
+        r#"{"sn":"HEC1","properties":{"packNum":2},"packData":[{"packType":500}]}"#,
+    ] {
+        let captured = packs_in_capture(body).unwrap();
+        assert_eq!(captured.device, Some(DeviceId::new("HEC1")));
+        assert_eq!(captured.packs, polled_packs(body));
+    }
+    assert!(packs_in_capture(r#"{"electricLevel": 4"#).is_err());
+}

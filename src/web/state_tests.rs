@@ -92,7 +92,7 @@ fn poll_tick(
     as_of: Timestamp,
 ) {
     let event = journey::battery_event(as_of, BatteryPower::ZERO, Soc::new(50));
-    state.poll_tick(engine, &event, telemetry, as_of);
+    state.poll_tick(engine, &event, None, telemetry, as_of);
 }
 
 fn decision() -> ControlDecision {

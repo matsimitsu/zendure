@@ -5,6 +5,7 @@
 mod axis;
 mod detail;
 mod intervals;
+mod pack_intervals;
 mod routes;
 mod server;
 mod soc_bar;

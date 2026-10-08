@@ -365,7 +365,7 @@ impl ZendureClient {
     /// contradict it.
     fn parse_report(&self, body: String) -> Result<BatteryReading, PollError> {
         let raw = RawCapture {
-            kind: "zendure_poll",
+            kind: POLL_CAPTURE,
             body: body.clone(),
         };
         match serde_json::from_str::<ZendureReport>(&body) {
@@ -485,6 +485,35 @@ impl BatteryMonitor for ZendureClient {
         })?;
         self.parse_report(body)
     }
+}
+
+/// The kind a poll's raw body is journalled under.
+pub const POLL_CAPTURE: &str = "zendure_poll";
+
+/// A journalled poll body read back: which box sent it, and its packs as a
+/// live poll of the same body reported them.
+#[derive(Debug, PartialEq)]
+pub struct CapturedPacks {
+    pub device: Option<DeviceId>,
+    pub packs: Option<Vec<PackStatus>>,
+}
+
+pub fn packs_in_capture(body: &str) -> Result<CapturedPacks, serde_json::Error> {
+    let report: ZendureReport = serde_json::from_str(body)?;
+    Ok(CapturedPacks {
+        device: report.sn.map(DeviceId::new),
+        packs: complete_packs(&report.pack_data, report.properties.pack_num),
+    })
+}
+
+/// The packs a live poll of `body` reports, for checking a re-parsed capture
+/// against.
+#[cfg(test)]
+pub(crate) fn polled_packs(body: &str) -> Option<Vec<PackStatus>> {
+    let report: ZendureReport = serde_json::from_str(body).expect("a parsable report");
+    reading_from_report(&report, None, &AC2400_PLUS)
+        .telemetry
+        .packs
 }
 
 fn reading_from_report(

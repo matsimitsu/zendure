@@ -6,6 +6,8 @@ use super::*;
 use crate::battery::BatteryState;
 use crate::fixtures::journey::{self, battery_event, device_update, meter_event};
 use crate::fixtures::utc;
+use crate::units::{DeciKelvin, WattHours};
+use crate::web::pack_intervals::{Extent, PackId};
 use crate::world::DeviceId;
 
 fn at(secs: i64) -> Timestamp {
@@ -299,4 +301,192 @@ fn hourly_of_the_last_24h_lands_every_hour_on_the_hour() {
     assert_eq!(hours[0].index, slots[0].index.hour_start());
     assert_eq!(hours[hours.len() - 1].index, base().hour_start());
     assert!(hours.iter().all(|h| h.index == h.index.hour_start()));
+}
+
+// --- Packs -------------------------------------------------------------------
+
+/// A poll report as the device journals it: two packs, the first charging
+/// and the second discharging at `power`.
+fn poll_body(device: &str, soc: u32, power: i32, temp: u32) -> String {
+    format!(
+        r#"{{"sn":"{device}","properties":{{"packNum":2}},"packData":[
+            {{"sn":"P1","packType":500,"socLevel":{soc},"state":1,"power":{power},"maxTemp":{temp}}},
+            {{"sn":"P2","packType":501,"socLevel":{soc},"state":2,"power":{power},"maxTemp":{temp}}}
+        ]}}"#
+    )
+}
+
+fn pack(serial: &str) -> PackKey {
+    PackKey {
+        device: DeviceId::new(journey::BATTERY_ID),
+        pack: PackId::Serial(serial.to_string()),
+    }
+}
+
+fn polls() -> Vec<(Timestamp, String)> {
+    let poll = |at, soc, power, temp| (at, poll_body(journey::BATTERY_ID, soc, power, temp));
+    vec![
+        poll(into_interval(base(), 0), 50, 600, 2981),
+        poll(into_interval(base(), 60), 51, 600, 2991),
+        poll(into_interval(base(), 120), 52, 0, 2986),
+        poll(into_interval(base().offset(1), 0), 53, 300, 2990),
+    ]
+}
+
+fn rows(polls: &[(Timestamp, String)]) -> Vec<(Timestamp, &str)> {
+    polls
+        .iter()
+        .map(|(at, body)| (*at, body.as_str()))
+        .collect()
+}
+
+fn live_fold(polls: &[(Timestamp, String)]) -> IntervalHistory {
+    let mut history = ring();
+    for (at, body) in polls {
+        let packs = crate::zendure::polled_packs(body).expect("a complete pack list");
+        history.record_packs(&DeviceId::new(journey::BATTERY_ID), *at, &packs);
+    }
+    history
+}
+
+async fn journal_of(
+    dir: &tempfile::TempDir,
+    name: &str,
+    polls: &[(Timestamp, &str)],
+) -> std::path::PathBuf {
+    let path = dir.path().join(name);
+    let captures: Vec<(Timestamp, &'static str, &str)> = polls
+        .iter()
+        .map(|&(at, body)| (at, crate::zendure::POLL_CAPTURE, body))
+        .collect();
+    crate::journal::testing::record_raw(&path, &captures).await;
+    path
+}
+
+fn assert_energy(actual: WattHours, expected: f64) {
+    assert!(
+        (actual.get() - expected).abs() < 1e-9,
+        "{actual} Wh, expected {expected} Wh"
+    );
+}
+
+#[test]
+fn a_pack_ranges_over_its_levels_and_integrates_its_flow() {
+    let history = live_fold(&polls());
+    let first = history.packs(base());
+
+    let charging = first[&pack("P1")];
+    assert_eq!(
+        charging.soc,
+        Some(Extent {
+            min: Soc::new(50),
+            max: Soc::new(52)
+        })
+    );
+    assert_eq!(
+        charging.temp,
+        Some(Extent {
+            min: DeciKelvin(2981),
+            max: DeciKelvin(2991)
+        })
+    );
+    // 600 W for a minute, then a minute ramping down to nothing: 10 + 5 Wh.
+    assert_energy(charging.charged, 15.0);
+    assert_energy(charging.discharged, 0.0);
+
+    let discharging = first[&pack("P2")];
+    assert_energy(discharging.discharged, 15.0);
+    assert_energy(discharging.charged, 0.0);
+}
+
+#[test]
+fn a_gap_wider_than_an_interval_integrates_nothing() {
+    let mut history = ring();
+    let id = DeviceId::new(journey::BATTERY_ID);
+    let report = |soc| {
+        crate::zendure::polled_packs(&poll_body(journey::BATTERY_ID, soc, 600, 2981)).unwrap()
+    };
+    history.record_packs(&id, into_interval(base(), 0), &report(50));
+    history.record_packs(&id, into_interval(base().offset(2), 0), &report(51));
+
+    assert_energy(history.packs(base().offset(2))[&pack("P1")].charged, 0.0);
+}
+
+#[test]
+fn packs_last_24h_lines_up_with_the_flow_slots() {
+    let history = live_fold(&polls());
+    let now = into_interval(base().offset(1), 30);
+
+    let series = history.packs_last_24h(now);
+    let flows = history.last_24h(now);
+
+    assert_eq!(
+        series.keys().cloned().collect::<Vec<_>>(),
+        vec![pack("P1"), pack("P2")]
+    );
+    let p1 = &series[&pack("P1")];
+    assert_eq!(
+        p1.iter().map(|slot| slot.index).collect::<Vec<_>>(),
+        flows.iter().map(|slot| slot.index).collect::<Vec<_>>()
+    );
+    assert_eq!(p1[0].figures, None);
+
+    let day = PackInterval::combined(p1.iter().filter_map(|slot| slot.figures)).unwrap();
+    assert_eq!(
+        day.soc,
+        Some(Extent {
+            min: Soc::new(50),
+            max: Soc::new(53)
+        })
+    );
+    // Then 0 W rising to 300 W over the 13 minutes into the next interval.
+    assert_energy(day.charged, 15.0 + 150.0 * 13.0 / 60.0);
+}
+
+/// A restart must show the pack figures the process it replaced was showing.
+#[tokio::test]
+async fn the_seed_from_poll_captures_equals_the_live_fold() {
+    let dir = tempfile::tempdir().unwrap();
+    let polls = polls();
+    let path = journal_of(&dir, "journal.db", &rows(&polls)).await;
+
+    let seeded = seed_interval_history(&path, at(10_000), configured());
+
+    assert_ne!(seeded, ring());
+    assert_eq!(seeded, live_fold(&polls));
+}
+
+#[tokio::test]
+async fn a_capture_that_no_longer_parses_is_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let polls = polls();
+    let mut broken = rows(&polls);
+    broken.insert(1, (into_interval(base(), 30), r#"{"electricLevel": 4"#));
+    broken.insert(2, (into_interval(base(), 40), r#"{"sn":7}"#));
+
+    let clean = journal_of(&dir, "clean.db", &rows(&polls)).await;
+    let broken = journal_of(&dir, "broken.db", &broken).await;
+
+    assert_eq!(
+        seed_interval_history(&broken, at(10_000), configured()),
+        seed_interval_history(&clean, at(10_000), configured()),
+    );
+}
+
+#[tokio::test]
+async fn a_capture_from_a_battery_that_is_not_configured_is_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let polls = polls();
+    let foreign = poll_body("retired-battery", 5, 900, 3100);
+    let mut mixed = rows(&polls);
+    mixed.insert(1, (into_interval(base(), 30), foreign.as_str()));
+
+    let clean = journal_of(&dir, "clean.db", &rows(&polls)).await;
+    let mixed = journal_of(&dir, "mixed.db", &mixed).await;
+
+    let seeded = seed_interval_history(&mixed, at(10_000), configured());
+    assert_eq!(
+        seeded,
+        seed_interval_history(&clean, at(10_000), configured())
+    );
 }
