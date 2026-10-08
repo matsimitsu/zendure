@@ -150,10 +150,19 @@ pub struct PageHeaderView {
     pub last_updated: String,
 }
 
+/// The stat row, by name rather than position: each card is its own live
+/// fragment, so the stream has to reach one card without counting to it.
+pub struct StatCardsView {
+    pub solar: StatCardView,
+    pub home: StatCardView,
+    pub grid: StatCardView,
+    pub ev: StatCardView,
+}
+
 pub struct DashboardView {
     pub top_bar: TopBarView,
     pub page_header: PageHeaderView,
-    pub stat_cards: [StatCardView; 4],
+    pub stat_cards: StatCardsView,
     pub battery: Option<BatteryPanelView>,
     pub decision_log: Vec<DecisionLogRowView>,
     pub forecast: ForecastPanelView,
@@ -612,12 +621,12 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
                 format_time(state.as_of, timezone)
             ),
         },
-        stat_cards: [
+        stat_cards: StatCardsView {
             solar,
             home,
             grid,
-            ev_stat_card_view(state.car_soc, state.as_of, timezone),
-        ],
+            ev: ev_stat_card_view(state.car_soc, state.as_of, timezone),
+        },
         battery,
         decision_log,
         forecast: forecast_panel_view(&state.forecast, &state.actual_solar, state.as_of, timezone),

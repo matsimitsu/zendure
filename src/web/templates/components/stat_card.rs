@@ -2,24 +2,27 @@ use maud::{Markup, html};
 
 use crate::web::view::StatCardView;
 
-pub fn render(view: &StatCardView) -> Markup {
+/// The card's shell, rendered once with the page. Only the `__live` wrapper
+/// inside it is an `sse-swap` region: were the link itself swapped each tick,
+/// a click spanning a swap would land on the row instead, and a focused card
+/// would drop focus to `body`.
+pub fn render(view: &StatCardView, swap: &str) -> Markup {
     let class = format!("stat-card stat-card--{}", view.variant);
     html! {
         @if let Some(entity) = view.detail_entity {
-            // The `hx-get` lives in the re-rendered markup: every SSE tick
-            // swaps this in and htmx processes it afresh.
             a class=(format!("{class} stat-card--link")) href=(entity.path()) hx-get=(entity.path()) hx-target="#detail-modal .modal__panel" {
-                (contents(view))
+                div class="stat-card__live" sse-swap=(swap) { (contents(view)) }
             }
         } @else {
             div class=(class) {
-                (contents(view))
+                div class="stat-card__live" sse-swap=(swap) { (contents(view)) }
             }
         }
     }
 }
 
-fn contents(view: &StatCardView) -> Markup {
+/// What a tick replaces: everything inside the card but the card.
+pub fn contents(view: &StatCardView) -> Markup {
     html! {
         div class="stat-card__head" {
             div class="stat-card__icon" { (view.glyph) }

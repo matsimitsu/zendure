@@ -27,10 +27,10 @@
     color: var(--color-text-muted);
   }
 
-  &--empty {
-    align-items: center;
-    justify-content: center;
-    min-height: 160px;
+  // The swap target, invisible to layout so the panel's flex column still
+  // spaces the contents as if they were its own children.
+  &__live {
+    display: contents;
   }
 
   &__head {
@@ -103,7 +103,13 @@
     gap: var(--space-4);
   }
 
+  // Centred by itself rather than by a panel modifier: the panel is the
+  // persistent shell, so its classes cannot follow whether data has arrived.
   &__empty-message {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 160px;
     font-size: var(--text-base);
     color: var(--color-text-muted);
     text-align: center;

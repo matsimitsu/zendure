@@ -53,12 +53,15 @@ pub fn page(view: &DashboardView) -> Markup {
                     div id="page-header" sse-swap="page-header" {
                         (page_header_inner(view))
                     }
-                    div id="stat-cards" class="stat-row" sse-swap="stat-cards" {
-                        (stat_cards_inner(view))
+                    // Not swapped as a row: each card's link stays put and
+                    // only its contents are live (see `stat_card::render`).
+                    div id="stat-cards" class="stat-row" {
+                        (stat_card::render(&view.stat_cards.solar, "stat-card-solar"))
+                        (stat_card::render(&view.stat_cards.home, "stat-card-home"))
+                        (stat_card::render(&view.stat_cards.grid, "stat-card-grid"))
+                        (stat_card::render(&view.stat_cards.ev, "stat-card-ev"))
                     }
-                    div id="battery-panel" sse-swap="battery-panel" {
-                        (battery_panel_inner(view))
-                    }
+                    (battery_panel::render(view.battery.as_ref(), "battery-panel"))
                     energy-flows id="energy-flows" class="energy-flows" sse-swap="energy-flows" {
                         (energy_flows_inner(view))
                     }
@@ -88,25 +91,34 @@ pub fn page_header_inner(view: &DashboardView) -> Markup {
     page_header::render(&view.page_header)
 }
 
-/// The stat card row's contents — what the `stat-cards` SSE event's payload
-/// must match, since it replaces exactly this.
-pub fn stat_cards_inner(view: &DashboardView) -> Markup {
-    html! {
-        @for card in &view.stat_cards {
-            (stat_card::render(card))
-        }
-    }
+/// The solar card's contents — what the `stat-card-solar` SSE event's
+/// payload must match.
+pub fn solar_card_inner(view: &DashboardView) -> Markup {
+    stat_card::contents(&view.stat_cards.solar)
+}
+
+/// The home card's contents — what the `stat-card-home` SSE event's payload
+/// must match.
+pub fn home_card_inner(view: &DashboardView) -> Markup {
+    stat_card::contents(&view.stat_cards.home)
+}
+
+/// The grid card's contents — what the `stat-card-grid` SSE event's payload
+/// must match.
+pub fn grid_card_inner(view: &DashboardView) -> Markup {
+    stat_card::contents(&view.stat_cards.grid)
+}
+
+/// The car card's contents — what the `stat-card-ev` SSE event's payload
+/// must match.
+pub fn ev_card_inner(view: &DashboardView) -> Markup {
+    stat_card::contents(&view.stat_cards.ev)
 }
 
 /// The battery panel's contents — what the `battery-panel` SSE event's
 /// payload must match.
 pub fn battery_panel_inner(view: &DashboardView) -> Markup {
-    html! {
-        @match &view.battery {
-            Some(battery) => (battery_panel::render(battery)),
-            None => (battery_panel::empty()),
-        }
-    }
+    battery_panel::contents(view.battery.as_ref())
 }
 
 /// The flows chart's contents. Its `<energy-flows>` host is the swap target

@@ -22,6 +22,12 @@
     }
   }
 
+  // The swap target, invisible to layout so the card's flex column still
+  // spaces the contents as if they were its own children.
+  &__live {
+    display: contents;
+  }
+
   &__head {
     display: flex;
     align-items: center;

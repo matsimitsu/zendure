@@ -455,7 +455,7 @@ fn a_flat_sparkline_does_not_divide_by_a_zero_range() {
 #[test]
 fn the_grid_card_names_the_direction_its_sign_means() {
     let importing = dashboard_view(&state(vec![]), tz());
-    assert_eq!(importing.stat_cards[2].detail, "Importing from grid");
+    assert_eq!(importing.stat_cards.grid.detail, "Importing from grid");
 
     let mut exporting_state = state(vec![]);
     exporting_state.engine.world.observe_meter(
@@ -464,7 +464,7 @@ fn the_grid_card_names_the_direction_its_sign_means() {
         SolarPower::ZERO,
     );
     let exporting = dashboard_view(&exporting_state, tz());
-    assert_eq!(exporting.stat_cards[2].detail, "Exporting to grid");
+    assert_eq!(exporting.stat_cards.grid.detail, "Exporting to grid");
 }
 
 /// A fraction of a watt is not an export worth a minus sign in front of a zero.
@@ -477,7 +477,7 @@ fn a_sub_watt_grid_reading_reads_as_zero_without_a_sign() {
         SolarPower::ZERO,
     );
 
-    assert_eq!(dashboard_view(&drifting, tz()).stat_cards[2].value, "0");
+    assert_eq!(dashboard_view(&drifting, tz()).stat_cards.grid.value, "0");
 }
 
 // --- Forecast panel ----------------------------------------------------------
@@ -578,8 +578,8 @@ fn the_home_card_reports_the_houses_own_draw() {
     );
     let view = dashboard_view(&discharging, tz());
 
-    assert_eq!(view.stat_cards[1].label, "Home usage");
-    assert_eq!(view.stat_cards[1].value, "1,750");
+    assert_eq!(view.stat_cards.home.label, "Home usage");
+    assert_eq!(view.stat_cards.home.value, "1,750");
 }
 
 /// No `[car_battery]` configured and no poll yet look identical from the
@@ -589,9 +589,9 @@ fn the_ev_card_placeholders_with_no_reading_yet() {
     let s = state(vec![]);
     let view = dashboard_view(&s, tz());
 
-    assert_eq!(view.stat_cards[3].variant, "ev");
-    assert_eq!(view.stat_cards[3].value, "--");
-    assert_eq!(view.stat_cards[3].detail, "No vehicle configured");
+    assert_eq!(view.stat_cards.ev.variant, "ev");
+    assert_eq!(view.stat_cards.ev.value, "--");
+    assert_eq!(view.stat_cards.ev.detail, "No vehicle configured");
 }
 
 /// Once the car-battery poller has landed a reading, the card shows the
@@ -602,11 +602,11 @@ fn the_ev_card_reports_the_last_polled_soc() {
     s.car_soc_tick(crate::units::Soc::new(62), at(300));
     let view = dashboard_view(&s, tz());
 
-    assert_eq!(view.stat_cards[3].value, "62");
+    assert_eq!(view.stat_cards.ev.value, "62");
     assert!(
-        view.stat_cards[3].detail.starts_with("Updated "),
+        view.stat_cards.ev.detail.starts_with("Updated "),
         "detail was {:?}",
-        view.stat_cards[3].detail
+        view.stat_cards.ev.detail
     );
 }
 
@@ -732,18 +732,117 @@ fn the_detail_dialog_sits_outside_every_swap_region() {
 #[test]
 fn every_card_but_the_car_opens_its_detail() {
     let view = dashboard_view(&state(vec![]), tz());
-    let html = layout::stat_cards_inner(&view).into_string();
+    let html = layout::page(&view).into_string();
 
-    for slug in ["solar", "home", "grid"] {
-        assert!(
-            html.contains(&format!("hx-get=\"/detail/{slug}\"")),
+    for slug in ["solar", "home", "grid", "battery"] {
+        assert_eq!(
+            html.matches(&format!("hx-get=\"/detail/{slug}\"")).count(),
+            1,
             "{slug}"
         );
     }
-    assert_eq!(html.matches("hx-get=").count(), 3);
-    assert!(
-        layout::battery_panel_inner(&view)
-            .into_string()
-            .contains("hx-get=\"/detail/battery\"")
-    );
+    assert_eq!(html.matches("hx-get=").count(), 4);
+}
+
+/// The `(start, end)` byte span of every element carrying `sse-swap`, from its
+/// opening tag to its closing one. Nesting is counted per tag name, which is
+/// enough for maud's output: it never leaves a non-void element unclosed.
+fn swap_regions(html: &str) -> Vec<(usize, usize)> {
+    html.match_indices("sse-swap=\"")
+        .map(|(at, _)| {
+            let start = html[..at].rfind('<').expect("an attribute sits in a tag");
+            let tag: String = html[start + 1..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            let (open, close) = (format!("<{tag}"), format!("</{tag}>"));
+            let mut depth = 0;
+            let mut cursor = start;
+            loop {
+                let next_open = html[cursor + 1..].find(&open).map(|i| i + cursor + 1);
+                let next_close = html[cursor..]
+                    .find(&close)
+                    .map(|i| i + cursor)
+                    .expect("closed");
+                match next_open {
+                    Some(o) if o < next_close => {
+                        depth += 1;
+                        cursor = o;
+                    }
+                    _ if depth > 0 => {
+                        depth -= 1;
+                        cursor = next_close + 1;
+                    }
+                    _ => return (start, next_close + close.len()),
+                }
+            }
+        })
+        .collect()
+}
+
+/// A tick replaces everything inside an `sse-swap` element. A card link in
+/// there would be destroyed between a mousedown and its mouseup, losing the
+/// click, and would take keyboard focus down with it.
+#[test]
+fn card_links_persist_across_ticks() {
+    let view = dashboard_view(&state(vec![]), tz());
+    let html = layout::page(&view).into_string();
+    let regions = swap_regions(&html);
+    assert_eq!(regions.len(), FRAGMENTS.len());
+
+    let links: Vec<usize> = html
+        .match_indices("hx-get=\"/detail/")
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(links.len(), 4);
+    for link in links {
+        assert!(
+            regions
+                .iter()
+                .all(|&(start, end)| !(start..end).contains(&link)),
+            "a card link sits inside a swap region: {}",
+            &html[link..link + 30]
+        );
+    }
+}
+
+/// The stat cards and the battery panel are live through their contents, one
+/// fragment each, so a reading still reaches them without replacing the link.
+#[test]
+fn each_card_is_live_inside_its_shell() {
+    let view = dashboard_view(&state(vec![]), tz());
+    let html = layout::page(&view).into_string();
+
+    for (shell, swap) in [
+        (
+            "stat-card stat-card--solar stat-card--link",
+            "stat-card-solar",
+        ),
+        (
+            "stat-card stat-card--home stat-card--link",
+            "stat-card-home",
+        ),
+        (
+            "stat-card stat-card--grid stat-card--link",
+            "stat-card-grid",
+        ),
+        ("stat-card stat-card--ev", "stat-card-ev"),
+        ("battery-panel battery-panel--link", "battery-panel"),
+    ] {
+        assert!(
+            FRAGMENTS.iter().any(|(name, _)| *name == swap),
+            "{swap} is not a fragment"
+        );
+        let opened = html
+            .find(&format!("class=\"{shell}\""))
+            .unwrap_or_else(|| panic!("no {shell} shell"));
+        let live = html
+            .find(&format!("sse-swap=\"{swap}\""))
+            .unwrap_or_else(|| panic!("no {swap} region"));
+        assert!(opened < live, "{swap} is not inside its shell");
+        assert!(
+            !html[opened..live].contains("sse-swap="),
+            "{swap} is not the shell's own region"
+        );
+    }
 }
