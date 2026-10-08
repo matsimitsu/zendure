@@ -444,8 +444,16 @@ fn actual_solar_history_buckets_by_half_hour_and_averages() {
     history.record(utc(1, 7, 0), tz(), 100, SolarPower::new(500.0));
 
     let averages = history.averages();
-    assert_eq!(averages[12], Some(1500.0), "06:00-06:30 is bucket 12");
-    assert_eq!(averages[14], Some(500.0), "07:00-07:30 is bucket 14");
+    assert_eq!(
+        averages[12],
+        Some(SolarPower::new(1500.0)),
+        "06:00-06:30 is bucket 12"
+    );
+    assert_eq!(
+        averages[14],
+        Some(SolarPower::new(500.0)),
+        "07:00-07:30 is bucket 14"
+    );
     assert_eq!(
         averages[16], None,
         "a slot with no samples reads as unknown, not zero"
@@ -462,7 +470,7 @@ fn actual_solar_history_resets_on_a_new_day() {
 
     assert_eq!(
         history.averages()[20],
-        Some(1000.0),
+        Some(SolarPower::new(1000.0)),
         "yesterday's sample must not survive the rollover"
     );
 }
@@ -483,7 +491,44 @@ fn a_meter_tick_records_into_the_actual_solar_history() {
         tz(),
     );
 
-    assert_eq!(state.actual_solar.averages()[28], Some(3000.0));
+    assert_eq!(
+        state.actual_solar.averages()[28],
+        Some(SolarPower::new(3000.0))
+    );
+}
+
+/// A restart mid-day shows the line the process it replaced was showing,
+/// and nothing from before midnight.
+#[tokio::test]
+async fn the_actual_solar_seed_equals_todays_live_fold() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("journal.db");
+    let yesterday = journey::meter_event(utc(1, 23, 0), 0.0, 4000.0);
+    let today = [
+        journey::meter_event(utc(2, 6, 0), 0.0, 1000.0),
+        journey::meter_event(utc(2, 6, 10), 0.0, 2000.0),
+        journey::meter_event(utc(2, 7, 0), 0.0, 500.0),
+    ];
+    let events: Vec<Event> = std::iter::once(yesterday).chain(today.clone()).collect();
+    crate::journal::testing::record(&path, &events).await;
+
+    let mut live = ActualSolarHistory::default();
+    for event in &today {
+        if let Event::Meter { at, solar, .. } = event {
+            live.record(at.now, tz(), at.day_ordinal, *solar);
+        }
+    }
+    let seeded = seed_actual_solar(&path, utc(2, 8, 0), tz());
+
+    assert_eq!(seeded.averages(), live.averages());
+    assert_eq!(seeded.averages()[46], None, "yesterday's 23:00 stays out");
+}
+
+#[test]
+fn an_unreadable_journal_seeds_an_empty_actual_solar_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let seeded = seed_actual_solar(&dir.path().join("missing.db"), utc(2, 8, 0), tz());
+    assert!(seeded.averages().iter().all(Option::is_none));
 }
 
 // --- Forecast tick ----------------------------------------------------------

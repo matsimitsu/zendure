@@ -22,7 +22,7 @@ use crate::world::{DeviceId, World};
 use crate::zendure::{POLL_CAPTURE, packs_in_capture};
 
 use super::pack_intervals::{PackInterval, PackIntervals, PackKey, PackTrace};
-use super::state::Plottable;
+use super::state::{Plottable, seed_from};
 
 /// A [`Plottable`] that can be rebuilt from a mean of its scalars, so an
 /// average stays the role it was taken over (`RUST-2`).
@@ -478,8 +478,7 @@ pub fn history_of_day(
 
 /// Folds the journal's last ring's worth of events and poll captures into a
 /// fresh [`IntervalHistory`] over `devices`, so a restart keeps the flows
-/// chart and the pack figures. Degrades to an empty history on a read
-/// failure, as `seed_decision_log` does.
+/// chart and the pack figures.
 pub fn seed_interval_history(
     journal_path: &std::path::Path,
     now: Timestamp,
@@ -487,18 +486,18 @@ pub fn seed_interval_history(
 ) -> IntervalHistory {
     let mut history = IntervalHistory::new(devices);
     let span = Elapsed::of(INTERVAL * INTERVAL_RING as u32);
-    match read_events_in_range(journal_path, now - span, now) {
-        Ok(events) => events.iter().for_each(|event| history.record(event)),
-        Err(e) => tracing::warn!("Dashboard: cannot seed interval history from journal: {e}"),
-    }
+    seed_from(
+        read_events_in_range(journal_path, now - span, now),
+        "interval history",
+        |event| history.record(&event),
+    );
     // Packs are folded after the events rather than interleaved: no event
     // reads them, so the order between the two streams changes nothing.
-    match read_raw_in_range(journal_path, POLL_CAPTURE, now - span, now) {
-        Ok(captures) => captures
-            .iter()
-            .for_each(|(at, body)| seed_packs(&mut history, *at, body)),
-        Err(e) => tracing::warn!("Dashboard: cannot seed pack history from journal: {e}"),
-    }
+    seed_from(
+        read_raw_in_range(journal_path, POLL_CAPTURE, now - span, now),
+        "pack history",
+        |(at, body)| seed_packs(&mut history, at, &body),
+    );
     history
 }
 

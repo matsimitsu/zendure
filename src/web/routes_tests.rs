@@ -6,7 +6,7 @@ use crate::fixtures::journey;
 use crate::units::{BatteryPower, GridPower, SolarPower, Timestamp};
 use crate::web::past_days::PastDays;
 use crate::web::state::DashboardState;
-use crate::web::{ActualSolarHistory, intervals::IntervalHistory};
+use crate::web::{intervals::IntervalHistory, state::ActualSolarHistory};
 use crate::world::{DeviceId, Measurement, MeterReading, World};
 
 fn app_state() -> AppState {

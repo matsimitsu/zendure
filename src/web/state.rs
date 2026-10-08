@@ -4,6 +4,7 @@
 //! coordinator loop folds and broadcast to every connected browser tab.
 
 use std::collections::VecDeque;
+use std::path::Path;
 
 use chrono_tz::Tz;
 
@@ -13,7 +14,7 @@ use crate::controller::SocLimits;
 use crate::device::PackStatus;
 use crate::engine::EngineState;
 use crate::event::Event;
-use crate::journal::read::read_recent_decisions;
+use crate::journal::read::{ReadError, read_events_in_range, read_recent_decisions};
 use crate::models::ControlDecision;
 use crate::rte;
 use crate::units::{
@@ -21,7 +22,7 @@ use crate::units::{
     Timestamp, Watts,
 };
 
-use super::intervals::IntervalHistory;
+use super::intervals::{IntervalHistory, Mean};
 
 /// Solcast's own resolution (see `SolcastEntry`'s doc comment in
 /// `prediction/solcast.rs`) — the forecast panel's bars and
@@ -166,18 +167,14 @@ pub struct DashboardTelemetry {
 #[derive(Debug, Clone)]
 pub struct ActualSolarHistory {
     day_ordinal: Option<u32>,
-    sum_by_bucket: [f64; SOLAR_BUCKETS_PER_DAY],
-    count_by_bucket: [u32; SOLAR_BUCKETS_PER_DAY],
+    buckets: [Mean<SolarPower>; SOLAR_BUCKETS_PER_DAY],
 }
 
-// `#[derive(Default)]` only covers arrays up to length 32 (a pre-const-generics
-// limitation std still carries), and `SOLAR_BUCKETS_PER_DAY` is 48.
 impl Default for ActualSolarHistory {
     fn default() -> Self {
         ActualSolarHistory {
             day_ordinal: None,
-            sum_by_bucket: [0.0; SOLAR_BUCKETS_PER_DAY],
-            count_by_bucket: [0; SOLAR_BUCKETS_PER_DAY],
+            buckets: std::array::from_fn(|_| Mean::default()),
         }
     }
 }
@@ -197,20 +194,17 @@ impl ActualSolarHistory {
             };
         }
         let today_start = crate::clock::local_midnight(now, timezone);
-        let elapsed_ms = (now - today_start).as_millis().max(0);
-        let bucket = ((elapsed_ms / SOLAR_BUCKET_MS) as usize).min(SOLAR_BUCKETS_PER_DAY - 1);
-        self.sum_by_bucket[bucket] += solar.get();
-        self.count_by_bucket[bucket] += 1;
+        let bucket = usize::try_from((now - today_start).as_millis() / SOLAR_BUCKET_MS)
+            .unwrap_or(0)
+            .min(SOLAR_BUCKETS_PER_DAY - 1);
+        self.buckets[bucket].add(solar);
     }
 
-    /// One average watts figure per local half-hour, `None` where nothing has
-    /// been recorded yet today (every slot from now on, and any slot lost to
+    /// One average per local half-hour, `None` where nothing has been
+    /// recorded yet today (every slot from now on, and any slot lost to
     /// downtime before this process's first meter tick or its startup seed).
-    pub fn averages(&self) -> [Option<f64>; SOLAR_BUCKETS_PER_DAY] {
-        std::array::from_fn(|h| {
-            (self.count_by_bucket[h] > 0)
-                .then(|| self.sum_by_bucket[h] / f64::from(self.count_by_bucket[h]))
-        })
+    pub fn averages(&self) -> [Option<SolarPower>; SOLAR_BUCKETS_PER_DAY] {
+        std::array::from_fn(|h| self.buckets[h].get())
     }
 }
 
@@ -277,7 +271,7 @@ impl DashboardState {
     /// folded through [`record_decision`](Self::record_decision), so a page
     /// load and a long-running process show the same runs. `actual_solar` is
     /// likewise seeded from the journal (see
-    /// `crate::journal::read::read_meter_solar_since`) so a restart doesn't
+    /// [`seed_actual_solar`]) so a restart doesn't
     /// blank today's actual-production line, and `intervals` so it doesn't
     /// blank the flows chart.
     pub fn seed(
@@ -455,18 +449,47 @@ impl DashboardState {
     }
 }
 
-/// Seed a fresh channel value's decision log from the journal — called once,
-/// at startup, from `run()`. Read failures degrade to an empty log rather
-/// than failing startup, the same "a logging concern must never become a
-/// control failure" rule the journal itself follows.
-pub fn seed_decision_log(journal_path: &std::path::Path) -> Vec<(Timestamp, ControlDecision)> {
-    match read_recent_decisions(journal_path, DECISION_LOG_CAPACITY) {
-        Ok(rows) => rows.into_iter().map(|row| (row.at, row.decision)).collect(),
-        Err(e) => {
-            tracing::warn!("Dashboard: cannot seed decision log from journal: {e}");
-            Vec::new()
-        }
+/// Folds whatever the journal read into a history being seeded. A failed
+/// read leaves the history as it was, with a warning: a dashboard short of
+/// its history must never become a startup failure.
+pub(super) fn seed_from<T>(read: Result<Vec<T>, ReadError>, what: &str, fold: impl FnMut(T)) {
+    match read {
+        Ok(rows) => rows.into_iter().for_each(fold),
+        Err(e) => tracing::warn!("Dashboard: cannot seed {what} from journal: {e}"),
     }
+}
+
+/// Seed a fresh channel value's decision log from the journal — called once,
+/// at startup, from `run()`.
+pub fn seed_decision_log(journal_path: &Path) -> Vec<(Timestamp, ControlDecision)> {
+    let mut log = Vec::new();
+    seed_from(
+        read_recent_decisions(journal_path, DECISION_LOG_CAPACITY),
+        "decision log",
+        |row| log.push((row.at, row.decision)),
+    );
+    log
+}
+
+/// Today's meter readings since local midnight, folded through the same
+/// [`ActualSolarHistory::record`] a meter tick uses, so a restart mid-day
+/// doesn't blank today's line.
+pub fn seed_actual_solar(journal_path: &Path, now: Timestamp, timezone: Tz) -> ActualSolarHistory {
+    let mut history = ActualSolarHistory::default();
+    seed_from(
+        read_events_in_range(
+            journal_path,
+            crate::clock::local_midnight(now, timezone),
+            now,
+        ),
+        "actual-solar history",
+        |event| {
+            if let Event::Meter { at, solar, .. } = event {
+                history.record(at.now, timezone, at.day_ordinal, solar);
+            }
+        },
+    );
+    history
 }
 
 pub type DashboardStateSender = tokio::sync::watch::Sender<DashboardState>;

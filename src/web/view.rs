@@ -4,7 +4,9 @@
 
 use crate::device::PackStatus;
 use crate::models::ControlMode;
-use crate::units::{Elapsed, KiloWattHours, Percent, Soc, SolarForecastPoint, Timestamp, Watts};
+use crate::units::{
+    Elapsed, KiloWattHours, Percent, Soc, SolarForecastPoint, SolarPower, Timestamp, Watts,
+};
 
 use super::axis::{AxisTick, day_axis};
 use super::detail::{DetailEntity, detail_body};
@@ -488,7 +490,7 @@ fn forecast_panel_view(
 
     let today_start = crate::clock::local_midnight(now, timezone);
     let forecast_buckets = bucketed_forecast_watts(&forecast.points, today_start);
-    let actual_buckets = actual.averages();
+    let actual_buckets = actual.averages().map(|mean| mean.map(SolarPower::get));
 
     let scale = forecast_buckets
         .iter()

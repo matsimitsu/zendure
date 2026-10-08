@@ -59,7 +59,7 @@ fn state(history: Vec<(Timestamp, ControlDecision)>) -> DashboardState {
     DashboardState::seed(
         &engine_state(BatteryPower::ZERO),
         history,
-        crate::web::ActualSolarHistory::default(),
+        crate::web::state::ActualSolarHistory::default(),
         IntervalHistory::new([DeviceId::new(journey::BATTERY_ID)]),
         at(0),
     )

@@ -458,37 +458,6 @@ impl PollTelemetry {
     }
 }
 
-/// Seeds the dashboard's actual-solar history from the journal's `meter`
-/// events since local midnight, so a restart mid-day doesn't blank today's
-/// line. Degrades to an empty history on a read failure — a logging concern,
-/// never a startup failure, the same rule `web::seed_decision_log` follows.
-fn seed_actual_solar(
-    journal_path: &std::path::Path,
-    timezone: chrono_tz::Tz,
-) -> web::ActualSolarHistory {
-    use chrono::{Datelike, TimeZone};
-
-    let midnight = crate::clock::local_midnight(Clock::now(timezone).now, timezone);
-
-    let mut history = web::ActualSolarHistory::default();
-    match crate::journal::read::read_meter_solar_since(journal_path, midnight.as_millis()) {
-        Ok(rows) => {
-            for (ts_ms, solar) in rows {
-                if let Some(local) = timezone.timestamp_millis_opt(ts_ms).single() {
-                    history.record(
-                        Timestamp::from_millis(ts_ms),
-                        timezone,
-                        local.ordinal(),
-                        solar,
-                    );
-                }
-            }
-        }
-        Err(e) => tracing::warn!("Dashboard: cannot seed actual-solar history from journal: {e}"),
-    }
-    history
-}
-
 /// Starts the journal and whichever combination of broker and meter source `config`
 /// asks for,
 /// then folds events until `stop` resolves or a source task goes away. `devices` is
@@ -661,8 +630,9 @@ pub async fn run(
     let mut web_task = None;
     if let Some(web_cfg) = &config.web {
         let history = web::seed_decision_log(&config.journal_path);
-        let actual_solar = seed_actual_solar(&config.journal_path, config.timezone);
         let startup_clock = Clock::now(config.timezone);
+        let actual_solar =
+            web::seed_actual_solar(&config.journal_path, startup_clock.now, config.timezone);
         let configured: Vec<_> = devices.handles().map(|(id, _)| id).collect();
         let intervals = web::seed_interval_history(
             &config.journal_path,
