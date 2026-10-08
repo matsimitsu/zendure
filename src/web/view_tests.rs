@@ -619,3 +619,28 @@ fn the_rendered_axis_places_labels_by_percentage_not_grid_column() {
     assert!(html.contains("left: 100.00%"));
     assert!(!html.contains("grid"));
 }
+
+// --- SOC limits --------------------------------------------------------------
+
+#[test]
+fn battery_view_carries_the_limits_and_what_a_full_bar_is_worth() {
+    use crate::controller::SocLimits;
+    use crate::units::{KiloWattHours, Soc};
+
+    let mut seeded = state(vec![]);
+    seeded.soc_limits = SocLimits {
+        min: Soc::new(20),
+        max: Soc::FULL,
+        balance_day: true,
+    };
+    seeded.pack_capacity = KiloWattHours(5.0);
+
+    let limits = dashboard_view(&seeded, tz())
+        .battery
+        .expect("the fixture world has a battery")
+        .limits;
+
+    assert_eq!((limits.min_percent, limits.max_percent), (20, 100));
+    assert!(limits.balance_day);
+    assert_eq!(limits.usable_max, "4.0 kWh");
+}

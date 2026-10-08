@@ -28,8 +28,20 @@ pub struct MiniStatView {
     pub value: String,
 }
 
+/// The SOC window for the bar's limit ticks. Not drawn yet.
+#[expect(dead_code, reason = "consumed by the soc_bar component")]
+pub struct SocLimitsView {
+    pub min_percent: u32,
+    pub max_percent: u32,
+    pub balance_day: bool,
+    /// What a full bar is worth, formatted for the "of X kWh" label.
+    pub usable_max: String,
+}
+
 pub struct BatteryPanelView {
     pub soc_percent: u32,
+    #[expect(dead_code, reason = "consumed by the soc_bar component")]
+    pub limits: SocLimitsView,
     pub mode_label: &'static str,
     /// BEM modifier: "charge" | "discharge" | "idle".
     pub badge_variant: &'static str,
@@ -582,6 +594,12 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
     let battery = world.battery().map(|battery| {
         let (mode_label, badge_variant) = panel_badge(state.last_decision.as_ref().map(|d| d.mode));
         BatteryPanelView {
+            limits: SocLimitsView {
+                min_percent: state.soc_limits.min.get(),
+                max_percent: state.soc_limits.max.get(),
+                balance_day: state.soc_limits.balance_day,
+                usable_max: energy_string(state.usable_max()),
+            },
             soc_percent: battery.soc.get(),
             mode_label,
             badge_variant,

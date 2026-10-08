@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 use crate::allocate::{Directive, allocate};
 use crate::battery::BatteryState;
 use crate::clock::Clock;
-use crate::controller::{Controller, ControllerState};
+use crate::controller::{Controller, ControllerState, SocLimits};
 use crate::event::Event;
 use crate::models::{ControlDecision, ControlMode, CycleCounts};
-use crate::units::{GridPower, Setpoint, SolarPower, Timestamp};
+use crate::units::{GridPower, Setpoint, Soc, SolarPower, Timestamp};
 use crate::world::{MeterReading, World};
 
 /// The event-driven fold at the heart of the controller. Owns exactly the
@@ -60,6 +60,10 @@ impl Engine {
     /// that fails startup on error.
     pub fn battery(&self) -> Option<&BatteryState> {
         self.world.battery()
+    }
+
+    pub fn soc_limits(&self, weekday: chrono::Weekday, device_min: Soc) -> SocLimits {
+        self.controller.soc_limits(weekday, device_min)
     }
 
     pub fn cycle_counts(&self) -> CycleCounts {

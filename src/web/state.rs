@@ -9,6 +9,7 @@ use chrono_tz::Tz;
 
 use crate::clock::Clock;
 use crate::command::Command;
+use crate::controller::SocLimits;
 use crate::device::PackStatus;
 use crate::engine::EngineState;
 use crate::journal::read::read_recent_decisions;
@@ -144,6 +145,7 @@ pub struct DashboardTelemetry {
     pub usable: KiloWattHours,
     pub capacity: KiloWattHours,
     pub packs: Vec<PackStatus>,
+    pub soc_limits: SocLimits,
 }
 
 /// Today's *actual* measured solar production, bucketed into the same 48
@@ -234,6 +236,7 @@ pub struct DashboardState {
     pub pack_capacity: KiloWattHours,
     /// Each pack as the last complete report listed it, in the device's order.
     pub packs: Vec<PackStatus>,
+    pub soc_limits: SocLimits,
     pub sparklines: SparklineHistory,
     /// Today's actual solar production, seeded from the journal at startup
     /// and extended by every `meter_tick` thereafter.
@@ -276,6 +279,7 @@ impl DashboardState {
             usable_energy: KiloWattHours::ZERO,
             pack_capacity: KiloWattHours::ZERO,
             packs: Vec::new(),
+            soc_limits: SocLimits::default(),
             sparklines: SparklineHistory::default(),
             actual_solar,
             forecast: ForecastSnapshot::default(),
@@ -352,11 +356,16 @@ impl DashboardState {
         self.refresh(engine, decision, as_of);
     }
 
+    pub fn usable_max(&self) -> KiloWattHours {
+        self.soc_limits.usable_max(self.pack_capacity)
+    }
+
     fn apply_telemetry(&mut self, telemetry: DashboardTelemetry) {
         self.rte_percent = telemetry.rte;
         self.usable_energy = telemetry.usable;
         self.pack_capacity = telemetry.capacity;
         self.packs = telemetry.packs;
+        self.soc_limits = telemetry.soc_limits;
     }
 
     fn refresh(

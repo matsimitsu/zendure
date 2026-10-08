@@ -51,6 +51,7 @@ fn telemetry() -> DashboardTelemetry {
         usable: KiloWattHours(1.8),
         capacity: KiloWattHours(3.84),
         packs: Vec::new(),
+        soc_limits: SocLimits::default(),
     }
 }
 
@@ -441,4 +442,26 @@ fn forecast_tick_changes_only_the_forecast_field() {
     assert_eq!(state.as_of, as_of_before);
     assert!(state.recent_decisions.is_empty());
     assert!(state.last_decision.is_none());
+}
+
+#[test]
+fn poll_tick_publishes_limits_and_usable_max_from_capacity() {
+    let mut state = seeded();
+    let limits = SocLimits {
+        min: Soc::new(20),
+        max: Soc::new(70),
+        balance_day: false,
+    };
+    state.poll_tick(
+        &engine(),
+        DashboardTelemetry {
+            soc_limits: limits,
+            capacity: KiloWattHours(4.0),
+            ..telemetry()
+        },
+        at(1),
+    );
+
+    assert_eq!(state.soc_limits, limits);
+    assert!((state.usable_max().get() - 2.0).abs() < 1e-9);
 }

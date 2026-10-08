@@ -8,10 +8,43 @@ use crate::clock::Clock;
 use crate::config::{Config, SessionConfig};
 use crate::models::{ControlDecision, ControlMode, CycleCounts};
 use crate::units::{
-    Elapsed, Gain, GridPower, PowerMargin, RampFactor, Setpoint, SlewLimit, Soc, SolarPower,
-    Timestamp, Watts,
+    Elapsed, Gain, GridPower, KiloWattHours, PowerMargin, RampFactor, Setpoint, SlewLimit, Soc,
+    SolarPower, Timestamp, Watts,
 };
 use crate::world::World;
+
+/// The SOC window the dashboard draws and sizes its energy figures against.
+/// `min` is the binding floor, so the bar's tick and the "of X kWh" beside it
+/// can never disagree about where usable energy starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SocLimits {
+    pub min: Soc,
+    pub max: Soc,
+    pub balance_day: bool,
+}
+
+impl SocLimits {
+    /// Whichever floor is higher wins: the device refuses to discharge below
+    /// its own `minSoc`, and the controller refuses below `[tuning] min_soc`.
+    pub fn binding_floor(device_min: Soc, tuning_min: Soc) -> Soc {
+        device_min.max(tuning_min)
+    }
+
+    /// Energy between the two limits, which is what a full bar is worth.
+    pub fn usable_max(&self, capacity: KiloWattHours) -> KiloWattHours {
+        capacity.scale(self.max.fraction_above(self.min))
+    }
+}
+
+impl Default for SocLimits {
+    fn default() -> Self {
+        SocLimits {
+            min: Soc::ZERO,
+            max: Soc::FULL,
+            balance_day: false,
+        }
+    }
+}
 
 /// How much of the target is commanded on the first positive setpoint after a
 /// mode change. Easing into a new direction rather than stepping straight to full
@@ -317,6 +350,14 @@ impl Controller {
         }
 
         ControlMode::Idle
+    }
+
+    pub fn soc_limits(&self, weekday: Weekday, device_min: Soc) -> SocLimits {
+        SocLimits {
+            min: SocLimits::binding_floor(device_min, self.min_soc),
+            max: self.effective_max_soc(weekday),
+            balance_day: self.balance_weekday == Some(weekday),
+        }
     }
 
     /// Max SOC for `weekday`, raised to 100% on `balance_weekday` so the pack

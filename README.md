@@ -478,7 +478,7 @@ The controller publishes MQTT discovery config automatically. These sensors appe
 - `Zendure Controller Battery Decision Reason` — human-readable explanation
 - `Zendure Controller Grid Power (at decision)` — net grid power used for the decision (W)
 - `Zendure Controller Battery Round-Trip Efficiency` — charge/discharge RTE (%)
-- `Zendure Controller Battery Usable Energy` — estimated usable energy remaining (kWh)
+- `Zendure Controller Battery Usable Energy` — estimated usable energy remaining (kWh), measured above the higher of the device's own minimum SOC and `[tuning] min_soc`
 - `Zendure Controller Battery Total Capacity` — total pack capacity (kWh)
 - `Zendure Controller Battery Enclosure Temperature` — enclosure temperature (°C)
 - `Zendure Controller Battery Pack N Temperature` — per-pack temperature (°C, dynamic)

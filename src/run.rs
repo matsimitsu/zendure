@@ -8,11 +8,14 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::Weekday;
+
 use crate::allocate::Directive;
 use crate::announce::Announcer;
 use crate::car_battery;
 use crate::clock::Clock;
 use crate::config::Config;
+use crate::controller::SocLimits;
 use crate::device::{Applied, BatteryMonitor, BatteryReading, ControlPath, PackStatus};
 use crate::engine::Engine;
 use crate::event::Event;
@@ -149,8 +152,14 @@ impl Tick<'_> {
                 }
             };
 
-            let figures =
-                telemetry.record_and_publish(self.publisher, self.announcer, self.prefix, &reading);
+            let figures = telemetry.record_and_publish(
+                self.publisher,
+                self.announcer,
+                self.prefix,
+                &reading,
+                engine,
+                at.weekday,
+            );
 
             // The sample's own clock, not the tick's, so `events.ts_ms` says
             // when the reading was taken.
@@ -378,14 +387,20 @@ impl PollTelemetry {
     /// RTE%, usable energy, pack capacity and the packs themselves at `soc`.
     /// The one computation behind both the MQTT publish below and the
     /// dashboard panel.
-    fn figures(&self, soc: Soc) -> web::DashboardTelemetry {
+    fn figures(&self, soc: Soc, limits: SocLimits) -> web::DashboardTelemetry {
         let capacity: WattHours = self.packs.iter().map(|pack| pack.capacity).sum();
         web::DashboardTelemetry {
             rte: self.rte.rte_percent(),
-            usable: self.rte.usable_kwh(soc, self.min_soc, capacity),
+            usable: self.rte.usable_kwh(soc, limits.min, capacity),
             capacity: capacity.to_kwh(),
             packs: self.packs.clone(),
+            soc_limits: limits,
         }
+    }
+
+    /// The limits in force at `weekday`, with this poll's device floor.
+    fn limits(&self, engine: &Engine, weekday: Weekday) -> SocLimits {
+        engine.soc_limits(weekday, self.min_soc)
     }
 
     /// Fold one poll in, then publish what it produced. Not `async`: every publish is a
@@ -398,6 +413,8 @@ impl PollTelemetry {
         announcer: &Announcer,
         prefix: &str,
         reading: &BatteryReading,
+        engine: &Engine,
+        weekday: Weekday,
     ) -> web::DashboardTelemetry {
         let telemetry = &reading.telemetry;
         self.rte.record(telemetry.charge, telemetry.discharge);
@@ -409,7 +426,7 @@ impl PollTelemetry {
             self.min_soc = min_soc;
         }
 
-        let figures = self.figures(reading.state.soc);
+        let figures = self.figures(reading.state.soc, self.limits(engine, weekday));
         mqtt::publish_rte(
             publisher,
             prefix,
@@ -641,13 +658,13 @@ pub async fn run(
     if let Some(web_cfg) = &config.web {
         let history = web::seed_decision_log(&config.journal_path);
         let actual_solar = seed_actual_solar(&config.journal_path, config.timezone);
-        let seed = web::DashboardState::seed(
-            &engine.state(),
-            history,
-            actual_solar,
-            Clock::now(config.timezone).now,
-        )
-        .with_telemetry(telemetry.figures(startup_soc));
+        let startup_clock = Clock::now(config.timezone);
+        let seed =
+            web::DashboardState::seed(&engine.state(), history, actual_solar, startup_clock.now)
+                .with_telemetry(telemetry.figures(
+                    startup_soc,
+                    telemetry.limits(&engine, startup_clock.weekday),
+                ));
         let (tx, rx) = tokio::sync::watch::channel(seed);
         web_task = web::spawn(web_cfg, rx, config.timezone, async move {
             let _ = web_stop_rx.await;

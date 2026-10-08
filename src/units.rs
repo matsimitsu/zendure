@@ -647,6 +647,10 @@ forward_display!(KiloWattHours, f64);
 impl KiloWattHours {
     pub const ZERO: KiloWattHours = KiloWattHours(0.0);
 
+    pub fn scale(self, fraction: f64) -> Self {
+        KiloWattHours(self.0 * fraction)
+    }
+
     pub fn get(self) -> f64 {
         self.0
     }

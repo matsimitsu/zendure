@@ -1658,6 +1658,41 @@ fn effective_max_soc_raised_on_balance_weekday() {
 }
 
 #[test]
+fn soc_limits_floor_is_the_higher_of_device_and_tuning() {
+    let mut ctrl = default_controller();
+    ctrl.min_soc = Soc::new(10);
+    assert_eq!(ctrl.soc_limits(Weekday::Tue, Soc::new(5)).min, Soc::new(10));
+    assert_eq!(
+        ctrl.soc_limits(Weekday::Tue, Soc::new(15)).min,
+        Soc::new(15)
+    );
+}
+
+#[test]
+fn soc_limits_balance_day_is_full_and_flagged() {
+    let mut ctrl = default_controller();
+    ctrl.max_soc = Soc::new(90);
+    ctrl.balance_weekday = Some(Weekday::Mon);
+
+    let balance = ctrl.soc_limits(Weekday::Mon, Soc::ZERO);
+    assert_eq!((balance.max, balance.balance_day), (Soc::FULL, true));
+
+    let other = ctrl.soc_limits(Weekday::Tue, Soc::ZERO);
+    assert_eq!((other.max, other.balance_day), (Soc::new(90), false));
+}
+
+#[test]
+fn soc_limits_usable_max_spans_the_window() {
+    let limits = SocLimits {
+        min: Soc::new(20),
+        max: Soc::new(90),
+        balance_day: false,
+    };
+    let usable = limits.usable_max(KiloWattHours(10.0));
+    assert!((usable.get() - 7.0).abs() < 1e-9);
+}
+
+#[test]
 fn effective_max_soc_unaffected_when_disabled() {
     let mut ctrl = default_controller();
     ctrl.max_soc = Soc::new(95);
