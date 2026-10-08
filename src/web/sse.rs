@@ -6,6 +6,7 @@
 //! must appear in [`FRAGMENTS`]. One left off still recomputes each tick and
 //! then renders the value it had at page load, with nothing failing.
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 
 use axum::response::sse::Event;
@@ -35,6 +36,29 @@ pub(super) const FRAGMENTS: [Fragment; 6] = [
     ("forecast-panel", layout::forecast_panel_inner),
 ];
 
+/// The last payload sent per fragment on one connection. Per connection, so
+/// a reconnecting browser starts empty and is sent every fragment again.
+#[derive(Default)]
+pub(super) struct SentFragments(HashMap<&'static str, String>);
+
+impl SentFragments {
+    /// Renders every fragment and keeps only those differing from what this
+    /// connection was last sent.
+    pub(super) fn changed(&mut self, view: &DashboardView) -> Vec<(&'static str, String)> {
+        FRAGMENTS
+            .iter()
+            .filter_map(|(name, render)| {
+                let payload = render(view).into_string();
+                if self.0.get(name) == Some(&payload) {
+                    return None;
+                }
+                self.0.insert(name, payload.clone());
+                Some((*name, payload))
+            })
+            .collect()
+    }
+}
+
 /// `WatchStream` yields the current value immediately on subscribe, then one
 /// item per subsequent change — several updates landing between polls
 /// collapse into the latest, which is what a live dashboard wants rather
@@ -43,15 +67,13 @@ pub fn fragment_stream(
     rx: DashboardStateReceiver,
     timezone: Tz,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
+    let mut sent = SentFragments::default();
     WatchStream::new(rx).flat_map(move |state| {
         let view = dashboard_view(&state, timezone);
-        let events: Vec<Event> = FRAGMENTS
-            .iter()
-            .map(|(name, render)| {
-                Event::default()
-                    .event(*name)
-                    .data(render(&view).into_string())
-            })
+        let events: Vec<Event> = sent
+            .changed(&view)
+            .into_iter()
+            .map(|(name, data)| Event::default().event(name).data(data))
             .collect();
         tokio_stream::iter(events.into_iter().map(Ok))
     })

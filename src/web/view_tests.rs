@@ -10,7 +10,7 @@ use crate::engine::EngineState;
 use crate::fixtures::journey;
 use crate::models::ControlDecision;
 use crate::units::{BatteryPower, GridPower, SolarPower, Timestamp, Watts};
-use crate::web::sse::FRAGMENTS;
+use crate::web::sse::{FRAGMENTS, SentFragments};
 use crate::web::state::DashboardState;
 use crate::web::templates::layout;
 use crate::world::{DeviceId, Measurement, MeterReading, World};
@@ -560,5 +560,33 @@ fn the_ev_card_reports_the_last_polled_soc() {
         view.stat_cards[3].detail.starts_with("Updated "),
         "detail was {:?}",
         view.stat_cards[3].detail
+    );
+}
+
+// --- SSE dedupe --------------------------------------------------------------
+
+#[test]
+fn an_unchanged_fragment_is_not_sent_again_but_a_changed_one_is() {
+    let mut sent = SentFragments::default();
+    let first = dashboard_view(&state(vec![]), tz());
+
+    assert_eq!(sent.changed(&first).len(), FRAGMENTS.len());
+    assert!(sent.changed(&first).is_empty());
+
+    let logged = state(vec![(at(0), decision(ControlMode::Idle, "now"))]);
+    let second = dashboard_view(&logged, tz());
+    let names: Vec<_> = sent.changed(&second).into_iter().map(|(n, _)| n).collect();
+    assert!(names.contains(&"decision-log"), "{names:?}");
+    assert!(names.len() < FRAGMENTS.len(), "{names:?}");
+}
+
+#[test]
+fn a_new_connection_is_sent_every_fragment_again() {
+    let view = dashboard_view(&state(vec![]), tz());
+    SentFragments::default().changed(&view);
+
+    assert_eq!(
+        SentFragments::default().changed(&view).len(),
+        FRAGMENTS.len()
     );
 }
