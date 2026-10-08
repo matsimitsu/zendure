@@ -82,8 +82,9 @@ pub struct PackRowView {
     /// The model, or the pack's position when this build cannot identify it.
     pub name: String,
     pub serial: String,
-    /// The SOC bar's fill; `None` draws it empty.
-    pub soc_percent: Option<u32>,
+    /// Compact bar at the pack's SOC (empty when unreported) between the
+    /// system's limits.
+    pub bar: SocBarView,
     pub soc: String,
     pub power: String,
     pub temperature: String,
@@ -305,13 +306,13 @@ fn efficiency_string(rte: Option<Percent>) -> String {
 
 const MISSING: &str = "—";
 
-fn pack_row(index: usize, pack: &PackStatus) -> PackRowView {
+fn pack_row(index: usize, pack: &PackStatus, limits: SocLimitsView) -> PackRowView {
     PackRowView {
         name: pack
             .model
             .map_or_else(|| format!("Pack {}", index + 1), str::to_string),
         serial: pack.serial.clone().unwrap_or_default(),
-        soc_percent: pack.soc.map(Soc::get),
+        bar: SocBarView::compact(pack.soc.unwrap_or(Soc::new(0)), limits),
         soc: pack
             .soc
             .map_or_else(|| MISSING.to_string(), |soc| format!("{soc}%")),
@@ -513,15 +514,13 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
 
     let battery = world.battery().map(|battery| {
         let (mode_label, badge_variant) = panel_badge(state.last_decision.as_ref().map(|d| d.mode));
+        let limits = SocLimitsView {
+            min: state.soc_limits.min,
+            max: state.soc_limits.max,
+            balance_day: state.soc_limits.balance_day,
+        };
         BatteryPanelView {
-            bar: SocBarView::labelled(
-                battery.soc,
-                SocLimitsView {
-                    min: state.soc_limits.min,
-                    max: state.soc_limits.max,
-                    balance_day: state.soc_limits.balance_day,
-                },
-            ),
+            bar: SocBarView::labelled(battery.soc, limits),
             soc_percent: battery.soc.get(),
             mode_label,
             badge_variant,
@@ -552,7 +551,7 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
                 .packs
                 .iter()
                 .enumerate()
-                .map(|(index, pack)| pack_row(index, pack))
+                .map(|(index, pack)| pack_row(index, pack, limits))
                 .collect(),
         }
     });

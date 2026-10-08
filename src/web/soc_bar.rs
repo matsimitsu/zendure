@@ -5,6 +5,7 @@ use crate::units::Soc;
 use crate::web::axis::AxisAnchor;
 
 /// The SOC window the bar marks with limit ticks.
+#[derive(Clone, Copy)]
 pub struct SocLimitsView {
     pub min: Soc,
     pub max: Soc,
@@ -39,6 +40,16 @@ pub struct SocBarView {
 }
 
 impl SocBarView {
+    /// Ticks only: a pack row has no room for stripes or labels, and the
+    /// battery panel above it already names the limits.
+    pub fn compact(fill: Soc, limits: SocLimitsView) -> Self {
+        Self {
+            fill,
+            limits,
+            labels: None,
+        }
+    }
+
     pub fn labelled(fill: Soc, limits: SocLimitsView) -> Self {
         let labels = SocBarLabels::for_limits(&limits);
         Self {

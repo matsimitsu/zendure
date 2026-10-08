@@ -336,17 +336,25 @@ fn pack_status(model: Option<&'static str>, power: Option<BatteryPower>) -> Pack
     }
 }
 
+fn limits() -> crate::web::soc_bar::SocLimitsView {
+    crate::web::soc_bar::SocLimitsView {
+        min: Soc::new(10),
+        max: Soc::new(95),
+        balance_day: false,
+    }
+}
+
 /// A charging pack reads as a negative flow, the same sign convention the
 /// panel's own rate uses, so the rows and the total above them agree.
 #[test]
 fn a_pack_row_shows_what_its_pack_reported() {
     let charging = BatteryPower::from_flows(Watts::ZERO, Watts(1240));
 
-    let row = pack_row(1, &pack_status(Some("AB3000L"), Some(charging)));
+    let row = pack_row(1, &pack_status(Some("AB3000L"), Some(charging)), limits());
 
     assert_eq!(row.name, "AB3000L");
     assert_eq!(row.serial, "GO2ALP1P1008296");
-    assert_eq!(row.soc_percent, Some(68));
+    assert_eq!(row.bar.fill, Soc::new(68));
     assert_eq!(row.soc, "68%");
     assert_eq!(row.power, "-1,240 W");
     assert_eq!(row.temperature, "18.0 °C");
@@ -357,7 +365,7 @@ fn a_pack_row_shows_what_its_pack_reported() {
 /// person would, and a flow it never reported reads as unknown, not as idle.
 #[test]
 fn an_unidentified_pack_row_is_named_by_position_and_dashes_what_is_missing() {
-    let row = pack_row(1, &pack_status(None, None));
+    let row = pack_row(1, &pack_status(None, None), limits());
 
     assert_eq!(row.name, "Pack 2");
     assert_eq!(row.power, "—");
@@ -377,6 +385,38 @@ fn the_battery_panel_lists_every_pack_in_order() {
 
     let names: Vec<_> = battery.packs.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(names, ["AC2400+", "AB3000L"]);
+}
+
+#[test]
+fn pack_rows_carry_compact_bars_at_the_system_limits_under_a_header() {
+    let mut seeded = state(vec![]);
+    seeded.soc_limits = SocLimits {
+        min: Soc::new(20),
+        max: Soc::new(90),
+        balance_day: false,
+    };
+    seeded.packs = vec![pack_status(Some("AB3000L"), None)];
+
+    let battery = dashboard_view(&seeded, tz())
+        .battery
+        .expect("the fixture world has a battery");
+    let bar = &battery.packs[0].bar;
+    assert!(bar.labels.is_none());
+    assert_eq!(
+        (bar.limits.min, bar.limits.max),
+        (Soc::new(20), Soc::new(90))
+    );
+
+    let html = crate::web::templates::pack_list::render(&battery.packs).into_string();
+    assert!(html.contains("soc-bar--compact"), "{html}");
+    assert!(
+        html.contains("left: 20%") && html.contains("left: 90%"),
+        "{html}"
+    );
+    assert!(!html.contains("soc-bar__stripes"), "{html}");
+    for column in ["Pack", "Charge", "Power", "Temp", "Capacity"] {
+        assert!(html.contains(&format!(">{column}<")), "{column}: {html}");
+    }
 }
 
 /// An empty buffer draws nothing rather than a degenerate path, and a single

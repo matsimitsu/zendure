@@ -7,11 +7,24 @@
   border-top: 1px solid var(--color-border-soft);
   padding-top: var(--space-4);
 
+  // The header shares the rows' grid so each label sits over its column.
+  &__head,
   &__row {
     display: grid;
     grid-template-columns: 2fr 2fr 1fr 1fr 1fr;
-    align-items: center;
     gap: var(--space-4);
+  }
+
+  &__row {
+    align-items: center;
+  }
+
+  &__head {
+    font-size: var(--text-xs);
+    font-weight: var(--weight-semibold);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-faint);
   }
 
   &__identity {
@@ -42,19 +55,11 @@
     gap: var(--space-3);
   }
 
+  // The row sizes the bar; `min-width: 0` keeps the percentage readout from
+  // forcing it wider than its grid cell.
   &__bar {
     flex: 1;
-    height: var(--space-1);
-    border-radius: var(--radius-sm);
-    background: var(--color-border-soft);
-    overflow: hidden;
-  }
-
-  &__bar-fill {
-    height: 100%;
-    background: var(--color-accent);
-    border-radius: var(--radius-sm);
-    transition: width 0.3s ease-out;
+    min-width: 0;
   }
 
   &__value {
@@ -70,7 +75,18 @@
 }
 
 @include narrow {
+  .pack-list__head {
+    display: none;
+  }
+
+  // Name and bar take a full line each, then the three figures share the
+  // last. `minmax(0, 1fr)` so a long figure cannot widen a column.
   .pack-list__row {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--space-2) var(--space-3);
+
+    > :nth-child(-n + 2) {
+      grid-column: 1 / -1;
+    }
   }
 }
