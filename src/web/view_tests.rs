@@ -11,6 +11,7 @@ use crate::engine::EngineState;
 use crate::fixtures::journey;
 use crate::models::ControlDecision;
 use crate::units::{BatteryPower, GridPower, SolarPower, Timestamp, Watts};
+use crate::web::intervals::IntervalHistory;
 use crate::web::sse::{FRAGMENTS, SentFragments};
 use crate::web::state::DashboardState;
 use crate::web::templates::layout;
@@ -59,6 +60,7 @@ fn state(history: Vec<(Timestamp, ControlDecision)>) -> DashboardState {
         &engine_state(BatteryPower::ZERO),
         history,
         crate::web::ActualSolarHistory::default(),
+        IntervalHistory::new([DeviceId::new(journey::BATTERY_ID)]),
         at(0),
     )
 }
@@ -531,6 +533,7 @@ fn the_home_card_reports_the_houses_own_draw() {
         &engine_state(BatteryPower(600)),
         vec![],
         ActualSolarHistory::default(),
+        IntervalHistory::new([DeviceId::new(journey::BATTERY_ID)]),
         at(0),
     );
     let view = dashboard_view(&discharging, tz());

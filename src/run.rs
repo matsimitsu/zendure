@@ -660,16 +660,22 @@ pub async fn run(
         let history = web::seed_decision_log(&config.journal_path);
         let actual_solar = seed_actual_solar(&config.journal_path, config.timezone);
         let startup_clock = Clock::now(config.timezone);
-        let seed =
-            web::DashboardState::seed(&engine.state(), history, actual_solar, startup_clock.now)
-                .with_telemetry(telemetry.figures(
-                    startup_soc,
-                    engine.soc_limits(startup_clock.weekday, telemetry.min_soc),
-                ))
-                .with_intervals(web::seed_interval_history(
-                    &config.journal_path,
-                    startup_clock.now,
-                ));
+        let intervals = web::seed_interval_history(
+            &config.journal_path,
+            startup_clock.now,
+            devices.handles().map(|(id, _)| id),
+        );
+        let seed = web::DashboardState::seed(
+            &engine.state(),
+            history,
+            actual_solar,
+            intervals,
+            startup_clock.now,
+        )
+        .with_telemetry(telemetry.figures(
+            startup_soc,
+            engine.soc_limits(startup_clock.weekday, telemetry.min_soc),
+        ));
         let (tx, rx) = tokio::sync::watch::channel(seed);
         web_task = web::spawn(web_cfg, rx, config.timezone, async move {
             let _ = web_stop_rx.await;

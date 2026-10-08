@@ -41,8 +41,18 @@ fn engine() -> EngineState {
     engine_state(GridPower(400.0), SolarPower::new(750.0))
 }
 
+fn intervals() -> IntervalHistory {
+    IntervalHistory::new([DeviceId::new(journey::BATTERY_ID)])
+}
+
 fn seeded() -> DashboardState {
-    DashboardState::seed(&engine(), vec![], ActualSolarHistory::default(), at(0))
+    DashboardState::seed(
+        &engine(),
+        vec![],
+        ActualSolarHistory::default(),
+        intervals(),
+        at(0),
+    )
 }
 
 fn telemetry() -> DashboardTelemetry {
@@ -345,7 +355,13 @@ fn the_seeded_log_collapses_the_same_way_a_running_one_does() {
         (at(11), at_watts(145)),
         (at(16), at_watts(900)),
     ];
-    let state = DashboardState::seed(&engine(), history, ActualSolarHistory::default(), at(16));
+    let state = DashboardState::seed(
+        &engine(),
+        history,
+        ActualSolarHistory::default(),
+        intervals(),
+        at(16),
+    );
 
     assert_eq!(state.recent_decisions.len(), 2);
     let first = state.recent_decisions.front().unwrap();

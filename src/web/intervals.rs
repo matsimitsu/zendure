@@ -5,6 +5,7 @@
 //! past day read back from the journal, and the last two replay history the
 //! engine's world has already moved past.
 
+use std::collections::BTreeSet;
 use std::marker::PhantomData;
 use std::time::Duration;
 
@@ -14,7 +15,7 @@ use chrono_tz::Tz;
 use crate::event::Event;
 use crate::journal::read::read_events_in_range;
 use crate::units::{BatteryPower, Elapsed, GridPower, Soc, SolarPower, Timestamp, Watts};
-use crate::world::World;
+use crate::world::{DeviceId, World};
 
 use super::state::Plottable;
 
@@ -198,25 +199,28 @@ impl IntervalBucket {
 ///
 /// Home usage needs the meter and every battery's last flow together, so the
 /// fold keeps a [`World`] and derives it exactly as the stat card does.
+///
+/// Counts only the batteries it was built with: a [`World`] never forgets a
+/// device, so a box swapped out or renamed would otherwise add its last flow
+/// to every bucket for as long as the journal still holds it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IntervalHistory {
+    devices: BTreeSet<DeviceId>,
     world: World,
     latest: Option<IntervalIndex>,
     ring: [Option<IntervalBucket>; INTERVAL_RING],
 }
 
-// `#[derive(Default)]` only covers arrays up to length 32.
-impl Default for IntervalHistory {
-    fn default() -> Self {
+impl IntervalHistory {
+    pub fn new(devices: impl IntoIterator<Item = DeviceId>) -> Self {
         IntervalHistory {
+            devices: devices.into_iter().collect(),
             world: World::new(),
             latest: None,
             ring: std::array::from_fn(|_| None),
         }
     }
-}
 
-impl IntervalHistory {
     pub fn record(&mut self, event: &Event) {
         let index = IntervalIndex::containing(event.at());
         match event {
@@ -238,6 +242,7 @@ impl IntervalHistory {
                     bucket.home.add(home);
                 }
             }
+            Event::DeviceUpdate { id, .. } if !self.devices.contains(id) => {}
             Event::DeviceUpdate {
                 at,
                 id,
@@ -347,10 +352,15 @@ pub fn hourly(quarters: &[IntervalSlot]) -> Vec<IntervalSlot> {
 }
 
 /// Folds the journal's last ring's worth of events into a fresh
-/// [`IntervalHistory`], so a restart keeps the flows chart. Degrades to an
-/// empty history on a read failure, as `seed_decision_log` does.
-pub fn seed_interval_history(journal_path: &std::path::Path, now: Timestamp) -> IntervalHistory {
-    let mut history = IntervalHistory::default();
+/// [`IntervalHistory`] over `devices`, so a restart keeps the flows chart.
+/// Degrades to an empty history on a read failure, as `seed_decision_log`
+/// does.
+pub fn seed_interval_history(
+    journal_path: &std::path::Path,
+    now: Timestamp,
+    devices: impl IntoIterator<Item = DeviceId>,
+) -> IntervalHistory {
+    let mut history = IntervalHistory::new(devices);
     let span = Elapsed::of(INTERVAL * INTERVAL_RING as u32);
     match read_events_in_range(journal_path, now - span, now) {
         Ok(events) => events.iter().for_each(|event| history.record(event)),

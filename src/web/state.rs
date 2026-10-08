@@ -278,11 +278,13 @@ impl DashboardState {
     /// load and a long-running process show the same runs. `actual_solar` is
     /// likewise seeded from the journal (see
     /// `crate::journal::read::read_meter_solar_since`) so a restart doesn't
-    /// blank today's actual-production line.
+    /// blank today's actual-production line, and `intervals` so it doesn't
+    /// blank the flows chart.
     pub fn seed(
         engine: &EngineState,
         history: Vec<(Timestamp, ControlDecision)>,
         actual_solar: ActualSolarHistory,
+        intervals: IntervalHistory,
         as_of: Timestamp,
     ) -> Self {
         let mut state = DashboardState {
@@ -296,7 +298,7 @@ impl DashboardState {
             soc_limits: SocLimits::default(),
             sparklines: SparklineHistory::default(),
             actual_solar,
-            intervals: IntervalHistory::default(),
+            intervals,
             forecast: ForecastSnapshot::default(),
             car_soc: None,
             as_of,
@@ -311,11 +313,6 @@ impl DashboardState {
     /// load shows the pack it actually has rather than a confident zero.
     pub fn with_telemetry(mut self, telemetry: DashboardTelemetry) -> Self {
         self.apply_telemetry(telemetry);
-        self
-    }
-
-    pub fn with_intervals(mut self, intervals: IntervalHistory) -> Self {
-        self.intervals = intervals;
         self
     }
 
