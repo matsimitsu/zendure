@@ -18,8 +18,8 @@ use crate::journal::read::{ReadError, read_events_in_range, read_recent_decision
 use crate::models::ControlDecision;
 use crate::rte;
 use crate::units::{
-    BatteryPower, GridPower, KiloWattHours, Percent, Soc, SolarForecastPoint, SolarPower,
-    Timestamp, Watts,
+    BatteryPower, GridPower, KiloWattHours, Percent, PriceSeries, Soc, SolarForecastPoint,
+    SolarPower, Timestamp, Watts,
 };
 use crate::world::DeviceId;
 
@@ -223,6 +223,15 @@ impl ActualSolarHistory {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ForecastSnapshot {
     pub points: Vec<SolarForecastPoint>,
+    pub as_of: Option<Timestamp>,
+}
+
+/// The latest prices the poller fetched, keyed by interval — see
+/// `crate::prices`. Empty and `as_of: None` until the first fetch lands.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PriceSnapshot {
+    pub points: PriceSeries,
     pub as_of: Option<Timestamp>,
 }
 
