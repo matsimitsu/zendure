@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::Prediction;
+use super::{FORECAST_PERIOD, Prediction};
 use crate::fetch::{FetchError, fetch_parsed};
 use crate::units::{Elapsed, SolarForecastPoint, SolarPower, Timestamp};
 
@@ -38,8 +38,8 @@ const FORECAST_HOURS: u32 = 48;
 
 /// Requested explicitly rather than left to Solcast's default, because
 /// `period_end` only names a period once its length is known.
+/// Must name [`FORECAST_PERIOD`].
 const PERIOD: &str = "PT30M";
-const PERIOD_LENGTH: Elapsed = Elapsed::of_minutes(30);
 
 pub struct SolcastForecaster {
     http: reqwest::Client,
@@ -99,7 +99,7 @@ fn parse_forecast_response(body: &str) -> Result<Vec<SolarForecastPoint>, String
                 // buckets a point; left as the end, each estimate lands in
                 // the slot after the one it describes.
                 Ok(end) => Some(SolarForecastPoint {
-                    at: Timestamp::from(end) - PERIOD_LENGTH,
+                    at: Timestamp::from(end) - Elapsed::of(FORECAST_PERIOD),
                     estimate: SolarPower::new(entry.pv_estimate * 1000.0),
                 }),
                 Err(e) => {

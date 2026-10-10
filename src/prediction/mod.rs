@@ -36,6 +36,10 @@ pub mod solcast;
 #[path = "mod_tests.rs"]
 mod tests;
 
+/// How long each forecast point averages over: Solcast's `PT30M`, and the
+/// slot every consumer buckets a point into.
+pub const FORECAST_PERIOD: Duration = Duration::from_secs(30 * 60);
+
 /// The daily budget's default shape: five anchors spread across daylight,
 /// spending Solcast's 10-request/day account cap (5/site) where cloud cover
 /// actually changes the forecast, rather than evenly across the whole day

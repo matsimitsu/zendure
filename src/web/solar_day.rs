@@ -8,6 +8,7 @@ use chrono::NaiveDate;
 use chrono_tz::Tz;
 
 use crate::clock::local_date;
+use crate::prediction::FORECAST_PERIOD;
 use crate::units::{Elapsed, SolarForecastPoint, SolarPower, Timestamp};
 
 use super::intervals::{IntervalHistory, IntervalIndex, Mean};
@@ -15,7 +16,7 @@ use super::plot::Day;
 use super::state::ForecastSnapshot;
 
 /// Solcast's own resolution, so a forecast point normally fills one slot.
-pub(super) const SOLAR_SLOT: Duration = Duration::from_secs(30 * 60);
+pub(super) const SOLAR_SLOT: Duration = FORECAST_PERIOD;
 
 /// One half-hour of the day. `None` is "nothing known", never zero.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -36,40 +37,43 @@ impl SolarDay {
     pub fn forecast(&self) -> impl ExactSizeIterator<Item = Option<SolarPower>> + '_ {
         self.slots.iter().map(|slot| slot.forecast)
     }
+}
 
-    pub fn actual(&self) -> impl ExactSizeIterator<Item = Option<SolarPower>> + '_ {
-        self.slots.iter().map(|slot| slot.actual)
+/// The days the panel reaches: today, and tomorrow once its forecast covers
+/// every slot so it shows without a ragged tail.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SolarDays {
+    pub today: SolarDay,
+    pub tomorrow: Option<SolarDay>,
+}
+
+impl SolarDays {
+    pub fn get(&self, date: NaiveDate) -> Option<&SolarDay> {
+        self.iter().find(|day| day.date == date)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &SolarDay> {
+        std::iter::once(&self.today).chain(&self.tomorrow)
     }
 }
 
-/// Today with its actuals, or tomorrow once its forecast covers every slot;
-/// `None` for any other date.
-pub fn solar_for(
-    date: NaiveDate,
+/// Today with its actuals and a complete tomorrow; `None` for a clock no
+/// calendar can place.
+pub fn solar_days(
     forecast: &ForecastSnapshot,
     intervals: &IntervalHistory,
     tz: Tz,
     now: Timestamp,
-) -> Option<SolarDay> {
+) -> Option<SolarDays> {
     let today = local_date(now, tz)?;
-    if date == today {
-        Some(solar_day(date, &forecast.points, Some(intervals), tz))
-    } else if Some(date) == today.succ_opt() && tomorrow_complete(forecast, tz, now) {
-        Some(solar_day(date, &forecast.points, None, tz))
-    } else {
-        None
-    }
-}
-
-/// Whether every half-hour of tomorrow has a forecast point, so the day can
-/// be shown without a ragged tail.
-pub fn tomorrow_complete(forecast: &ForecastSnapshot, tz: Tz, now: Timestamp) -> bool {
-    let Some(tomorrow) = local_date(now, tz).and_then(|today| today.succ_opt()) else {
-        return false;
-    };
-    solar_day(tomorrow, &forecast.points, None, tz)
-        .forecast()
-        .all(|slot| slot.is_some())
+    let tomorrow = today
+        .succ_opt()
+        .map(|date| solar_day(date, &forecast.points, None, tz))
+        .filter(|day| day.forecast().all(|slot| slot.is_some()));
+    Some(SolarDays {
+        today: solar_day(today, &forecast.points, Some(intervals), tz),
+        tomorrow,
+    })
 }
 
 /// A slot's actual comes from the two 15-minute intervals it spans; an
@@ -96,9 +100,13 @@ fn solar_day(
     SolarDay { date, slots }
 }
 
+/// Pooled over every reading in the slot rather than a mean of the two
+/// quarter-hour means, so a quarter with a minute of samples weighs a minute.
 fn actual_over(intervals: &IntervalHistory, start: Timestamp) -> Option<SolarPower> {
     let first = IntervalIndex::containing(start);
-    Mean::of([first, first.offset(1)].map(|index| intervals.averages(index).solar))
+    let mut mean = intervals.solar(first);
+    mean.merge(&intervals.solar(first.offset(1)));
+    mean.get()
 }
 
 /// Averages where two points share a slot, which only a misaligned or

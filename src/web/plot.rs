@@ -132,7 +132,7 @@ impl Day {
         }
     }
 
-    pub fn slot_starts(&self, span: Duration) -> impl Iterator<Item = Timestamp> {
+    pub fn slot_starts(&self, span: Duration) -> impl Iterator<Item = Timestamp> + use<> {
         let span = Elapsed::of(span);
         let count = self.length.as_millis() / span.as_millis().max(1);
         std::iter::successors(Some(self.start), move |&start| Some(start + span))
