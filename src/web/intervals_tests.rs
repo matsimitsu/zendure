@@ -556,3 +556,37 @@ async fn a_capture_from_a_battery_that_is_not_configured_is_ignored() {
         seed_interval_history(&clean, at(10_000), configured())
     );
 }
+
+/// A full window's seed holds captures from its back edge and events from its
+/// front, and folding all of one stream before the other replays them out of
+/// order: the ring would read the old captures as a clock step and drop the
+/// flows already seeded.
+#[tokio::test]
+async fn a_seed_spanning_the_whole_ring_keeps_its_flows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("journal.db");
+    let newest = base().offset(INTERVAL_RING as i64);
+    let now = into_interval(newest, 10);
+    let events = [
+        meter_event(into_interval(newest, 5), 100.0, 200.0),
+        battery_event(into_interval(newest, 6), BatteryPower(-400), Soc::new(60)),
+    ];
+    let body = poll_body(journey::BATTERY_ID, 50, 600, 2981);
+    let polls = [
+        (into_interval(base(), 11), body.clone()),
+        (into_interval(base(), 12), body),
+    ];
+    crate::journal::testing::record(&path, &events).await;
+    let captures: Vec<_> = rows(&polls)
+        .into_iter()
+        .map(|(at, body)| (at, crate::zendure::POLL_CAPTURE, body))
+        .collect();
+    crate::journal::testing::record_raw(&path, &captures).await;
+
+    let seeded = seed_interval_history(&path, now, configured());
+
+    let mut live = live_fold(&polls);
+    events.iter().for_each(|event| live.record(event));
+    assert!(seeded.averages(newest).solar.is_some());
+    assert_eq!(seeded, live);
+}

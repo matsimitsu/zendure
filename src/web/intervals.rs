@@ -484,18 +484,30 @@ pub fn seed_interval_history(
 ) -> IntervalHistory {
     let mut history = IntervalHistory::new(devices);
     let span = Elapsed::of(INTERVAL * INTERVAL_RING as u32);
+    let mut events = Vec::new();
     seed_from(
         read_events_in_range(journal_path, now - span, now),
         "interval history",
-        |event| history.record(&event),
+        |event| events.push(event),
     );
-    // Packs are folded after the events rather than interleaved: no event
-    // reads them, so the order between the two streams changes nothing.
+    let mut captures = Vec::new();
     seed_from(
         read_raw_in_range(journal_path, POLL_CAPTURE, now - span, now),
         "pack history",
-        |(at, body)| seed_packs(&mut history, at, &body),
+        |capture| captures.push(capture),
     );
+    // Interleaved in time, as the live loop saw them: the ring reads a run of
+    // rows far behind its newest as a clock step and drops everything newer,
+    // so the window's oldest captures folded after its newest events would
+    // wipe the flows they had just seeded.
+    let mut captures = captures.into_iter().peekable();
+    for event in events {
+        while let Some((at, body)) = captures.next_if(|(at, _)| *at < event.at()) {
+            seed_packs(&mut history, at, &body);
+        }
+        history.record(&event);
+    }
+    captures.for_each(|(at, body)| seed_packs(&mut history, at, &body));
     history
 }
 
