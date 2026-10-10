@@ -225,7 +225,7 @@ async fn the_price_fragment_steps_to_a_past_day() {
 async fn the_price_fragment_clamps_to_its_range() {
     let cases = [
         (tomorrow_published(), "2099-01-01", "2025-09-05"),
-        (today_only(), "2025-09-05", "today"),
+        (today_only(), "2025-09-05", TODAY),
         (today_only(), "2020-01-01", "2025-08-29"),
     ];
     for (state, asked, shown) in cases {
@@ -254,17 +254,53 @@ async fn the_page_opens_each_panel_on_its_own_day() {
         "{page}"
     );
     assert!(
-        page.contains(r#"sse-swap="price-panel" data-day="2025-09-05""#),
+        page.contains(r#"sse-swap="price-panel" data-day="2025-09-05" data-live="false""#),
         "{page}"
     );
     assert!(page.contains("Tomorrow"));
 }
 
 #[tokio::test]
+async fn each_panels_page_links_keep_the_other_panels_day() {
+    let (_, page) = get_from(
+        tomorrow_published(),
+        "/?day=2025-09-01&interval=15m&price_day=2025-09-03",
+        false,
+    )
+    .await;
+
+    // The price panel's step back, and the flows panel's step forward.
+    assert!(
+        page.contains(r#"href="/?price_day=2025-09-02&amp;day=2025-09-01&amp;interval=15m""#),
+        "{page}"
+    );
+    assert!(
+        page.contains(r#"href="/?day=2025-09-02&amp;interval=15m&amp;price_day=2025-09-03""#),
+        "{page}"
+    );
+    // Back to today keeps the other panel too.
+    assert!(page.contains(r#"href="/?day=2025-09-01&amp;interval=15m""#));
+}
+
+#[tokio::test]
+async fn fragment_links_keep_nothing_of_a_page_query() {
+    let (_, body) = get_from(
+        tomorrow_published(),
+        "/fragments/price-panel?day=2025-09-03",
+        true,
+    )
+    .await;
+
+    assert!(body.contains(r#"href="/?price_day=2025-09-02""#), "{body}");
+}
+
+#[tokio::test]
 async fn the_price_host_is_today_without_a_price_day() {
     let (_, page) = get_from(tomorrow_published(), "/?day=2025-09-01", false).await;
 
-    assert!(page.contains(r#"sse-swap="price-panel" data-day="today""#));
+    assert!(page.contains(&format!(
+        r#"sse-swap="price-panel" data-day="{TODAY}" data-live="true""#
+    )));
 }
 
 #[tokio::test]

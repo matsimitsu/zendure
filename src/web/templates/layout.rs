@@ -81,7 +81,9 @@ pub fn page(view: &DashboardView) -> Markup {
                     }
                     // A persistent host like `<energy-flows>`: the readout
                     // script's handlers live on it and outlast every swap.
-                    price-panel id="price-panel" class="price-panel" sse-swap="price-panel" data-day=(view.prices.data_day()) {
+                    price-panel id="price-panel" class="price-panel" sse-swap="price-panel"
+                        data-day=[view.prices.data_day()]
+                        data-live=(view.prices.data_live()) {
                         (price_panel_inner(view))
                     }
                     (callout::render())

@@ -102,26 +102,45 @@ pub struct PriceContext<'a> {
 pub enum PricePanelView {
     Empty(EmptyReason),
     /// A day the nav reaches that holds no prices, e.g. a gap in the
-    /// journal: the nav stays so the user can step on.
+    /// journal, or today before its prices land: the nav stays so the user
+    /// can step on.
     Unpriced(DayNavView),
     Priced(Box<PricedDayView>),
 }
 
 impl PricePanelView {
-    /// The host's `data-day` on first render.
-    pub fn data_day(&self) -> String {
+    pub fn nav(&self) -> Option<&DayNavView> {
         match self {
-            PricePanelView::Empty(_) => "today".to_string(),
-            PricePanelView::Unpriced(nav) => day_marker(nav),
-            PricePanelView::Priced(day) => day_marker(&day.nav),
+            PricePanelView::Empty(_) => None,
+            PricePanelView::Unpriced(nav) => Some(nav),
+            PricePanelView::Priced(day) => Some(&day.nav),
         }
+    }
+
+    pub fn nav_mut(&mut self) -> Option<&mut DayNavView> {
+        match self {
+            PricePanelView::Empty(_) => None,
+            PricePanelView::Unpriced(nav) => Some(nav),
+            PricePanelView::Priced(day) => Some(&mut day.nav),
+        }
+    }
+
+    /// The day shown, which the host's `data-day` mirrors; `None` with no
+    /// nav, which only ever stands for today.
+    pub fn data_day(&self) -> Option<NaiveDate> {
+        self.nav().map(|nav| nav.shown)
+    }
+
+    /// Whether the stream, which always renders today, may replace the panel.
+    pub fn data_live(&self) -> bool {
+        self.nav().is_none_or(DayNavView::is_today)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmptyReason {
     NotConfigured,
-    /// Today has no prices yet.
+    /// Nothing is priced yet, today included.
     Waiting,
 }
 
@@ -145,15 +164,6 @@ pub struct PricedDayView {
     pub windows: Option<[MiniStatView; 2]>,
     pub chart: PriceChartView,
     pub legend: [PriceLegendItem; 3],
-}
-
-/// The `data-day` marker the host mirrors: `today` or the date.
-fn day_marker(nav: &DayNavView) -> String {
-    if nav.is_today() {
-        "today".to_string()
-    } else {
-        nav.shown.to_string()
-    }
 }
 
 /// One readout state, formatted: the default, or a hit's.
@@ -180,6 +190,9 @@ pub struct PriceBarView {
 /// A full-height hover target over one priced hour.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PriceHitView {
+    /// The hour's place in the day, which a refetch filling a gap never
+    /// moves, unlike the hit's position among the hits.
+    pub slot: Slot,
     pub span: SlotSpan,
     pub readout: PriceReadoutView,
 }
@@ -268,7 +281,8 @@ fn repeated(at: &DateTime<Tz>, tz: Tz) -> bool {
 /// `14:00–17:00`, ending `24:00` at the day's close. Where the clock repeats
 /// an hour, the end reads in the start's offset and the offset is named, so
 /// the repeated hour reads `02:00–03:00 CEST` then `02:00–03:00 CET` rather
-/// than seeming to end where it began.
+/// than seeming to end where it began. A range across the change names both
+/// offsets, so a 3-hour block over the repeated hour never reads as 2 hours.
 fn range_label(start: Timestamp, end: Timestamp, day_end: Timestamp, tz: Tz) -> String {
     let local = |at: Timestamp| tz.timestamp_millis_opt(at.as_millis()).single();
     let (Some(from), Some(to)) = (local(start), local(end)) else {
@@ -277,23 +291,25 @@ fn range_label(start: Timestamp, end: Timestamp, day_end: Timestamp, tz: Tz) -> 
     let from_repeated = repeated(&from, tz);
     let from_offset = from.offset().fix();
     let to_repeated = end < day_end && repeated(&to, tz);
-    let (to_text, to_offset) = if end >= day_end {
-        ("24:00".to_string(), from_offset)
+    let to_text = if end >= day_end {
+        "24:00".to_string()
     } else if to_repeated {
-        let to = to.with_timezone(&from_offset);
-        (to.format("%H:%M").to_string(), from_offset)
+        to.with_timezone(&from_offset).format("%H:%M").to_string()
     } else {
-        (to.format("%H:%M").to_string(), to.offset().fix())
+        to.format("%H:%M").to_string()
     };
+    let crosses = !to_repeated && to.offset().fix() != from_offset;
     let from_text = from.format("%H:%M");
-    if !from_repeated && !to_repeated {
-        format!("{from_text}–{to_text}")
-    } else if from_offset == to_offset {
+    if crosses {
+        format!(
+            "{from_text} {}–{to_text} {}",
+            from.format("%Z"),
+            to.format("%Z")
+        )
+    } else if from_repeated || to_repeated {
         format!("{from_text}–{to_text} {}", from.format("%Z"))
     } else {
-        // Only a repeated start in one offset ending past the change in the
-        // other: the end's own wall time is unambiguous.
-        format!("{from_text} {}–{to_text}", from.format("%Z"))
+        format!("{from_text}–{to_text}")
     }
 }
 
@@ -362,12 +378,13 @@ impl<'a> PricedDay<'a> {
         }
     }
 
-    /// Each priced hour with its shown price.
-    fn priced(&self) -> impl Iterator<Item = (&'a HourPrice, CentsPerKwh)> + '_ {
+    /// Each priced hour with its slot and shown price.
+    fn priced(&self) -> impl Iterator<Item = (Slot, &'a HourPrice, CentsPerKwh)> + '_ {
         self.hours
             .iter()
             .zip(&self.prices)
-            .filter_map(|(hour, price)| price.map(|price| (hour, price)))
+            .enumerate()
+            .filter_map(|(slot, (hour, price))| price.map(|price| (Slot(slot), hour, price)))
     }
 }
 
@@ -381,7 +398,7 @@ fn default_readout(day: &PricedDay) -> PriceReadoutView {
         None if day.is_today() => day.readout("Now".to_string(), None),
         None => day.readout(
             "Day average".to_string(),
-            CentsPerKwh::mean(day.priced().map(|(_, price)| price)),
+            CentsPerKwh::mean(day.priced().map(|(_, _, price)| price)),
         ),
     }
 }
@@ -399,7 +416,7 @@ fn chart(
 
     let (bars, hits) = day
         .priced()
-        .map(|(hour, price)| {
+        .map(|(slot, hour, price)| {
             let span = span_of(hour);
             let (y, height) = scale.bar(price.0, MIN_BAR_HEIGHT);
             let bar = PriceBarView {
@@ -414,6 +431,7 @@ fn chart(
                 past: day.now.is_some_and(|(now, _)| hour.end <= now),
             };
             let hit = PriceHitView {
+                slot,
                 span,
                 readout: day.readout(day.label(hour), Some(price)),
             };
@@ -549,7 +567,9 @@ pub fn price_panel_view(
         .as_ref()
         .and_then(|prices| PricedDay::of(prices, context.tariff, day_now, tz))
     else {
-        return if nav.is_today() {
+        // Today keeps its nav only while some other day holds a price to
+        // step to.
+        return if nav.is_today() && context.snapshot.points.is_empty() {
             PricePanelView::Empty(EmptyReason::Waiting)
         } else {
             PricePanelView::Unpriced(nav)

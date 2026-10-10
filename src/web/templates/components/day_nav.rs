@@ -25,6 +25,21 @@ pub struct DayNav<'a> {
     pub data_live: Option<bool>,
 }
 
+/// The whole page with `parts` as its query, skipping empty ones, e.g.
+/// `/?price_day=2025-09-05&day=2025-09-01`.
+pub fn page_href(parts: &[&str]) -> String {
+    let query: Vec<&str> = parts
+        .iter()
+        .copied()
+        .filter(|part| !part.is_empty())
+        .collect();
+    if query.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/?{}", query.join("&"))
+    }
+}
+
 pub fn render(nav: &DayNav) -> Markup {
     html! {
         nav class="day-nav" aria-label="Day" data-day=[&nav.data_day] data-live=[nav.data_live] {

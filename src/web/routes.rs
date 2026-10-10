@@ -9,7 +9,7 @@ use axum::routing::get;
 use chrono_tz::Tz;
 use rust_embed::Embed;
 
-use super::day_nav::BadQuery;
+use super::day_nav::{BadQuery, kept_query};
 use super::entity::Entity;
 use super::flows::{EnergyFlowsView, requested_flows_view};
 use super::past_days::{FlowsQuery, PastDays};
@@ -55,6 +55,12 @@ async fn index(
     let current = state.dashboard.borrow().clone();
     let mut view = dashboard_view(&current, price_day, state.timezone);
     view.energy_flows = flows_view(&state, &current, query).await?;
+    // Each panel's full-page links keep the other's day, for a browser
+    // without htmx.
+    view.energy_flows.nav.keep = kept_query(raw.as_deref(), &["price_day"]);
+    if let Some(nav) = view.prices.nav_mut() {
+        nav.keep = kept_query(raw.as_deref(), &["day", "interval"]);
+    }
     Ok(layout::page(&view).into_response())
 }
 

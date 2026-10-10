@@ -1066,7 +1066,7 @@ fn the_price_panel_renders_todays_chart_from_the_dashboard_state() {
         .into_string();
 
     assert!(html.contains("price-panel__chart"));
-    assert!(html.contains("data-day=\"today\""));
+    assert!(html.contains("data-live=\"true\""));
 }
 
 #[test]
