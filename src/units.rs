@@ -255,6 +255,8 @@ impl SolarPower {
 /// `Timestamp` it wraps.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SolarForecastPoint {
+    /// The start of the period the estimate averages over, so it buckets
+    /// into the same slot as the actuals measured during it.
     pub at: Timestamp,
     pub estimate: SolarPower,
 }
@@ -765,6 +767,10 @@ impl Elapsed {
     /// The smallest step a `Timestamp` can take.
     pub const MILLISECOND: Elapsed = Elapsed(1);
     pub const HOUR: Elapsed = Elapsed(3_600_000);
+
+    pub const fn of_minutes(minutes: i64) -> Self {
+        Elapsed(minutes * 60_000)
+    }
 
     /// A `Duration` as whole milliseconds, saturating. Config durations are
     /// lenient and unbounded, and a wrapping cast turns an absurd window

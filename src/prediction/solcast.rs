@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use super::Prediction;
 use crate::fetch::{FetchError, fetch_parsed};
-use crate::units::{SolarForecastPoint, SolarPower, Timestamp};
+use crate::units::{Elapsed, SolarForecastPoint, SolarPower, Timestamp};
 
 /// Deserialize-only, like `ZendureReport` — this crate never writes to
 /// Solcast, only reads its forecast.
@@ -25,7 +25,8 @@ struct SolcastEntry {
     /// named place a unit crossing a boundary is allowed to change (per
     /// `CLAUDE.md`'s rule on casts).
     pv_estimate: f64,
-    /// ISO 8601 / RFC 3339.
+    /// ISO 8601 / RFC 3339. The end of the averaging period: Solcast labels
+    /// the 13:00–13:30 estimate 13:30.
     period_end: String,
     // `pv_estimate10`/`pv_estimate90` (the uncertainty band) are in Solcast's
     // response but not carried further for v1 — see the plan's open items.
@@ -34,6 +35,11 @@ struct SolcastEntry {
 /// Covers the rest of today and all of tomorrow from any fetch; the
 /// default is a week the dashboard never shows.
 const FORECAST_HOURS: u32 = 48;
+
+/// Requested explicitly rather than left to Solcast's default, because
+/// `period_end` only names a period once its length is known.
+const PERIOD: &str = "PT30M";
+const PERIOD_LENGTH: Elapsed = Elapsed::of_minutes(30);
 
 pub struct SolcastForecaster {
     http: reqwest::Client,
@@ -58,7 +64,7 @@ impl SolcastForecaster {
 
     async fn fetch_site(&self, site_id: &str) -> Result<Vec<SolarForecastPoint>, FetchError> {
         let url = format!(
-            "https://api.solcast.com.au/rooftop_sites/{site_id}/forecasts?format=json&hours={FORECAST_HOURS}&api_key={}",
+            "https://api.solcast.com.au/rooftop_sites/{site_id}/forecasts?format=json&hours={FORECAST_HOURS}&period={PERIOD}&api_key={}",
             self.api_key,
         );
         // Never log `url` — it carries the API key. Only the site id and
@@ -89,8 +95,11 @@ fn parse_forecast_response(body: &str) -> Result<Vec<SolarForecastPoint>, String
         .into_iter()
         .filter_map(
             |entry| match chrono::DateTime::parse_from_rfc3339(&entry.period_end) {
-                Ok(at) => Some(SolarForecastPoint {
-                    at: Timestamp::from(at),
+                // Shifted to the period start, which is how every consumer
+                // buckets a point; left as the end, each estimate lands in
+                // the slot after the one it describes.
+                Ok(end) => Some(SolarForecastPoint {
+                    at: Timestamp::from(end) - PERIOD_LENGTH,
                     estimate: SolarPower::new(entry.pv_estimate * 1000.0),
                 }),
                 Err(e) => {

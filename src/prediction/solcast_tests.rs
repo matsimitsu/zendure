@@ -68,3 +68,16 @@ fn combine_series_output_is_sorted_by_time() {
     let times: Vec<i64> = combined.iter().map(|p| p.at.as_millis()).collect();
     assert_eq!(times, vec![1_000, 2_000, 3_000]);
 }
+
+#[test]
+fn a_point_is_stamped_with_the_start_of_its_period() {
+    // The 12:00–12:30 estimate, which Solcast labels by its end.
+    let body = r#"{"forecasts":[
+        {"pv_estimate":1.0,"period_end":"2026-06-01T12:30:00Z","period":"PT30M"}
+    ]}"#;
+
+    let points = parse_forecast_response(body).unwrap();
+
+    let start = chrono::DateTime::parse_from_rfc3339("2026-06-01T12:00:00Z").unwrap();
+    assert_eq!(points[0].at, Timestamp::from(start));
+}
