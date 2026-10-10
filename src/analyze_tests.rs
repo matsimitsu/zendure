@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::units::{BatteryPower, GridPower, Percent, PowerCap};
+use crate::units::{BatteryPower, CentsPerKwh, GridPower, Percent, PowerCap};
 use crate::world::DeviceId;
 
 /// 2026-09-13T10:00:00Z, whose local day-of-year in Amsterdam is 256.
@@ -313,9 +313,9 @@ fn two_samples_are_priced_under_both_contracts() {
     let days = daily(&[meter(0, ONE_KWH_W), meter(30, ONE_KWH_W)], &pricing);
 
     let costs = days[0].costs.expect("priced run carries costs").rounded();
-    assert_eq!(costs.dynamic_import, Cents(24));
-    assert_eq!(costs.fixed_import, Cents(30));
-    assert_eq!(costs.dynamic_export, Cents::ZERO);
+    assert_eq!(costs.dynamic.import, Cents(24));
+    assert_eq!(costs.fixed.import, Cents(30));
+    assert_eq!(costs.dynamic.export, Cents::ZERO);
     assert_eq!(costs.delta(), Cents(-6), "dynamic was 6 ct cheaper");
 }
 
@@ -327,10 +327,10 @@ fn export_is_credited_at_wholesale_less_the_export_markup() {
     let days = daily(&[meter(0, -ONE_KWH_W), meter(30, -ONE_KWH_W)], &pricing);
 
     let costs = days[0].costs.unwrap().rounded();
-    assert_eq!(costs.dynamic_export, Cents(9));
-    assert_eq!(costs.fixed_export, Cents(5));
-    assert_eq!(costs.dynamic_net(), Cents(-9));
-    assert_eq!(costs.fixed_net(), Cents(-5));
+    assert_eq!(costs.dynamic.export, Cents(9));
+    assert_eq!(costs.fixed.export, Cents(5));
+    assert_eq!(costs.dynamic.net(), Cents(-9));
+    assert_eq!(costs.fixed.net(), Cents(-5));
     assert_eq!(costs.delta(), Cents(-4));
 }
 
@@ -342,14 +342,14 @@ fn a_negative_price_pays_for_import_and_charges_for_export() {
 
     let import = daily(&[meter(0, ONE_KWH_W), meter(30, ONE_KWH_W)], &pricing);
     assert_eq!(
-        import[0].costs.unwrap().rounded().dynamic_import,
+        import[0].costs.unwrap().rounded().dynamic.import,
         Cents(-48)
     );
 
     let export = daily(&[meter(0, -ONE_KWH_W), meter(30, -ONE_KWH_W)], &pricing);
     let costs = export[0].costs.unwrap().rounded();
-    assert_eq!(costs.dynamic_export, Cents(-51));
-    assert_eq!(costs.dynamic_net(), Cents(51), "exporting cost money");
+    assert_eq!(costs.dynamic.export, Cents(-51));
+    assert_eq!(costs.dynamic.net(), Cents(51), "exporting cost money");
 }
 
 /// An interval with no price is counted as unpriced and costed under neither
@@ -371,8 +371,8 @@ fn an_interval_without_a_price_is_left_out_of_both_contracts() {
     assert_eq!(costs.priced, Duration::from_secs(30));
     assert_eq!(costs.unpriced, Duration::from_secs(30));
     assert!((costs.priced_share() - 0.5).abs() < 1e-9);
-    assert_eq!(costs.rounded().dynamic_import, Cents(24));
-    assert_eq!(costs.rounded().fixed_import, Cents(30));
+    assert_eq!(costs.rounded().dynamic.import, Cents(24));
+    assert_eq!(costs.rounded().fixed.import, Cents(30));
     // Energy is integrated regardless: only the costing is partial.
     assert_wh(days[0].import, 2000.0);
 }
