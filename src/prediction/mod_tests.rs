@@ -1,16 +1,6 @@
 use super::*;
 use crate::config::PredictionConfig;
-
-fn date(y: i32, m: u32, d: u32) -> NaiveDate {
-    NaiveDate::from_ymd_opt(y, m, d).unwrap()
-}
-
-fn at(y: i32, m: u32, d: u32, hour: u32, minute: u32) -> LocalNow {
-    LocalNow {
-        date: date(y, m, d),
-        time: TimeOfDay::new(hour, minute).unwrap(),
-    }
-}
+use crate::fixtures::local_now as at;
 
 fn tracker() -> (tempfile::TempDir, ForecastTracker) {
     let dir = tempfile::tempdir().unwrap();
@@ -34,14 +24,14 @@ fn point(ms: i64, watts: f64) -> crate::units::SolarForecastPoint {
 #[test]
 fn nothing_is_due_before_the_first_anchor() {
     let (_dir, t) = tracker();
-    assert_eq!(t.next_due(&at(2026, 1, 1, 5, 59)), None);
+    assert_eq!(t.schedule().next_due(&at(2026, 1, 1, 5, 59)), None);
 }
 
 #[test]
 fn the_first_anchor_is_due_once_its_time_has_passed() {
     let (_dir, t) = tracker();
     assert_eq!(
-        t.next_due(&at(2026, 1, 1, 6, 0)),
+        t.schedule().next_due(&at(2026, 1, 1, 6, 0)),
         Some(TimeOfDay::new(6, 0).unwrap())
     );
 }
@@ -51,7 +41,7 @@ fn a_used_anchor_is_not_offered_again_the_same_day() {
     let (_dir, mut t) = tracker();
     let now = at(2026, 1, 1, 6, 0);
     t.mark_used(&now, TimeOfDay::new(6, 0).unwrap());
-    assert_eq!(t.next_due(&now), None);
+    assert_eq!(t.schedule().next_due(&now), None);
 }
 
 /// A restart mid-day must not re-fetch anchors this process already spent
@@ -72,7 +62,7 @@ fn a_restart_mid_day_skips_anchors_already_fired() {
 
     let restarted = ForecastTracker::new(path, default_poll_times().to_vec(), chrono_tz::UTC);
     assert_eq!(
-        restarted.next_due(&now),
+        restarted.schedule().next_due(&now),
         Some(TimeOfDay::new(12, 30).unwrap()),
         "the first two anchors were already spent before the restart"
     );
@@ -85,7 +75,7 @@ fn once_every_anchor_is_used_nothing_is_due_for_the_rest_of_the_day() {
     for slot in default_poll_times() {
         t.mark_used(&evening, slot);
     }
-    assert_eq!(t.next_due(&evening), None);
+    assert_eq!(t.schedule().next_due(&evening), None);
 }
 
 /// A new calendar day resets the budget even though `fired` still lists
@@ -100,7 +90,7 @@ fn a_new_day_treats_the_budget_as_fresh() {
 
     let today = at(2026, 1, 2, 6, 0);
     assert_eq!(
-        t.next_due(&today),
+        t.schedule().next_due(&today),
         Some(TimeOfDay::new(6, 0).unwrap()),
         "a new day must not inherit yesterday's spent budget"
     );
@@ -115,12 +105,12 @@ fn a_catch_up_after_downtime_collapses_into_a_single_fetch() {
     let (_dir, mut t) = tracker();
     let now = at(2026, 1, 1, 13, 0); // past anchors 1-3 (06:00, 09:30, 12:30)
 
-    let due = t.next_due(&now);
+    let due = t.schedule().next_due(&now);
     assert_eq!(due, Some(TimeOfDay::new(12, 30).unwrap()));
 
     t.mark_used(&now, due.unwrap());
     assert_eq!(
-        t.next_due(&now),
+        t.schedule().next_due(&now),
         None,
         "the earlier anchors must not be offered after the catch-up"
     );
@@ -153,7 +143,7 @@ fn state_round_trips_through_a_restart() {
         Some(Timestamp::from_millis(1_700_000_000_000))
     );
     assert_eq!(
-        restored.next_due(&now),
+        restored.schedule().next_due(&now),
         None,
         "the fired anchor survived the restart"
     );

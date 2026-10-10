@@ -1,8 +1,9 @@
 //! A synthetic backend: a deterministic day-shaped curve, no network call.
 //! Lets the dashboard and analysis be exercised locally without a real feed.
 
-use super::{PriceError, PriceSource};
-use crate::units::{CentsPerKwh, Elapsed, PricePoint, Timestamp};
+use super::{PricePoint, PriceSource};
+use crate::fetch::FetchError;
+use crate::units::{CentsPerKwh, Elapsed, Timestamp};
 
 const DAY_HOURS: i64 = 24;
 
@@ -25,7 +26,7 @@ impl PriceSource for SimulatedPrices {
         &self,
         from: Timestamp,
         until: Timestamp,
-    ) -> Result<Vec<PricePoint>, PriceError> {
+    ) -> Result<Vec<PricePoint>, FetchError> {
         Ok(hourly_curve(from, until))
     }
 }

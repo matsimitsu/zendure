@@ -22,9 +22,8 @@ use crate::battery::BatteryState;
 use crate::clock::Clock;
 use crate::config::{DynamicTariff, FixedTariff};
 use crate::event::Event;
-use crate::units::{
-    Cents, CentsPerKwh, Cost, GridPower, PricePoint, PriceSeries, Soc, Timestamp, WattHours, Watts,
-};
+use crate::prices::{PricePoint, PriceSeries};
+use crate::units::{Cents, CentsPerKwh, Cost, GridPower, Soc, Timestamp, WattHours, Watts};
 use crate::world::{Measurement, MeterReading};
 
 /// Longer than this between meter readings is a gap, not a measurement.
@@ -280,23 +279,6 @@ impl RoundedCosts {
             fixed_export: self.fixed_export + other.fixed_export,
         }
     }
-}
-
-/// Every journalled price batch folded into one series. Rows arrive in the
-/// order they were written, so a later fetch of the same interval — a revised
-/// day-ahead price — replaces the earlier one. A row that does not decode is
-/// counted and skipped rather than failing the run: one corrupt batch should
-/// cost its own hours, not the whole table.
-pub fn price_series(rows: &[(Timestamp, String)]) -> (PriceSeries, usize) {
-    let mut series = PriceSeries::default();
-    let mut undecodable = 0;
-    for (_, payload) in rows {
-        match serde_json::from_str::<Vec<PricePoint>>(payload) {
-            Ok(points) => points.into_iter().for_each(|p| series.insert(p)),
-            Err(_) => undecodable += 1,
-        }
-    }
-    (series, undecodable)
 }
 
 /// Fold a range of events into one entry per local day, oldest first.

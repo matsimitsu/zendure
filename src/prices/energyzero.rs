@@ -1,14 +1,15 @@
 //! The real backend: EnergyZero's public wholesale feed, which answers without
-//! an API key. Like `prediction::solcast`, the body is captured as text before
-//! anything parses it, so an undecodable payload rides along on the error.
+//! an API key. The body goes through `crate::fetch`, so an undecodable payload
+//! rides along on the error.
 
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 
-use super::{PriceError, PriceSource};
-use crate::units::{CentsPerKwh, Elapsed, PricePoint, Timestamp};
+use super::{PricePoint, PriceSource};
+use crate::fetch::{FetchError, fetch_parsed};
+use crate::units::{CentsPerKwh, Elapsed, Timestamp};
 
 const BASE_URL: &str = "https://api.energyzero.nl/v1/energyprices";
 
@@ -56,18 +57,12 @@ impl PriceSource for EnergyZeroPrices {
         &self,
         from: Timestamp,
         until: Timestamp,
-    ) -> Result<Vec<PricePoint>, PriceError> {
-        let body = self
-            .http
-            .get(request_url(from, until))
-            .send()
-            .await
-            .map_err(|e| PriceError::Request(e.to_string()))?
-            .text()
-            .await
-            .map_err(|e| PriceError::Request(e.to_string()))?;
-        let points =
-            parse_prices_response(&body).map_err(|error| PriceError::Parse { body, error })?;
+    ) -> Result<Vec<PricePoint>, FetchError> {
+        let points = fetch_parsed(
+            self.http.get(request_url(from, until)),
+            parse_prices_response,
+        )
+        .await?;
         Ok(within(points, from, until))
     }
 }

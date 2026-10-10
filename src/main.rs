@@ -13,6 +13,7 @@ mod controller;
 mod device;
 mod engine;
 mod event;
+mod fetch;
 #[cfg(test)]
 mod fixtures;
 mod journal;
@@ -26,6 +27,7 @@ mod replay;
 mod rte;
 mod run;
 mod scan;
+mod schedule;
 mod simulation;
 mod source;
 mod sync;

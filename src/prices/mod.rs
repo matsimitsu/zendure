@@ -22,13 +22,17 @@ use chrono_tz::Tz;
 
 use crate::clock::{local_date, local_day_bounds, local_day_start, local_midnight};
 use crate::config::{PriceKind, PricesConfig};
+use crate::fetch::FetchError;
 use crate::journal::Journal;
-use crate::prediction::{AnchorSchedule, LocalNow, TimeOfDay};
-use crate::units::{Elapsed, PricePoint, PriceSeries, Timestamp};
-use crate::web::{DashboardStateSender, PriceSnapshot};
+use crate::schedule::{AnchorSchedule, LocalNow};
+use crate::units::{BackfillDays, Elapsed, Timestamp};
+use crate::web::DashboardStateSender;
 
 pub mod energyzero;
+pub mod series;
 pub mod simulated;
+
+pub use series::{PricePoint, PriceSeries};
 
 #[cfg(test)]
 #[path = "mod_tests.rs"]
@@ -38,21 +42,21 @@ mod tests;
 /// JSON array of `PricePoint`.
 pub const JOURNAL_KIND: &str = "energy_price";
 
-/// What can go wrong fetching prices. A response this build cannot decode is
-/// the one most worth keeping, so the raw body rides along on a parse failure.
-#[derive(Debug)]
-pub enum PriceError {
-    Request(String),
-    Parse { body: String, error: String },
-}
-
-impl std::fmt::Display for PriceError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PriceError::Request(e) => write!(f, "request failed: {e}"),
-            PriceError::Parse { error, .. } => write!(f, "parse error: {error}"),
+/// Journalled fetches as `(fetched at, payload)`, folded into one series and
+/// the count of rows that did not decode. Rows arrive in the order they were
+/// written, so a later fetch of the same interval — a revised day-ahead price
+/// — replaces the earlier one. A row that does not decode costs only its own
+/// hours.
+pub fn decode_rows(rows: &[(Timestamp, String)]) -> (PriceSeries, usize) {
+    let mut series = PriceSeries::default();
+    let mut undecodable = 0;
+    for (_, payload) in rows {
+        match serde_json::from_str::<Vec<PricePoint>>(payload) {
+            Ok(points) => points.into_iter().for_each(|p| series.insert(p)),
+            Err(_) => undecodable += 1,
         }
     }
+    (series, undecodable)
 }
 
 /// Wholesale prices for the half-open range `[from, until)`. A backend may
@@ -63,7 +67,7 @@ pub trait PriceSource {
         &self,
         from: Timestamp,
         until: Timestamp,
-    ) -> impl Future<Output = Result<Vec<PricePoint>, PriceError>> + Send;
+    ) -> impl Future<Output = Result<Vec<PricePoint>, FetchError>> + Send;
 }
 
 /// Whichever backend `[prices]` selected.
@@ -88,7 +92,7 @@ impl PriceSource for PriceFeed {
         &self,
         from: Timestamp,
         until: Timestamp,
-    ) -> Result<Vec<PricePoint>, PriceError> {
+    ) -> Result<Vec<PricePoint>, FetchError> {
         match self {
             PriceFeed::EnergyZero(s) => s.prices(from, until).await,
             PriceFeed::Simulated(s) => s.prices(from, until).await,
@@ -96,29 +100,17 @@ impl PriceSource for PriceFeed {
     }
 }
 
-/// The local dates the recorded fetches price every hour of. A row's `ts_ms`
-/// is when it was fetched, not which day it prices, so coverage comes from
-/// the payloads; a day priced only in part is not covered, so a stray point
-/// across midnight never stops that day being backfilled. A payload that no
-/// longer parses covers nothing.
-pub fn covered_days<'a>(
-    payloads: impl IntoIterator<Item = &'a str>,
-    tz: Tz,
-) -> BTreeSet<NaiveDate> {
-    let mut series = PriceSeries::default();
-    for point in payloads
-        .into_iter()
-        .filter_map(|payload| serde_json::from_str::<Vec<PricePoint>>(payload).ok())
-        .flatten()
-    {
-        series.insert(point);
-    }
+/// The local dates `series` prices every hour of. Coverage comes from the
+/// points, never from when a row was fetched; a day priced only in part is
+/// not covered, so a stray point across midnight never stops that day being
+/// backfilled.
+pub fn covered_days(series: &PriceSeries, tz: Tz) -> BTreeSet<NaiveDate> {
     let days: BTreeSet<NaiveDate> = series
         .iter()
         .filter_map(|point| local_date(point.from, tz))
         .collect();
     days.into_iter()
-        .filter(|day| fully_priced(&series, *day, tz))
+        .filter(|day| fully_priced(series, *day, tz))
         .collect()
 }
 
@@ -135,10 +127,10 @@ fn fully_priced(series: &PriceSeries, day: NaiveDate, tz: Tz) -> bool {
 /// oldest first.
 pub fn missing_days(
     today: NaiveDate,
-    backfill_days: u16,
+    backfill_days: BackfillDays,
     covered: &BTreeSet<NaiveDate>,
 ) -> Vec<NaiveDate> {
-    let mut days: Vec<NaiveDate> = (1..=u64::from(backfill_days))
+    let mut days: Vec<NaiveDate> = (1..=u64::from(backfill_days.count()))
         .filter_map(|back| today.checked_sub_days(chrono::Days::new(back)))
         .filter(|day| !covered.contains(day))
         .collect();
@@ -146,45 +138,36 @@ pub fn missing_days(
     days
 }
 
-/// The series the dashboard shows: today onwards, freshest value per interval.
-#[derive(Debug, Default)]
-pub struct PriceCache {
-    series: PriceSeries,
-    as_of: Option<Timestamp>,
+/// The latest prices the poller fetched, keyed by interval: today onwards,
+/// freshest value per interval. Empty and `as_of: None` until the first fetch
+/// lands.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PriceSnapshot {
+    pub points: PriceSeries,
+    pub as_of: Option<Timestamp>,
 }
 
-impl PriceCache {
-    /// Rebuilt from journalled fetches as `(fetched at, payload)`: pruned
-    /// against `now`, but only as fresh as the newest fetch.
-    pub fn restore(rows: &[(Timestamp, String)], now: Timestamp, tz: Tz) -> PriceCache {
-        let mut series = PriceSeries::default();
-        for (_, payload) in rows {
-            for point in serde_json::from_str::<Vec<PricePoint>>(payload).unwrap_or_default() {
-                series.insert(point);
-            }
-        }
-        series.drop_ending_before(local_midnight(now, tz));
-        PriceCache {
-            series,
-            as_of: rows.iter().map(|(at, _)| *at).max(),
-        }
+impl PriceSnapshot {
+    /// Rebuilt from what the journal holds: pruned against `now`, but only as
+    /// fresh as `as_of`, the newest fetch.
+    pub fn restore(
+        mut points: PriceSeries,
+        as_of: Option<Timestamp>,
+        now: Timestamp,
+        tz: Tz,
+    ) -> PriceSnapshot {
+        points.drop_ending_before(local_midnight(now, tz));
+        PriceSnapshot { points, as_of }
     }
 
     /// Anything over before local midnight of `at` is dropped: the journal
     /// holds history, this only covers what the dashboard displays.
     pub fn merge(&mut self, points: &[PricePoint], at: Timestamp, tz: Tz) {
         for point in points {
-            self.series.insert(*point);
+            self.points.insert(*point);
         }
-        self.series.drop_ending_before(local_midnight(at, tz));
+        self.points.drop_ending_before(local_midnight(at, tz));
         self.as_of = Some(self.as_of.map_or(at, |prev| prev.max(at)));
-    }
-
-    pub fn snapshot(&self) -> PriceSnapshot {
-        PriceSnapshot {
-            points: self.series.clone(),
-            as_of: self.as_of,
-        }
     }
 }
 
@@ -221,7 +204,7 @@ async fn fetch(
         }
         Err(e) => {
             tracing::warn!("Price fetch failed for {what}: {e}");
-            if let PriceError::Parse { body, .. } = &e {
+            if let FetchError::Parse { body, .. } = &e {
                 tracing::debug!("Undecodable price body: {body}");
             }
             None
@@ -291,21 +274,55 @@ async fn recorded_payloads(journal_path: PathBuf) -> Vec<(Timestamp, String)> {
     }
 }
 
+/// When the freshest of `rows` was fetched: a restored snapshot is only as
+/// fresh as that, not the restart.
+fn newest_fetch(rows: &[(Timestamp, String)]) -> Option<Timestamp> {
+    rows.iter().map(|(at, _)| *at).max()
+}
+
 /// How often the poller wakes to check whether an anchor is due; the anchors
 /// themselves gate the fetch.
 const CHECK_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Runs until `shutdown` resolves: seeds the dashboard from the journal,
+/// fetches today and tomorrow if an anchor is due, backfills missing past
+/// days, then keeps fetching at each due anchor. The dashboard is its only
+/// live consumer, so it reaches it directly rather than through the engine.
+pub fn run_price_poller(
+    config: &PricesConfig,
+    timezone: Tz,
+    journal_path: PathBuf,
+    dashboard_tx: DashboardStateSender,
+    journal: Arc<Journal>,
+    shutdown: tokio::sync::oneshot::Receiver<()>,
+) -> impl Future<Output = ()> + Send + 'static {
+    let poller = Poller {
+        feed: PriceFeed::from_config(config),
+        timezone,
+        schedule: AnchorSchedule::new(config.poll_times.clone()),
+        snapshot: PriceSnapshot::default(),
+        dashboard_tx,
+        journal,
+    };
+    poller.run(config.backfill_days, journal_path, shutdown)
+}
 
 /// What the poller carries between anchors.
 struct Poller {
     feed: PriceFeed,
     timezone: Tz,
     schedule: AnchorSchedule,
-    cache: PriceCache,
+    snapshot: PriceSnapshot,
     dashboard_tx: DashboardStateSender,
     journal: Arc<Journal>,
 }
 
 impl Poller {
+    fn publish(&self) {
+        let snapshot = self.snapshot.clone();
+        self.dashboard_tx.send_modify(|s| s.prices_tick(snapshot));
+    }
+
     /// Fetches local today and tomorrow if an anchor is due. `None` when
     /// `shutdown` fired first.
     async fn poll_due_anchor(
@@ -329,81 +346,68 @@ impl Poller {
             fetched = fetch(&self.feed, from, until, &self.journal, &what) => fetched,
         };
         if let Some(points) = fetched {
-            self.cache
+            self.snapshot
                 .merge(&points, Timestamp::from(chrono::Utc::now()), self.timezone);
-            let snapshot = self.cache.snapshot();
-            self.dashboard_tx.send_modify(|s| s.prices_tick(snapshot));
+            self.publish();
         }
         Some(())
     }
-}
 
-/// Runs until `shutdown` resolves: seeds the dashboard from the journal,
-/// fetches today and tomorrow if an anchor is due, backfills missing past
-/// days, then keeps fetching at each due anchor. The dashboard is its only
-/// live consumer, so it reaches it directly rather than through the engine.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_price_poller(
-    feed: PriceFeed,
-    timezone: Tz,
-    poll_times: Vec<TimeOfDay>,
-    backfill_days: u16,
-    journal_path: PathBuf,
-    dashboard_tx: DashboardStateSender,
-    journal: Arc<Journal>,
-    mut shutdown: tokio::sync::oneshot::Receiver<()>,
-) {
-    let rows = tokio::select! {
-        biased;
-        _ = &mut shutdown => return,
-        rows = recorded_payloads(journal_path) => rows,
-    };
-    let cache = PriceCache::restore(&rows, Timestamp::from(chrono::Utc::now()), timezone);
-    let snapshot = cache.snapshot();
-    dashboard_tx.send_modify(|s| s.prices_tick(snapshot));
+    async fn run(
+        mut self,
+        backfill_days: BackfillDays,
+        journal_path: PathBuf,
+        mut shutdown: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let rows = tokio::select! {
+            biased;
+            _ = &mut shutdown => return,
+            rows = recorded_payloads(journal_path) => rows,
+        };
+        let (series, _) = decode_rows(&rows);
+        let covered = covered_days(&series, self.timezone);
+        self.snapshot = PriceSnapshot::restore(
+            series,
+            newest_fetch(&rows),
+            Timestamp::from(chrono::Utc::now()),
+            self.timezone,
+        );
+        self.publish();
 
-    let mut poller = Poller {
-        feed,
-        timezone,
-        schedule: AnchorSchedule::new(poll_times),
-        cache,
-        dashboard_tx,
-        journal,
-    };
-    // Before the backfill, so a first install shows today without waiting
-    // on every past day.
-    if poller.poll_due_anchor(&mut shutdown).await.is_none() {
-        return;
-    }
+        // Before the backfill, so a first install shows today without waiting
+        // on every past day.
+        if self.poll_due_anchor(&mut shutdown).await.is_none() {
+            return;
+        }
 
-    let today = LocalNow::now(timezone).date;
-    let covered = covered_days(rows.iter().map(|(_, payload)| payload.as_str()), timezone);
-    let missing = missing_days(today, backfill_days, &covered);
-    let present = usize::from(backfill_days) - missing.len();
-    let Some(summary) = backfill(
-        &poller.feed,
-        &missing,
-        timezone,
-        &poller.journal,
-        &mut shutdown,
-    )
-    .await
-    else {
-        return;
-    };
-    tracing::info!(
-        "Price backfill: {} days fetched, {present} already present, {} failed",
-        summary.fetched,
-        summary.failed,
-    );
+        let today = LocalNow::now(self.timezone).date;
+        let missing = missing_days(today, backfill_days, &covered);
+        let present = usize::from(backfill_days.count()) - missing.len();
+        let Some(summary) = backfill(
+            &self.feed,
+            &missing,
+            self.timezone,
+            &self.journal,
+            &mut shutdown,
+        )
+        .await
+        else {
+            return;
+        };
+        tracing::info!(
+            "Price backfill: {} days fetched, {present} already present, {} failed",
+            summary.fetched,
+            summary.failed,
+        );
 
-    let mut check = tokio::time::interval(CHECK_INTERVAL);
-    loop {
-        tokio::select! {
-            _ = &mut shutdown => break,
-            _ = check.tick() => {
-                if poller.poll_due_anchor(&mut shutdown).await.is_none() {
-                    break;
+        let mut check = tokio::time::interval(CHECK_INTERVAL);
+        loop {
+            tokio::select! {
+                _ = &mut shutdown => break,
+                _ = check.tick() => {
+                    if self.poll_due_anchor(&mut shutdown).await.is_none() {
+                        break;
+                    }
                 }
             }
         }

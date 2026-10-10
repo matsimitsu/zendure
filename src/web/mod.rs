@@ -25,5 +25,5 @@ pub use past_days::PastDays;
 pub use server::spawn;
 pub use state::{
     DashboardState, DashboardStateSender, DashboardTelemetry, ForecastSnapshot, PolledPacks,
-    PriceSnapshot, seed_actual_solar, seed_decision_log,
+    seed_actual_solar, seed_decision_log,
 };

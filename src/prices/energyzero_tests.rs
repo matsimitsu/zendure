@@ -1,6 +1,7 @@
 use super::*;
 use crate::config::{PriceKind, PricesConfig};
 use crate::prices::PriceFeed;
+use crate::units::BackfillDays;
 
 /// A response of `count` hourly points from `start_ms`, priced `base + i/100`
 /// €/kWh. Built rather than pasted so the DST days' point counts are the thing
@@ -100,7 +101,7 @@ fn a_missing_hour_stays_a_gap() {
     let points = parse_prices_response(&wrap(&gapped)).unwrap();
     assert_eq!(points.len(), 3);
 
-    let mut series = crate::units::PriceSeries::default();
+    let mut series = crate::prices::PriceSeries::default();
     for point in &points {
         series.insert(*point);
     }
@@ -137,7 +138,7 @@ fn config(kind: PriceKind) -> PricesConfig {
     PricesConfig {
         kind,
         poll_times: vec![],
-        backfill_days: 1,
+        backfill_days: BackfillDays::new(1),
         dynamic: None,
         fixed: None,
     }

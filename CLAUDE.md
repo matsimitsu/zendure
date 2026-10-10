@@ -53,6 +53,8 @@ crossed a boundary without anyone saying what the conversion meant.
 - `src/models.rs` — Wire types (MQTT, Zendure API) and control decisions
 - `src/world.rs` — What the controller knows right now, as a projection of the event log
 - `src/clock.rs` — Time context captured at the edge; the controller never reads a clock
+- `src/schedule.rs` — When an anchor-driven poller fetches: `TimeOfDay`, `LocalNow`, `AnchorSchedule`, shared by `prediction` and `prices`
+- `src/fetch.rs` — One HTTP fetch for the pollers: `FetchError` and the capture-the-body-then-parse path
 - `src/event.rs` — What the engine can react to
 - `src/engine.rs` — The event fold: `step(&Event) -> Step`
 - `src/controller.rs` — Control logic (charge/discharge/idle decisions)
@@ -77,7 +79,7 @@ crossed a boundary without anyone saying what the conversion meant.
 - `src/prediction/` — Solar forecast: `Prediction` trait, `solcast` (real) and
   `simulated` backends, the daily poll budget. Dashboard-only, feeds nothing
   into `controller.rs`
-- `src/prices/` — Electricity prices: `PriceSource` trait, `PriceFeed` enum over the backends (`energyzero`, `simulated`). Display and analysis only, feeds nothing into `controller.rs`
+- `src/prices/` — Electricity prices: `PriceSource` trait, `PriceFeed` enum over the backends (`energyzero`, `simulated`), the domain types (`series`: `PricePoint`, `PriceSeries`), the one journal-row decoder and the dashboard's `PriceSnapshot`. Display and analysis only, feeds nothing into `controller.rs`
 - `src/simulation.rs` — A virtual battery that integrates real power over real time, so the controller can run against no hardware
 - `src/replay.rs` — Decision diff: a recorded event stream re-folded through the engine, hermetic
 - `src/analyze.rs` — Integrating a recorded run into daily energy, offline
