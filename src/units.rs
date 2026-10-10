@@ -996,6 +996,11 @@ impl PriceSeries {
         self.0.insert(point.from, point);
     }
 
+    /// Drops every point whose interval is over by `cutoff`.
+    pub fn drop_ending_before(&mut self, cutoff: Timestamp) {
+        self.0.retain(|_, point| point.until > cutoff);
+    }
+
     /// The point whose interval contains `ts`, `until` being exclusive so
     /// adjacent intervals never both match. `None` in a gap.
     pub fn at(&self, ts: Timestamp) -> Option<&PricePoint> {

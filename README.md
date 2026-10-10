@@ -617,6 +617,24 @@ all — the same rule `[mqtt]`/`[web]` follow — and the panel renders an empty
 state. The poller only ever feeds the dashboard: nothing here reaches
 `src/controller.rs`.
 
+Electricity prices are fetched when both `[web]` and `[prices]` are
+configured. At each `prices.poll_times` anchor (00:05, 15:00 and 17:00 local
+by default) the poller fetches local today and tomorrow: day-ahead prices are
+published around 14:00–15:00, so the 17:00 anchor is the retry for a late
+publication. Anchors missed while the process was down collapse into one
+fetch, and a failed fetch forfeits its anchor, the same as the forecast
+poller. Every successful fetch is recorded to the journal as an
+`energy_price` event whose payload is a JSON array of
+`{"from", "until", "wholesale"}` points (epoch milliseconds, ct/kWh). On
+startup, before the first poll, the poller backfills: for each of the last
+`prices.backfill_days` local days (today excluded) that no recorded
+`energy_price` payload has a price for, it fetches that day — one request
+per day, in sequence — and journals it, then logs how many days were
+fetched, already present or failed. A row's timestamp is when it was
+fetched, so coverage is decided from the prices inside the payloads. The
+dashboard is seeded from the journal's prices for today onwards; there is no
+price panel yet. Nothing here reaches `src/controller.rs`.
+
 The EV card shows a car's battery state of charge when `[car_battery]` is
 configured. `kind = "vw_portal"` reads it from the VW Group EU Data Act
 portal (`eu-data-act.drivesomethinggreater.com`) — the same subscription the
