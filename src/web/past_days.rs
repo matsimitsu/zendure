@@ -16,7 +16,7 @@ use crate::sync::guard;
 use crate::units::{Elapsed, Timestamp};
 use crate::world::DeviceId;
 
-use super::day_nav::{BadQuery, parse_day_param, query_values};
+use super::day_nav::{BadQuery, INTERVAL_KEY, PagePanel, parse_day_param, query_values};
 use super::flows::{EnergyFlowsView, FlowResolution, FlowsRequest, requested_flows_view};
 use super::intervals::{IntervalHistory, history_of_day};
 
@@ -37,8 +37,8 @@ pub struct FlowsQuery {
 impl FlowsQuery {
     /// Other keys are ignored, so the page's own query can carry more.
     pub fn parse(raw: Option<&str>) -> Result<Self, BadQuery> {
-        let day = parse_day_param(raw, "day")?;
-        let interval = query_values(raw, "interval")
+        let day = parse_day_param(raw, PagePanel::Flows.day_key())?;
+        let interval = query_values(raw, INTERVAL_KEY)
             .try_fold(FlowResolution::Hour, |_, value| {
                 value.parse().map_err(BadQuery)
             })?;

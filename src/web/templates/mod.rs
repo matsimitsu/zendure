@@ -5,6 +5,7 @@ mod components {
     pub mod back_link;
     pub mod battery_panel;
     pub mod callout;
+    pub mod day_chart;
     pub mod day_nav;
     pub mod decision_log;
     pub mod detail_view;

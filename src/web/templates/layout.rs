@@ -77,14 +77,14 @@ pub fn page(view: &DashboardView) -> Markup {
                         (decision_log_inner(view))
                     }
                     // A persistent host like `<price-panel>`.
-                    forecast-panel id="forecast-panel" class="forecast-panel" sse-swap="forecast-panel"
+                    forecast-panel id="forecast-panel" class="day-chart forecast-panel" sse-swap="forecast-panel"
                         data-day=[view.forecast.data_day()]
                         data-live=(view.forecast.data_live()) {
                         (forecast_panel_inner(view))
                     }
                     // A persistent host like `<energy-flows>`: the readout
                     // script's handlers live on it and outlast every swap.
-                    price-panel id="price-panel" class="price-panel" sse-swap="price-panel"
+                    price-panel id="price-panel" class="day-chart price-panel" sse-swap="price-panel"
                         data-day=[view.prices.data_day()]
                         data-live=(view.prices.data_live()) {
                         (price_panel_inner(view))

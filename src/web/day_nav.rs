@@ -1,6 +1,6 @@
-//! The day a panel shows and the days its nav steps reach, shared by the
-//! energy-flows and price panels, and the `?key=YYYY-MM-DD` either is asked
-//! for with, parsed once at the edge (`CONTROL-1`).
+//! The day a panel shows and the days its nav steps reach, shared by every
+//! day-stepping panel, and the `?key=YYYY-MM-DD` each is asked for with,
+//! parsed once at the edge (`CONTROL-1`).
 
 use chrono::NaiveDate;
 
@@ -11,6 +11,60 @@ pub struct BadQuery(pub(super) String);
 impl std::fmt::Display for BadQuery {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+/// A fragment request names its day with this key: the URL already says
+/// which panel it is for.
+pub(super) const FRAGMENT_DAY_KEY: &str = "day";
+
+/// The flows panel's resolution, `1h` or `15m`.
+pub(super) const INTERVAL_KEY: &str = "interval";
+
+/// Each day-stepping panel on the page, by the keys the page's query chooses
+/// it with. They share one query, so no two panels share a key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PagePanel {
+    Flows,
+    Prices,
+    Solar,
+}
+
+impl PagePanel {
+    const ALL: [PagePanel; 3] = [PagePanel::Flows, PagePanel::Prices, PagePanel::Solar];
+
+    /// The key naming the day the panel shows on a full page.
+    pub fn day_key(self) -> &'static str {
+        match self {
+            PagePanel::Flows => FRAGMENT_DAY_KEY,
+            PagePanel::Prices => "price_day",
+            PagePanel::Solar => "solar_day",
+        }
+    }
+
+    fn keys(self) -> &'static [&'static str] {
+        match self {
+            PagePanel::Flows => &[FRAGMENT_DAY_KEY, INTERVAL_KEY],
+            PagePanel::Prices => &["price_day"],
+            PagePanel::Solar => &["solar_day"],
+        }
+    }
+
+    /// What the panel's full-page links keep of `raw`: every other panel's
+    /// choice. Only called once `raw` has parsed, so every value kept is one
+    /// a panel accepted.
+    pub fn kept_query(self, raw: Option<&str>) -> String {
+        Self::ALL
+            .into_iter()
+            .filter(|panel| *panel != self)
+            .flat_map(PagePanel::keys)
+            .filter_map(|key| {
+                query_values(raw, key)
+                    .last()
+                    .map(|value| format!("{key}={value}"))
+            })
+            .collect::<Vec<_>>()
+            .join("&")
     }
 }
 
@@ -27,20 +81,6 @@ pub(super) fn query_values<'a>(
     })
 }
 
-/// `key=value` for the last value each of `keys` has in `raw`, joined with
-/// `&`, so a full-page link can keep another panel's choice. Only called once
-/// `raw` has parsed, so every value kept is one a panel accepted.
-pub fn kept_query(raw: Option<&str>, keys: &[&str]) -> String {
-    keys.iter()
-        .filter_map(|key| {
-            query_values(raw, key)
-                .last()
-                .map(|value| format!("{key}={value}"))
-        })
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
 /// The last date `key` names in `raw`; `None` when it names none.
 pub fn parse_day_param(raw: Option<&str>, key: &str) -> Result<Option<NaiveDate>, BadQuery> {
     query_values(raw, key).try_fold(None, |_, value| {
@@ -48,6 +88,40 @@ pub fn parse_day_param(raw: Option<&str>, key: &str) -> Result<Option<NaiveDate>
             .map(Some)
             .map_err(|_| BadQuery(format!("{key}={value} is not a YYYY-MM-DD date")))
     })
+}
+
+/// The day a request asks a panel for, before today is known. `None` is
+/// today.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DayQuery {
+    day: Option<NaiveDate>,
+}
+
+impl DayQuery {
+    /// `/fragments/<panel>?day=YYYY-MM-DD`.
+    pub fn parse_fragment(raw: Option<&str>) -> Result<Self, BadQuery> {
+        Ok(DayQuery {
+            day: parse_day_param(raw, FRAGMENT_DAY_KEY)?,
+        })
+    }
+
+    /// The whole page, where each panel reads its own key.
+    pub fn parse_page(raw: Option<&str>, panel: PagePanel) -> Result<Self, BadQuery> {
+        Ok(DayQuery {
+            day: parse_day_param(raw, panel.day_key())?,
+        })
+    }
+
+    #[cfg(test)]
+    pub fn on(day: NaiveDate) -> Self {
+        DayQuery { day: Some(day) }
+    }
+
+    /// The asked-for day pulled into `earliest..=latest`, so a stale or
+    /// hand-typed link still lands on a day the panel can show.
+    pub fn resolve(self, today: NaiveDate, earliest: NaiveDate, latest: NaiveDate) -> NaiveDate {
+        self.day.map_or(today, |day| day.clamp(earliest, latest))
+    }
 }
 
 /// Which day a panel shows, and which days its steps reach.
@@ -63,7 +137,7 @@ pub struct DayNavView {
     pub label: String,
     /// "7 Oct".
     pub date: String,
-    /// The other panel's query a full-page step link keeps, e.g.
+    /// The other panels' query a full-page step link keeps, e.g.
     /// `price_day=2025-09-05`; empty outside a full page.
     pub keep: String,
 }

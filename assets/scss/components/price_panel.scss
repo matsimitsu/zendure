@@ -1,121 +1,22 @@
-@use "../breakpoints" as *;
-@use "../surfaces" as *;
-
 $tiers: (
   cheap: var(--color-info),
   normal: var(--color-price-normal),
   expensive: var(--color-price-high),
 );
 
-// The block is the persistent `<price-panel>` host, so whatever the readout
-// script keeps on it survives the SSE swaps of its contents.
+// What the price panel adds to its `day-chart` skeleton: tier-tinted bars
+// and swatches, and a readout that holds still while hovering.
 .price-panel {
-  @include panel-surface;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-  padding: var(--space-5);
-  font-family: var(--font-ui);
-
-  &__head {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    flex-wrap: wrap;
-    gap: var(--space-3);
-  }
-
-  &__titles {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
-
-  &__title {
-    @include panel-heading;
-  }
-
-  &__subtitle {
-    @include panel-caption;
-  }
-
-  // Wraps rather than overflows, so the figures never widen a 375px screen.
-  &__readout {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-end;
-    gap: var(--space-4) var(--space-7);
-  }
-
+  // A fixed width, not a minimum: hovering swaps the label, the value and
+  // the tier pill for ones of a different length, and a block that grew
+  // with them would shove the mini-stats beside it on every bar.
   &__now {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-    // A fixed width, not a minimum: hovering swaps the label, the value and
-    // the tier pill for ones of a different length, and a block that grew
-    // with them would shove the mini-stats beside it on every bar.
     width: var(--size-readout);
   }
 
-  &__read-label {
-    color: var(--color-text-muted);
-    font-family: var(--font-mono);
-    font-size: var(--text-sm);
-  }
-
-  &__read-row {
-    display: flex;
-    align-items: baseline;
-    gap: var(--space-2);
-  }
-
+  // Keeps the unit and pill from sliding as the digit count changes.
   &__read-value {
-    color: var(--color-text-primary);
-    font-family: var(--font-mono);
-    font-size: var(--text-2xl);
-    font-weight: var(--weight-medium);
-    line-height: var(--leading-tight);
-    // Keeps the unit and pill from sliding as the digit count changes.
     min-width: var(--size-readout-value);
-  }
-
-  &__read-unit {
-    color: var(--color-text-muted);
-    font-family: var(--font-mono);
-    font-size: var(--text-sm);
-  }
-
-  &__plot {
-    display: grid;
-    // `minmax(0, …)` so nothing in the plot can widen the panel.
-    grid-template-columns: var(--size-axis-gutter) minmax(0, 1fr);
-    grid-template-rows: var(--size-chart-day) auto;
-    gap: var(--space-2);
-  }
-
-  &__y-axis {
-    display: flex;
-    flex-direction: column;
-
-    .axis {
-      flex: 1;
-    }
-  }
-
-  &__chart {
-    display: block;
-    width: 100%;
-    height: 100%;
-    touch-action: pan-y;
-  }
-
-  &__x-axis {
-    grid-column: 2;
-  }
-
-  &__grid {
-    stroke: var(--color-grid-line);
-    stroke-width: var(--stroke-rule);
   }
 
   &__zero {
@@ -123,54 +24,14 @@ $tiers: (
     stroke-width: var(--stroke-rule);
   }
 
-  &__now-line {
-    stroke: var(--color-accent);
-    stroke-opacity: var(--opacity-now-line);
-    stroke-width: var(--stroke-now-line);
-    stroke-dasharray: var(--dash-now-line);
-  }
-
-  &__highlight {
-    fill: var(--color-hover-wash);
-  }
-
-  &__hit {
-    fill: transparent;
-  }
-
   &__bar--past {
     fill-opacity: var(--opacity-past);
-  }
-
-  &__legend {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-5);
-    margin: 0;
-    padding: 0;
-    list-style: none;
-  }
-
-  &__legend-item {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-2);
-    font-size: var(--text-sm);
   }
 
   &__swatch {
     width: var(--size-swatch);
     height: var(--size-swatch);
     border-radius: var(--radius-sm);
-  }
-
-  &__legend-label {
-    color: var(--color-text-muted);
-  }
-
-  &__legend-range {
-    color: var(--color-text-faint);
-    font-family: var(--font-mono);
   }
 
   @each $name, $color in $tiers {
@@ -181,12 +42,5 @@ $tiers: (
     &__swatch--#{$name} {
       background: $color;
     }
-  }
-}
-
-// The big figure takes its own row, and the two windows share the next.
-@include narrow {
-  .price-panel__now {
-    flex-basis: 100%;
   }
 }

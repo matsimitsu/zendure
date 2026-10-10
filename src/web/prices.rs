@@ -15,56 +15,17 @@ use crate::prices::{DayPrices, HourPrice, PRICE_HISTORY_DAYS, PriceSnapshot};
 use crate::units::{CentsPerKwh, Timestamp};
 
 use super::axis::{AxisDensity, AxisPosition, AxisTick};
-use super::day_nav::{BadQuery, DayNavView, parse_day_param};
+use super::day_nav::{DayNavView, DayQuery};
+use super::day_panel::{ChartedDay, DayPanel, DayPlotView, EmptyReason};
 use super::plot::{DAY_CHART_HEIGHT, Day, SlotSpan, YScale};
 use super::state::DashboardState;
 use super::view::{MISSING, MiniStatSub, MiniStatView};
-
-/// The chart's viewBox width; the height is the shared [`DAY_CHART_HEIGHT`].
-pub(super) const PRICE_CHART_WIDTH: f64 = super::plot::CHART_WIDTH;
-
-/// The bars' corner radius, in viewBox units.
-pub(super) const PRICE_BAR_RADIUS: f64 = 1.0;
-
-/// The share of a slot left empty on each side of its bar.
-const BAR_INSET: f64 = 0.14;
 
 /// Keeps a price of about zero visible as a sliver rather than nothing.
 const MIN_BAR_HEIGHT: f64 = 1.0;
 
 /// The y axis steps in whole tens of cents.
 const SCALE_STEP: CentsPerKwh = CentsPerKwh(10.0);
-
-/// The day a request asks the panel for, before today is known. `None` is
-/// today.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PriceDayQuery {
-    day: Option<NaiveDate>,
-}
-
-impl PriceDayQuery {
-    /// `/fragments/price-panel?day=YYYY-MM-DD`.
-    pub fn parse_fragment(raw: Option<&str>) -> Result<Self, BadQuery> {
-        Ok(PriceDayQuery {
-            day: parse_day_param(raw, "day")?,
-        })
-    }
-
-    /// `/?price_day=YYYY-MM-DD`: its own key, so the flows panel's `?day=`
-    /// can share the page's query.
-    pub fn parse_page(raw: Option<&str>) -> Result<Self, BadQuery> {
-        Ok(PriceDayQuery {
-            day: parse_day_param(raw, "price_day")?,
-        })
-    }
-
-    /// The asked-for day pulled into `range`, so a stale or hand-typed link
-    /// still lands on a day the panel can show.
-    fn resolve(self, today: NaiveDate, range: NavRange) -> NaiveDate {
-        self.day
-            .map_or(today, |day| day.clamp(range.earliest, range.latest))
-    }
-}
 
 /// The days the nav reaches: `PRICE_HISTORY_DAYS` back, and forward to
 /// tomorrow only once it is fully priced, so an empty tomorrow never shows.
@@ -97,57 +58,21 @@ pub struct PriceContext<'a> {
     pub configured: bool,
 }
 
-pub enum PricePanelView {
-    Empty(EmptyReason),
-    /// A day the nav reaches that holds no prices, e.g. a gap in the
-    /// journal, or today before its prices land: the nav stays so the user
-    /// can step on.
-    Unpriced(DayNavView),
-    Priced(Box<PricedDayView>),
-}
+pub type PricePanelView = DayPanel<PricedDayView>;
 
-impl PricePanelView {
-    pub fn nav(&self) -> Option<&DayNavView> {
-        match self {
-            PricePanelView::Empty(_) => None,
-            PricePanelView::Unpriced(nav) => Some(nav),
-            PricePanelView::Priced(day) => Some(&day.nav),
-        }
-    }
-
-    pub fn nav_mut(&mut self) -> Option<&mut DayNavView> {
-        match self {
-            PricePanelView::Empty(_) => None,
-            PricePanelView::Unpriced(nav) => Some(nav),
-            PricePanelView::Priced(day) => Some(&mut day.nav),
-        }
-    }
-
-    /// The day shown, which the host's `data-day` mirrors; `None` with no
-    /// nav, which only ever stands for today.
-    pub fn data_day(&self) -> Option<NaiveDate> {
-        self.nav().map(|nav| nav.shown)
-    }
-
-    /// Whether the stream, which always renders today, may replace the panel.
-    pub fn data_live(&self) -> bool {
-        self.nav().is_none_or(DayNavView::is_today)
+pub fn empty_text(reason: EmptyReason) -> &'static str {
+    match reason {
+        EmptyReason::NotConfigured => "No prices configured — add [prices] to config.toml",
+        EmptyReason::Waiting => "Waiting for prices…",
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EmptyReason {
-    NotConfigured,
-    /// Nothing is priced yet, today included.
-    Waiting,
-}
-
-impl EmptyReason {
-    pub fn text(self) -> &'static str {
-        match self {
-            EmptyReason::NotConfigured => "No prices configured — add [prices] to config.toml",
-            EmptyReason::Waiting => "Waiting for prices…",
-        }
+/// What a day the nav reaches says when it holds no price.
+pub fn blank_text(nav: &DayNavView) -> &'static str {
+    if nav.is_today() {
+        empty_text(EmptyReason::Waiting)
+    } else {
+        "No prices for this day"
     }
 }
 
@@ -162,6 +87,16 @@ pub struct PricedDayView {
     pub windows: Option<[MiniStatView; 2]>,
     pub chart: PriceChartView,
     pub legend: [PriceLegendItem; 3],
+}
+
+impl ChartedDay for PricedDayView {
+    fn nav(&self) -> &DayNavView {
+        &self.nav
+    }
+
+    fn nav_mut(&mut self) -> &mut DayNavView {
+        &mut self.nav
+    }
 }
 
 /// One readout state, formatted: the default, or a hit's.
@@ -196,18 +131,12 @@ pub struct PriceHitView {
 }
 
 pub struct PriceChartView {
+    pub plot: DayPlotView,
     pub bars: Vec<PriceBarView>,
     pub hits: Vec<PriceHitView>,
-    /// One per y-axis tick.
-    pub grid_lines: Vec<f64>,
     /// Drawn only when a negative price pulls the scale below zero; otherwise
     /// the bottom grid line is zero.
     pub zero_y: Option<f64>,
-    pub now_x: Option<f64>,
-    /// Where the highlight sits unhovered: the current hour, today only.
-    pub highlight: Option<SlotSpan>,
-    pub y_axis: Vec<AxisTick>,
-    pub x_axis: Vec<AxisTick>,
 }
 
 pub struct PriceLegendItem {
@@ -418,10 +347,7 @@ fn chart(
             let span = span_of(hour);
             let (y, height) = scale.bar(price.0, MIN_BAR_HEIGHT);
             let bar = PriceBarView {
-                span: SlotSpan {
-                    x: span.x + span.width * BAR_INSET,
-                    width: span.width * (1.0 - 2.0 * BAR_INSET),
-                },
+                span: span.bar(),
                 y,
                 height,
                 tier: Tier::of(price, day.thresholds),
@@ -438,23 +364,25 @@ fn chart(
         .unzip();
 
     PriceChartView {
+        plot: DayPlotView {
+            grid_lines: ticks.iter().map(|tick| scale.y(tick.0)).collect(),
+            now_x: day.now.map(|(now, _)| frame.x(now)),
+            highlight: day.current().map(|index| span_of(&day.hours[index])),
+            y_axis: ticks
+                .iter()
+                .map(|tick| {
+                    AxisTick::new(
+                        AxisPosition::new(scale.y(tick.0) / DAY_CHART_HEIGHT),
+                        tick_label(*tick),
+                        AxisDensity::Always,
+                    )
+                })
+                .collect(),
+            x_axis: frame.axis(day.tz, 6),
+        },
         bars,
         hits,
-        grid_lines: ticks.iter().map(|tick| scale.y(tick.0)).collect(),
         zero_y: (bottom < CentsPerKwh(0.0)).then(|| scale.y(0.0)),
-        now_x: day.now.map(|(now, _)| frame.x(now)),
-        highlight: day.current().map(|index| span_of(&day.hours[index])),
-        y_axis: ticks
-            .iter()
-            .map(|tick| {
-                AxisTick::new(
-                    AxisPosition::new(scale.y(tick.0) / DAY_CHART_HEIGHT),
-                    tick_label(*tick),
-                    AxisDensity::Always,
-                )
-            })
-            .collect(),
-        x_axis: frame.axis(day.tz, 6),
     }
 }
 
@@ -527,11 +455,7 @@ fn subtitle(snapshot: &PriceSnapshot, tariff: Option<&DynamicTariff>, tz: Tz) ->
 }
 
 /// The panel on the day `query` asks for.
-pub fn requested_price_panel(
-    state: &DashboardState,
-    query: PriceDayQuery,
-    tz: Tz,
-) -> PricePanelView {
+pub fn requested_price_panel(state: &DashboardState, query: DayQuery, tz: Tz) -> PricePanelView {
     let context = PriceContext {
         snapshot: &state.prices,
         tariff: state.tariff.as_ref(),
@@ -544,20 +468,20 @@ pub fn requested_price_panel(
 /// a now: its readout defaults to the current hour, its past hours dim and
 /// its windows only look ahead. Any other day defaults to its average.
 pub fn price_panel_view(
-    query: PriceDayQuery,
+    query: DayQuery,
     context: &PriceContext,
     now: Timestamp,
     tz: Tz,
 ) -> PricePanelView {
     if !context.configured {
-        return PricePanelView::Empty(EmptyReason::NotConfigured);
+        return DayPanel::Empty(EmptyReason::NotConfigured);
     }
     // A clock no calendar can place has no today to show prices for.
     let Some(today) = local_date(now, tz) else {
-        return PricePanelView::Empty(EmptyReason::Waiting);
+        return DayPanel::Empty(EmptyReason::Waiting);
     };
     let range = NavRange::of(today, context.snapshot, tz);
-    let date = query.resolve(today, range);
+    let date = query.resolve(today, range.earliest, range.latest);
     let nav = DayNavView::new(date, today, Some(range.earliest), range.latest);
     let prices = context.snapshot.prices_for(date, tz);
     let day_now = nav.is_today().then_some(now);
@@ -568,12 +492,12 @@ pub fn price_panel_view(
         // Today keeps its nav only while some other day holds a price to
         // step to.
         return if nav.is_today() && context.snapshot.points.is_empty() {
-            PricePanelView::Empty(EmptyReason::Waiting)
+            DayPanel::Empty(EmptyReason::Waiting)
         } else {
-            PricePanelView::Unpriced(nav)
+            DayPanel::Blank(nav)
         };
     };
-    PricePanelView::Priced(Box::new(PricedDayView {
+    DayPanel::Shown(Box::new(PricedDayView {
         subtitle: subtitle(context.snapshot, context.tariff, tz),
         nav,
         readout: default_readout(&day),

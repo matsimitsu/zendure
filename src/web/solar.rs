@@ -4,29 +4,20 @@
 //! rescales the bars. A day is 46, 48 or 50 slots long (DST days), so nothing
 //! here assumes 48.
 
-use chrono::NaiveDate;
 use chrono_tz::Tz;
 
 use crate::clock::local_date;
 use crate::units::{Elapsed, KiloWattHours, SolarPower, Timestamp, Watts};
 
 use super::axis::{AxisDensity, AxisPosition, AxisTick};
-use super::day_nav::DayNavView;
+use super::day_nav::{DayNavView, DayQuery};
+use super::day_panel::{ChartedDay, DayPanel, DayPlotView, EmptyReason};
 use super::intervals::IntervalHistory;
 use super::plot::{DAY_CHART_HEIGHT, Day, SlotSpan, YScale};
 use super::prices::range_label;
 use super::solar_day::{SOLAR_SLOT, SolarDay, SolarSlot, solar_for, tomorrow_complete};
 use super::state::{DashboardState, ForecastSnapshot};
 use super::view::{MISSING, MiniStatSub, MiniStatView, SignStyle, format_time, format_watts};
-
-/// The chart's viewBox width; the height is the shared [`DAY_CHART_HEIGHT`].
-pub(super) const FORECAST_CHART_WIDTH: f64 = super::plot::CHART_WIDTH;
-
-/// The bars' corner radius, in viewBox units.
-pub(super) const FORECAST_BAR_RADIUS: f64 = 1.0;
-
-/// The share of a slot left empty on each side of its bar.
-const BAR_INSET: f64 = 0.14;
 
 /// The y axis steps, and its grid lines fall, every half kilowatt.
 const SCALE_STEP: Watts = Watts(500);
@@ -87,53 +78,14 @@ pub struct SolarContext<'a> {
     pub configured: bool,
 }
 
-pub enum ForecastPanelView {
-    Empty(EmptyReason),
-    Forecast(Box<ForecastDayView>),
-}
+pub type ForecastPanelView = DayPanel<ForecastDayView>;
 
-impl ForecastPanelView {
-    pub fn nav(&self) -> Option<&DayNavView> {
-        match self {
-            ForecastPanelView::Empty(_) => None,
-            ForecastPanelView::Forecast(day) => Some(&day.nav),
+pub fn empty_text(reason: EmptyReason) -> &'static str {
+    match reason {
+        EmptyReason::NotConfigured => {
+            "No solar forecast configured — add [prediction] to config.toml"
         }
-    }
-
-    pub fn nav_mut(&mut self) -> Option<&mut DayNavView> {
-        match self {
-            ForecastPanelView::Empty(_) => None,
-            ForecastPanelView::Forecast(day) => Some(&mut day.nav),
-        }
-    }
-
-    /// The day shown, which the host's `data-day` mirrors; `None` with no
-    /// nav, which only ever stands for today.
-    pub fn data_day(&self) -> Option<NaiveDate> {
-        self.nav().map(|nav| nav.shown)
-    }
-
-    /// Whether the stream, which always renders today, may replace the panel.
-    pub fn data_live(&self) -> bool {
-        self.nav().is_none_or(DayNavView::is_today)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EmptyReason {
-    NotConfigured,
-    /// Configured, but no forecast has landed yet.
-    Waiting,
-}
-
-impl EmptyReason {
-    pub fn text(self) -> &'static str {
-        match self {
-            EmptyReason::NotConfigured => {
-                "No solar forecast configured — add [prediction] to config.toml"
-            }
-            EmptyReason::Waiting => "Waiting for the solar forecast…",
-        }
+        EmptyReason::Waiting => "Waiting for the solar forecast…",
     }
 }
 
@@ -146,6 +98,16 @@ pub struct ForecastDayView {
     /// So far and Still expected on today, the Peak on tomorrow.
     pub stats: Vec<MiniStatView>,
     pub chart: ForecastChartView,
+}
+
+impl ChartedDay for ForecastDayView {
+    fn nav(&self) -> &DayNavView {
+        &self.nav
+    }
+
+    fn nav_mut(&mut self) -> &mut DayNavView {
+        &mut self.nav
+    }
 }
 
 /// A figure and its unit, formatted. The unit is empty beside `—`.
@@ -206,18 +168,12 @@ pub struct ForecastHitView {
 }
 
 pub struct ForecastChartView {
+    pub plot: DayPlotView,
     pub bars: Vec<ForecastBarView>,
     /// The actual line's `d`: a new subpath after every slot with no
     /// measurement, so a lost slot reads as a gap rather than a guess.
     pub actual_path: String,
     pub hits: Vec<ForecastHitView>,
-    /// One per y-axis tick.
-    pub grid_lines: Vec<f64>,
-    pub now_x: Option<f64>,
-    /// Where the highlight sits unhovered: the current slot, today only.
-    pub highlight: Option<SlotSpan>,
-    pub y_axis: Vec<AxisTick>,
-    pub x_axis: Vec<AxisTick>,
 }
 
 /// kWh to one decimal.
@@ -409,10 +365,7 @@ fn chart(shown: &ShownDay, top: Watts) -> ForecastChartView {
             let span = shown.span(slot);
             let (y, height) = scale.bar(forecast.get(), 0.0);
             Some(ForecastBarView {
-                span: SlotSpan {
-                    x: span.x + span.width * BAR_INSET,
-                    width: span.width * (1.0 - 2.0 * BAR_INSET),
-                },
+                span: span.bar(),
                 y,
                 height,
             })
@@ -438,26 +391,28 @@ fn chart(shown: &ShownDay, top: Watts) -> ForecastChartView {
         .map(|index| shown.span(&shown.day.slots[index]));
 
     ForecastChartView {
+        plot: DayPlotView {
+            grid_lines: ticks
+                .iter()
+                .map(|tick| scale.y(f64::from(tick.get())))
+                .collect(),
+            now_x: current.map(|span| span.x + span.width / 2.0),
+            highlight: current,
+            y_axis: ticks
+                .iter()
+                .map(|tick| {
+                    AxisTick::new(
+                        AxisPosition::new(scale.y(f64::from(tick.get())) / DAY_CHART_HEIGHT),
+                        tick.get().to_string(),
+                        AxisDensity::Always,
+                    )
+                })
+                .collect(),
+            x_axis: shown.frame.axis(shown.tz, 6),
+        },
         bars,
         actual_path: actual_path(shown, &scale),
         hits,
-        grid_lines: ticks
-            .iter()
-            .map(|tick| scale.y(f64::from(tick.get())))
-            .collect(),
-        now_x: current.map(|span| span.x + span.width / 2.0),
-        highlight: current,
-        y_axis: ticks
-            .iter()
-            .map(|tick| {
-                AxisTick::new(
-                    AxisPosition::new(scale.y(f64::from(tick.get())) / DAY_CHART_HEIGHT),
-                    tick.get().to_string(),
-                    AxisDensity::Always,
-                )
-            })
-            .collect(),
-        x_axis: shown.frame.axis(shown.tz, 6),
     }
 }
 
@@ -469,15 +424,10 @@ fn subtitle(forecast: &ForecastSnapshot, tz: Tz) -> String {
     }
 }
 
-/// Today's panel, as the page and the stream render it.
-pub fn todays_forecast_panel(state: &DashboardState, tz: Tz) -> ForecastPanelView {
-    requested_forecast_panel(state, None, tz)
-}
-
-/// The panel on the day a request asks for, `None` being today.
+/// The panel on the day `query` asks for.
 pub fn requested_forecast_panel(
     state: &DashboardState,
-    day: Option<NaiveDate>,
+    query: DayQuery,
     tz: Tz,
 ) -> ForecastPanelView {
     let context = SolarContext {
@@ -485,39 +435,39 @@ pub fn requested_forecast_panel(
         intervals: &state.intervals,
         configured: state.forecast_feed,
     };
-    forecast_panel_view(day, &context, state.as_of, tz)
+    forecast_panel_view(query, &context, state.as_of, tz)
 }
 
-/// `day`, or today when `None`, clamped to today and tomorrow, the latter
-/// only once its forecast covers every slot. Today has a now: its readout
+/// The day `query` asks for, clamped to today and tomorrow, the latter only
+/// once its forecast covers every slot. Today has a now: its readout
 /// defaults to the current slot and its line stops at the last whole one.
 /// Tomorrow defaults to its forecast total.
 pub fn forecast_panel_view(
-    day: Option<NaiveDate>,
+    query: DayQuery,
     context: &SolarContext,
     now: Timestamp,
     tz: Tz,
 ) -> ForecastPanelView {
     if !context.configured {
-        return ForecastPanelView::Empty(EmptyReason::NotConfigured);
+        return DayPanel::Empty(EmptyReason::NotConfigured);
     }
     let forecast = context.forecast;
     // A clock no calendar can place has no today to forecast.
     let Some(today) = local_date(now, tz).filter(|_| !forecast.points.is_empty()) else {
-        return ForecastPanelView::Empty(EmptyReason::Waiting);
+        return DayPanel::Empty(EmptyReason::Waiting);
     };
     let tomorrow = today
         .succ_opt()
         .filter(|_| tomorrow_complete(forecast, tz, now));
     let latest = tomorrow.unwrap_or(today);
-    let date = day.map_or(today, |day| day.clamp(today, latest));
+    let date = query.resolve(today, today, latest);
     let days: Vec<SolarDay> = [Some(today), tomorrow]
         .into_iter()
         .flatten()
         .filter_map(|day| solar_for(day, forecast, context.intervals, tz, now))
         .collect();
     let Some(day) = days.iter().find(|day| day.date == date) else {
-        return ForecastPanelView::Empty(EmptyReason::Waiting);
+        return DayPanel::Empty(EmptyReason::Waiting);
     };
 
     let nav = DayNavView::new(date, today, Some(today), latest);
@@ -535,7 +485,7 @@ pub fn forecast_panel_view(
         now,
         tz,
     };
-    ForecastPanelView::Forecast(Box::new(ForecastDayView {
+    DayPanel::Shown(Box::new(ForecastDayView {
         subtitle: subtitle(forecast, tz),
         readout: default_readout(&shown),
         stats: stats(&shown),

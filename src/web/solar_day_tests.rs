@@ -1,25 +1,9 @@
 use super::*;
 
-use chrono::{Datelike, TimeZone};
+use chrono::Datelike;
 
 use crate::clock::local_day_bounds;
-use crate::fixtures::{journey, utc};
-
-fn amsterdam() -> Tz {
-    chrono_tz::Europe::Amsterdam
-}
-
-fn date(month: u32, day: u32) -> NaiveDate {
-    NaiveDate::from_ymd_opt(2026, month, day).unwrap()
-}
-
-fn local(month: u32, day: u32, hour: u32) -> Timestamp {
-    Timestamp::from(
-        amsterdam()
-            .with_ymd_and_hms(2026, month, day, hour, 0, 0)
-            .unwrap(),
-    )
-}
+use crate::fixtures::{amsterdam, date, journey, local, utc};
 
 fn point(at: Timestamp, watts: f64) -> SolarForecastPoint {
     SolarForecastPoint {
@@ -59,7 +43,7 @@ fn meter(at: Timestamp, solar: f64) -> crate::event::Event {
 fn a_day_has_one_slot_per_half_hour_of_its_real_length() {
     for (day, slots) in [(date(3, 29), 46), (date(6, 15), 48), (date(10, 25), 50)] {
         let forecast = whole_days(&[day], amsterdam());
-        let noon = local(day.month(), day.day(), 12);
+        let noon = local(day.month(), day.day(), 12, 0);
 
         let today = solar_for(day, &forecast, &no_history(), amsterdam(), noon).unwrap();
 
@@ -72,14 +56,14 @@ fn a_day_has_one_slot_per_half_hour_of_its_real_length() {
 fn a_complete_tomorrow_on_a_dst_day_has_fifty_slots_and_no_actuals() {
     let forecast = whole_days(&[date(10, 24), date(10, 25)], amsterdam());
     let mut intervals = no_history();
-    intervals.record(&meter(local(10, 24, 12), 900.0));
+    intervals.record(&meter(local(10, 24, 12, 0), 900.0));
 
     let tomorrow = solar_for(
         date(10, 25),
         &forecast,
         &intervals,
         amsterdam(),
-        local(10, 24, 12),
+        local(10, 24, 12, 0),
     )
     .unwrap();
 
@@ -93,9 +77,9 @@ fn a_complete_tomorrow_on_a_dst_day_has_fifty_slots_and_no_actuals() {
 #[test]
 fn a_partial_tomorrow_is_not_complete_and_not_shown() {
     let mut forecast = whole_days(&[date(6, 15), date(6, 16)], amsterdam());
-    let cutoff = local(6, 16, 12);
+    let cutoff = local(6, 16, 12, 0);
     forecast.points.retain(|point| point.at < cutoff);
-    let now = local(6, 15, 9);
+    let now = local(6, 15, 9, 0);
 
     assert!(!tomorrow_complete(&forecast, amsterdam(), now));
     assert_eq!(
@@ -107,7 +91,11 @@ fn a_partial_tomorrow_is_not_complete_and_not_shown() {
 #[test]
 fn a_whole_tomorrow_is_complete() {
     let forecast = whole_days(&[date(6, 16)], amsterdam());
-    assert!(tomorrow_complete(&forecast, amsterdam(), local(6, 15, 9)));
+    assert!(tomorrow_complete(
+        &forecast,
+        amsterdam(),
+        local(6, 15, 9, 0)
+    ));
 }
 
 #[test]
@@ -115,14 +103,14 @@ fn an_empty_forecast_has_no_tomorrow() {
     assert!(!tomorrow_complete(
         &ForecastSnapshot::default(),
         amsterdam(),
-        local(6, 15, 9)
+        local(6, 15, 9, 0)
     ));
 }
 
 #[test]
 fn neither_yesterday_nor_the_day_after_tomorrow_is_served() {
     let forecast = whole_days(&[date(6, 14), date(6, 16), date(6, 17)], amsterdam());
-    let now = local(6, 15, 9);
+    let now = local(6, 15, 9, 0);
     for day in [date(6, 14), date(6, 17)] {
         assert_eq!(
             solar_for(day, &forecast, &no_history(), amsterdam(), now),
