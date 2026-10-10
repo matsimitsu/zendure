@@ -34,9 +34,6 @@ fn tier_boundaries_and_ties() {
     assert_eq!(Tier::of(c(8.0), t), Tier::Normal);
     assert_eq!(Tier::of(c(15.9), t), Tier::Normal);
     assert_eq!(Tier::of(c(16.0), t), Tier::Expensive);
-    // A flat day has nothing cheap, everything expensive.
-    let flat = tiers(&[c(5.0); 24]).unwrap();
-    assert_eq!(Tier::of(c(5.0), flat), Tier::Expensive);
 }
 
 #[test]
@@ -45,6 +42,19 @@ fn negative_prices_are_cheap() {
     prices[3] = c(-4.0);
     let t = tiers(&prices).unwrap();
     assert_eq!(Tier::of(c(-4.0), t), Tier::Cheap);
+}
+
+#[test]
+fn a_negative_price_is_cheap_on_a_mostly_negative_day() {
+    let prices: Vec<_> = (0..24).map(|h| c(f64::from(h) - 30.0)).collect();
+    let t = tiers(&prices).unwrap();
+    assert_eq!(Tier::of(c(-7.0), t), Tier::Cheap);
+}
+
+#[test]
+fn a_flat_day_is_all_normal() {
+    let t = tiers(&[c(12.0); 24]).unwrap();
+    assert_eq!(Tier::of(c(12.0), t), Tier::Normal);
 }
 
 #[test]

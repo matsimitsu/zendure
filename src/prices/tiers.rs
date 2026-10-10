@@ -42,11 +42,14 @@ impl Tier {
         }
     }
 
-    /// Cheap is strictly below `lo`, expensive is `hi` and up.
+    /// Cheap is strictly below `lo`, expensive is `hi` and up. Being paid to
+    /// import is cheap however the rest of the day ranks, and a day with no
+    /// spread (`lo == hi`) has nothing to flag, so it reads as normal rather
+    /// than wholly expensive.
     pub fn of(price: CentsPerKwh, (lo, hi): (CentsPerKwh, CentsPerKwh)) -> Tier {
-        if price < lo {
+        if price < lo || price < CentsPerKwh(0.0) {
             Tier::Cheap
-        } else if price >= hi {
+        } else if price >= hi && lo < hi {
             Tier::Expensive
         } else {
             Tier::Normal
