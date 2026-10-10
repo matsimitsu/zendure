@@ -976,7 +976,7 @@ impl Cost {
 /// A wholesale price over the interval it applies to. Carries its own end so
 /// hourly and quarter-hourly feeds share one type.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PricePoint {
     pub from: Timestamp,
     pub until: Timestamp,
