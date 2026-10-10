@@ -461,6 +461,20 @@ pub struct DynamicTariff {
     pub vat: Percent,
 }
 
+impl DynamicTariff {
+    /// What the contract charges per imported kWh: VAT applies to the whole
+    /// sum, surcharges included, as on the invoice.
+    pub fn import_price(&self, wholesale: CentsPerKwh) -> CentsPerKwh {
+        (wholesale + self.markup + self.energy_tax).with_vat(self.vat)
+    }
+
+    /// What the contract credits per exported kWh. VAT-free: a household is
+    /// not a VAT-registered seller, so nothing is added on the way out.
+    pub fn export_price(&self, wholesale: CentsPerKwh) -> CentsPerKwh {
+        wholesale - self.export_markup
+    }
+}
+
 /// `[prices.fixed]`: a flat contract, already VAT-inclusive.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq)]

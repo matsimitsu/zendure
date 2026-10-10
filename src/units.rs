@@ -996,6 +996,15 @@ impl PriceSeries {
         self.0.insert(point.from, point);
     }
 
+    /// In order of `from`.
+    pub fn iter(&self) -> impl Iterator<Item = &PricePoint> {
+        self.0.values()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     /// Drops every point whose interval is over by `cutoff`.
     pub fn drop_ending_before(&mut self, cutoff: Timestamp) {
         self.0.retain(|_, point| point.until > cutoff);

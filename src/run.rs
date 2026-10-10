@@ -656,7 +656,8 @@ pub async fn run(
         .with_telemetry(telemetry.figures(
             startup_soc,
             engine.soc_limits(startup_clock.weekday, telemetry.min_soc),
-        ));
+        ))
+        .with_tariff(config.prices.as_ref().and_then(|prices| prices.dynamic));
         let (tx, rx) = tokio::sync::watch::channel(seed);
         let past_days = web::PastDays::new(config.journal_path.clone(), configured);
         web_task = web::spawn(web_cfg, rx, config.timezone, past_days, async move {

@@ -184,16 +184,12 @@ pub struct Tariffs {
 }
 
 impl Tariffs {
-    /// What a dynamic contract charges per imported kWh: VAT applies to the
-    /// whole sum, surcharges included, as on the invoice.
     fn dynamic_import(&self, point: &PricePoint) -> CentsPerKwh {
-        (point.wholesale + self.dynamic.markup + self.dynamic.energy_tax).with_vat(self.dynamic.vat)
+        self.dynamic.import_price(point.wholesale)
     }
 
-    /// What a dynamic contract credits per exported kWh. VAT-free: a household
-    /// is not a VAT-registered seller, so nothing is added on the way out.
     fn dynamic_export(&self, point: &PricePoint) -> CentsPerKwh {
-        point.wholesale - self.dynamic.export_markup
+        self.dynamic.export_price(point.wholesale)
     }
 }
 

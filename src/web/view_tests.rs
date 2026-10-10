@@ -1023,3 +1023,191 @@ fn each_card_is_live_inside_its_shell() {
         );
     }
 }
+
+// --- Price panel -------------------------------------------------------------
+
+/// Amsterdam wall-clock time, `day` days after 4 September 2025.
+fn local(day: u64, hour: u32, minute: u32) -> Timestamp {
+    use chrono::TimeZone;
+    let date = chrono::NaiveDate::from_ymd_opt(2025, 9, 4).unwrap() + chrono::Days::new(day);
+    let local = date.and_hms_opt(hour, minute, 0).unwrap();
+    Timestamp::from(tz().from_local_datetime(&local).single().unwrap())
+}
+
+/// An hourly price from `hour` on local `day`.
+fn price(day: u64, hour: u32, cents: f64) -> PricePoint {
+    PricePoint {
+        from: local(day, hour, 0),
+        until: local(day, hour, 0) + Elapsed::of(std::time::Duration::from_secs(3600)),
+        wholesale: CentsPerKwh(cents),
+    }
+}
+
+fn snapshot(points: &[PricePoint]) -> PriceSnapshot {
+    let mut series = PriceSeries::default();
+    for point in points {
+        series.insert(*point);
+    }
+    PriceSnapshot {
+        points: series,
+        as_of: Some(local(0, 15, 2)),
+    }
+}
+
+fn tariff() -> DynamicTariff {
+    DynamicTariff {
+        markup: CentsPerKwh(2.0),
+        energy_tax: CentsPerKwh(10.0),
+        export_markup: CentsPerKwh(1.0),
+        vat: Percent(21.0),
+    }
+}
+
+#[test]
+fn price_panel_view_of_an_empty_snapshot_says_how_to_configure_prices() {
+    let view = price_panel_view(&PriceSnapshot::default(), None, local(0, 12, 0), tz());
+
+    assert!(!view.has_data);
+    assert_eq!(
+        view.as_of,
+        "No prices configured — add [prices] to config.toml"
+    );
+    assert!(view.days.is_empty());
+}
+
+#[test]
+fn price_panel_view_with_only_past_days_is_empty() {
+    let view = price_panel_view(&snapshot(&[price(0, 10, 5.0)]), None, local(1, 12, 0), tz());
+
+    assert!(!view.has_data);
+}
+
+/// Bucketing is by local date: local midnight is 22:00 UTC the day before,
+/// and still lands on the local day it starts.
+#[test]
+fn price_panel_view_buckets_today_and_tomorrow_by_local_date() {
+    let points = [
+        price(0, 0, 5.0),
+        price(0, 23, 6.0),
+        price(1, 0, 7.0),
+        price(2, 0, 8.0),
+    ];
+    let view = price_panel_view(&snapshot(&points), None, local(0, 12, 0), tz());
+
+    let labels: Vec<_> = view.days.iter().map(|day| day.label).collect();
+    assert_eq!(labels, ["Today", "Tomorrow"]);
+    assert_eq!(view.days[0].bars.len(), 2);
+    assert_eq!(view.days[1].bars.len(), 1);
+    assert_eq!(
+        view.days[0].bars[0].x, 0.0,
+        "local midnight starts the axis"
+    );
+    assert!(
+        view.days[0].bars[1].x > 950.0,
+        "23:00 sits at the axis's end"
+    );
+}
+
+#[test]
+fn price_panel_view_has_no_tomorrow_before_it_is_published() {
+    let view = price_panel_view(&snapshot(&[price(0, 10, 5.0)]), None, local(0, 12, 0), tz());
+
+    assert_eq!(view.days.len(), 1);
+    assert_eq!(view.days[0].label, "Today");
+}
+
+#[test]
+fn price_panel_view_without_a_tariff_shows_wholesale() {
+    let view = price_panel_view(
+        &snapshot(&[price(0, 12, 10.0)]),
+        None,
+        local(0, 12, 30),
+        tz(),
+    );
+
+    assert_eq!(view.chart_label, "Wholesale price, ct/kWh");
+    assert_eq!(view.current.value, "10.0 ct/kWh");
+}
+
+#[test]
+fn price_panel_view_with_a_tariff_shows_the_all_in_price() {
+    let tariff = tariff();
+    let view = price_panel_view(
+        &snapshot(&[price(0, 12, 10.0)]),
+        Some(&tariff),
+        local(0, 12, 30),
+        tz(),
+    );
+
+    assert_eq!(view.chart_label, "All-in import price incl. VAT, ct/kWh");
+    // (10 + 2 + 10) × 1.21
+    assert_eq!(view.current.value, "26.6 ct/kWh");
+}
+
+#[test]
+fn price_panel_view_marks_only_the_current_interval() {
+    let points = [price(0, 11, 5.0), price(0, 12, 6.0), price(0, 13, 7.0)];
+    let view = price_panel_view(&snapshot(&points), None, local(0, 12, 0), tz());
+
+    let current: Vec<_> = view.days[0].bars.iter().map(|bar| bar.current).collect();
+    assert_eq!(
+        current,
+        [false, true, false],
+        "12:00 starts the noon interval"
+    );
+}
+
+#[test]
+fn price_panel_view_reads_a_gap_as_no_current_price() {
+    let view = price_panel_view(&snapshot(&[price(0, 10, 5.0)]), None, local(0, 12, 0), tz());
+
+    assert_eq!(view.current.value, "—");
+    assert!(view.days[0].bars.iter().all(|bar| !bar.current));
+}
+
+#[test]
+fn price_panel_view_draws_negative_prices_below_the_zero_line() {
+    let points = [price(0, 12, 10.0), price(0, 13, -5.0), price(1, 12, 20.0)];
+    let view = price_panel_view(&snapshot(&points), None, local(0, 9, 0), tz());
+
+    let today = &view.days[0];
+    let (positive, negative) = (today.bars[0], today.bars[1]);
+    assert!(!positive.negative);
+    assert!((positive.y + positive.height - today.zero_y).abs() < 1e-9);
+    assert!(negative.negative);
+    assert_eq!(negative.y, today.zero_y, "hangs from the zero line");
+    assert!(negative.height > 0.0);
+    assert_eq!(
+        today.zero_y, view.days[1].zero_y,
+        "both days share one scale"
+    );
+    assert!(
+        view.days[1].bars[0].height > positive.height,
+        "tomorrow's 20 ct towers over today's 10 ct"
+    );
+
+    assert_eq!(view.today_min.value, "−5.0 ct/kWh");
+    assert_eq!(view.today_max.value, "10.0 ct/kWh", "tomorrow is not today");
+}
+
+#[test]
+fn the_price_panel_renders_a_bar_per_interval_and_marks_the_current_one() {
+    let mut s = state(vec![]);
+    s.prices = snapshot(&[price(0, 12, 10.0), price(0, 13, -2.0)]);
+    s.as_of = local(0, 12, 30);
+    let html = layout::price_panel_inner(&dashboard_view(&s, tz())).into_string();
+
+    assert_eq!(html.matches("<rect class=\"price-panel__bar").count(), 2);
+    assert!(html.contains("price-panel__bar price-panel__bar--current"));
+    assert!(html.contains("price-panel__bar price-panel__bar--negative"));
+    assert!(html.contains("price-panel__zero"));
+    assert!(html.contains("Wholesale price, ct/kWh"));
+}
+
+#[test]
+fn the_price_panel_without_prices_renders_its_empty_state() {
+    let html = layout::price_panel_inner(&dashboard_view(&state(vec![]), tz())).into_string();
+
+    assert!(html.contains("No prices configured — add [prices] to config.toml"));
+    assert!(!html.contains("price-panel__chart"));
+}
