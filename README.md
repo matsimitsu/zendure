@@ -108,6 +108,25 @@ publish_prefix = "zendure"
 # state_path = "/var/lib/zendure/prediction_state.json"
 # poll_times = ["06:00", "09:30", "12:30", "15:30", "18:30"]   # default
 
+# Presence, not a flag, turns electricity-price fetching on. All prices are
+# ct/kWh; a negative value is legitimate.
+# [prices]
+# kind = "energyzero"          # or "simulated"; required
+# poll_times = ["00:05", "15:00", "17:00"]   # default
+# backfill_days = 60           # default
+#
+# A dynamic contract: wholesale price plus these, then VAT.
+# [prices.dynamic]
+# markup = 1.5                 # supplier surcharge on import, excl. VAT
+# energy_tax = 10.85           # excl. VAT; verify for the current year, it changes every January
+# export_markup = 0.0          # deducted from the wholesale price on export, excl. VAT
+# vat = 21.0                   # percent
+#
+# A fixed contract instead: flat rates, already incl. VAT.
+# [prices.fixed]
+# import = 28.0
+# export = 5.0
+
 [clock]
 timezone = "Europe/Amsterdam"   # IANA name
 

@@ -574,6 +574,22 @@ impl std::ops::Mul for Fraction {
     }
 }
 
+/// A price per kilowatt-hour, in euro-cents. A rate, not money. Negative is
+/// legitimate — wholesale prices go below zero.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CentsPerKwh(pub f64);
+
+#[allow(dead_code)]
+impl CentsPerKwh {
+    /// The consumer rate once VAT is added on top. A negative price grows more
+    /// negative, which is what the invoice does too.
+    pub fn with_vat(self, vat: Percent) -> Self {
+        CentsPerKwh(self.0 * (1.0 + vat.fraction()))
+    }
+}
+
 /// A percentage that is not a state of charge — round-trip efficiency, today.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
