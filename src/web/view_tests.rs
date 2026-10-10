@@ -216,6 +216,7 @@ fn every_app_script_loads_as_a_module_with_its_own_scope() {
     let names: Vec<&str> = scripts.iter().map(|(_, name)| name.as_str()).collect();
     assert!(names.contains(&"day-chart.js"), "{names:?}");
     assert!(names.contains(&"energy-flows.js"), "{names:?}");
+    assert!(names.contains(&"forecast-panel.js"), "{names:?}");
     assert!(names.contains(&"line-chart.js"), "{names:?}");
     assert!(names.contains(&"price-panel.js"), "{names:?}");
     for (module, name) in &scripts {
@@ -277,7 +278,15 @@ fn every_app_script_defines_its_element_when_loaded_together() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut defined: Vec<&str> = stdout.trim().split(',').collect();
     defined.sort_unstable();
-    assert_eq!(defined, ["energy-flows", "line-chart", "price-panel"]);
+    assert_eq!(
+        defined,
+        [
+            "energy-flows",
+            "forecast-panel",
+            "line-chart",
+            "price-panel"
+        ]
+    );
 }
 
 // --- The battery badge is a claim about *now* --------------------------------
