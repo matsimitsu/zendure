@@ -286,7 +286,7 @@ fn a_past_day_is_finished_and_not_live() {
     assert!(html.contains(r#"data-live="false""#));
     assert!(html.contains(r#"href="/?day=2026-10-08&amp;interval=15m""#));
     assert!(html.contains(r#"hx-get="/fragments/energy-flows?day=2026-10-06""#));
-    assert!(html.contains("energy-flows__today"));
+    assert!(html.contains("day-nav__today"));
 }
 
 #[test]
@@ -297,5 +297,5 @@ fn today_cannot_step_forward() {
     assert!(view.nav.live());
     let html = crate::web::templates::energy_flows::render(&view).into_string();
     assert!(html.contains(r#"aria-disabled="true""#));
-    assert!(!html.contains("energy-flows__today"));
+    assert!(!html.contains("day-nav__today"));
 }

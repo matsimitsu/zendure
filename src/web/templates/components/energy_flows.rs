@@ -7,6 +7,7 @@ use crate::web::flows::{
     FlowResolution,
 };
 use crate::web::templates::axis;
+use crate::web::templates::day_nav::{self, DayNav, DayNavLink};
 
 /// The panel's contents. The `<energy-flows>` host around them persists
 /// across SSE swaps, so the interval and hidden-series modifiers live on it
@@ -21,7 +22,7 @@ pub fn render(view: &EnergyFlowsView) -> Markup {
                 }
             }
             div class="energy-flows__controls" {
-                (day_nav(&view.nav, view.interval))
+                (day_nav_markup(&view.nav, view.interval))
                 div class="energy-flows__segmented" role="group" aria-label="Interval" {
                     @for plot in &view.plots {
                         @let key = plot.resolution.key();
@@ -79,40 +80,21 @@ pub fn host_class(view: &EnergyFlowsView) -> String {
 /// `data-day` and `data-live` travel on the nav, which every swap replaces;
 /// the script mirrors them onto the host, whose `data-live` decides whether
 /// the stream may overwrite the panel.
-fn day_nav(nav: &DayNavView, interval: FlowResolution) -> Markup {
-    html! {
-        nav class="energy-flows__day-nav" aria-label="Day" data-day=(nav.shown) data-live=(nav.live()) {
-            (step(nav.previous, "‹", "Previous day", interval))
-            div class="energy-flows__day" {
-                span class="energy-flows__day-label" { (nav.label) }
-                span class="energy-flows__day-date" { (nav.date) }
-            }
-            (step(nav.next, "›", "Next day", interval))
-            @if !nav.live() {
-                a class="energy-flows__today"
-                    href=(page_href(None, interval))
-                    hx-get=(fragment_href(None))
-                    hx-target="closest energy-flows" { "Today" }
-            }
-        }
-    }
-}
-
-/// A link to `target`, or an inert glyph where there is no day to go to.
-fn step(target: Option<NaiveDate>, glyph: &str, label: &str, interval: FlowResolution) -> Markup {
-    html! {
-        @match target {
-            Some(day) => a class="energy-flows__step"
-                href=(page_href(Some(day), interval))
-                hx-get=(fragment_href(Some(day)))
-                hx-target="closest energy-flows"
-                aria-label=(label) { (glyph) },
-            None => span class="energy-flows__step energy-flows__step--disabled"
-                role="link"
-                aria-disabled="true"
-                aria-label=(label) { (glyph) },
-        }
-    }
+fn day_nav_markup(nav: &DayNavView, interval: FlowResolution) -> Markup {
+    let link = |day: Option<NaiveDate>| DayNavLink {
+        href: page_href(day, interval),
+        hx_get: fragment_href(day),
+    };
+    day_nav::render(&DayNav {
+        label: &nav.label,
+        date: &nav.date,
+        prev: nav.previous.map(|day| link(Some(day))),
+        next: nav.next.map(|day| link(Some(day))),
+        today: (!nav.live()).then(|| link(None)),
+        hx_target: "closest energy-flows",
+        data_day: Some(nav.shown.to_string()),
+        data_live: Some(nav.live()),
+    })
 }
 
 /// The whole page on `day`, for a browser following the link itself. The

@@ -44,6 +44,13 @@
   --color-idle-bg: oklch(1 0 0 / 0.08);
   --color-idle-text: oklch(0.75 0.01 250);
 
+  // Price tiers: cheap reuses the info pair, normal the idle pair
+  --color-price-cheap-text: oklch(0.86 0.08 200);
+  --color-price-normal: oklch(0.55 0.03 250);
+  --color-price-high: oklch(0.7 0.14 35);
+  --color-price-high-bg: oklch(0.3 0.07 35);
+  --color-price-high-text: oklch(0.86 0.1 35);
+
   --color-operational: oklch(0.7 0.15 150);
 
   // SOC bar: stripes mark the SOC the controller will not use
@@ -110,6 +117,7 @@
   // Emphasis
   --opacity-disabled: 0.35;
   --opacity-hidden: 0.4;
+  --opacity-past: 0.35;
 
   // Energy flows: the in-progress interval's marker
   --opacity-now-line: 0.7;
@@ -122,6 +130,7 @@
   --size-chart: 260px;
   --size-axis-gutter: 40px;
   --size-step: 30px;
+  --size-chart-price: 160px;
   --size-day-label: 118px;
   --space-modal-top: 56px;
 
