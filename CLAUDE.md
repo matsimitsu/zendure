@@ -77,7 +77,7 @@ crossed a boundary without anyone saying what the conversion meant.
 - `src/prediction/` — Solar forecast: `Prediction` trait, `solcast` (real) and
   `simulated` backends, the daily poll budget. Dashboard-only, feeds nothing
   into `controller.rs`
-- `src/prices/` — Electricity prices: `PriceSource` trait, `PriceFeed` enum over the backends (`simulated` so far). Display and analysis only, feeds nothing into `controller.rs`
+- `src/prices/` — Electricity prices: `PriceSource` trait, `PriceFeed` enum over the backends (`energyzero`, `simulated`). Display and analysis only, feeds nothing into `controller.rs`
 - `src/simulation.rs` — A virtual battery that integrates real power over real time, so the controller can run against no hardware
 - `src/replay.rs` — Decision diff: a recorded event stream re-folded through the engine, hermetic
 - `src/analyze.rs` — Integrating a recorded run into daily energy, offline

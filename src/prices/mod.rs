@@ -11,8 +11,10 @@
 
 use std::future::Future;
 
+use crate::config::{PriceKind, PricesConfig};
 use crate::units::{PricePoint, Timestamp};
 
+pub mod energyzero;
 pub mod simulated;
 
 /// What can go wrong fetching prices. A response this build cannot decode is
@@ -45,7 +47,19 @@ pub trait PriceSource {
 
 /// Whichever backend `[prices]` selected.
 pub enum PriceFeed {
+    EnergyZero(energyzero::EnergyZeroPrices),
     Simulated(simulated::SimulatedPrices),
+}
+
+impl PriceFeed {
+    /// The only place a `[prices]` kind becomes a live backend, so callers
+    /// never match on `PriceKind` themselves.
+    pub fn from_config(config: &PricesConfig) -> PriceFeed {
+        match config.kind {
+            PriceKind::EnergyZero => PriceFeed::EnergyZero(energyzero::EnergyZeroPrices::new()),
+            PriceKind::Simulated => PriceFeed::Simulated(simulated::SimulatedPrices::new()),
+        }
+    }
 }
 
 impl PriceSource for PriceFeed {
@@ -55,6 +69,7 @@ impl PriceSource for PriceFeed {
         until: Timestamp,
     ) -> Result<Vec<PricePoint>, PriceError> {
         match self {
+            PriceFeed::EnergyZero(s) => s.prices(from, until).await,
             PriceFeed::Simulated(s) => s.prices(from, until).await,
         }
     }
