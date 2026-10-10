@@ -674,8 +674,18 @@ startup, before the first poll, the poller backfills: for each of the last
 per day, in sequence — and journals it, then logs how many days were
 fetched, already present or failed. A row's timestamp is when it was
 fetched, so coverage is decided from the prices inside the payloads. The
-dashboard is seeded from the journal's prices for today onwards; there is no
-price panel yet. Nothing here reaches `src/controller.rs`.
+dashboard is seeded from the journal's prices for today onwards. Nothing here
+reaches `src/controller.rs`.
+
+The price panel draws one bar per price interval for local today, and a
+second chart for tomorrow once its prices are published (around 15:00). With
+`[prices.dynamic]` configured the bars are the all-in import price —
+`(wholesale + markup + energy_tax)` plus VAT, the same figure `analyze`
+charges — and the chart says so; without it they are the bare wholesale
+price. Both days share one scale, negative prices hang below a zero line, and
+the interval in progress is highlighted. Above the charts sit the current
+price and today's minimum and maximum, in ct/kWh. Without `[prices]` (or
+before its first fetch lands) the panel shows an empty state.
 
 The EV card shows a car's battery state of charge when `[car_battery]` is
 configured. `kind = "vw_portal"` reads it from the VW Group EU Data Act

@@ -1,0 +1,79 @@
+@use "../surfaces" as *;
+
+.price-panel {
+  @include panel-surface;
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+
+  &__header {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  &__title {
+    margin: 0;
+    color: var(--color-text-primary);
+    font-size: var(--text-md);
+    font-weight: var(--weight-semibold);
+    font-family: var(--font-ui);
+  }
+
+  &__subtitle,
+  &__empty {
+    margin: 0;
+    color: var(--color-text-secondary);
+    font-size: var(--text-sm);
+    font-family: var(--font-ui);
+  }
+
+  // Wraps rather than overflows, so three figures never widen a 375px screen.
+  &__readout {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-4) var(--space-6);
+  }
+
+  &__chart-label,
+  &__day-label {
+    font-size: var(--text-xs);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-caps);
+    color: var(--color-text-faint);
+    font-family: var(--font-ui);
+  }
+
+  &__day {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  &__chart {
+    width: 100%;
+    height: var(--size-chart-strip);
+    display: block;
+  }
+
+  &__bar {
+    fill: var(--color-accent-bg);
+
+    &--negative {
+      fill: var(--color-info-bg);
+    }
+
+    &--current {
+      fill: var(--color-accent);
+    }
+
+    &--negative.price-panel__bar--current {
+      fill: var(--color-info);
+    }
+  }
+
+  &__zero {
+    stroke: var(--color-zero-line);
+  }
+}

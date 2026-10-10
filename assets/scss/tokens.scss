@@ -128,6 +128,8 @@
   // Line chart (detail modal)
   --color-band: oklch(1 0 0 / 0.04);
   --size-chart-sm: 180px;
+  // A short bar strip: the price panel's per-day charts
+  --size-chart-strip: 110px;
   --size-chart-dot: 9px;
   --color-crosshair: oklch(1 0 0 / 0.35);
   --size-table-min: 520px;

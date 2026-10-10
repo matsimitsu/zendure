@@ -15,6 +15,7 @@ mod components {
     pub mod pack_list;
     pub mod pack_table;
     pub mod page_header;
+    pub mod price_panel;
     pub mod soc_bar;
     pub mod stat_card;
     pub mod top_bar;

@@ -13,7 +13,7 @@ use maud::{DOCTYPE, Markup, html};
 
 use super::components::{
     back_link, battery_panel, callout, decision_log, detail_view, energy_flows, forecast_panel,
-    modal, page_header, stat_card, top_bar,
+    modal, page_header, price_panel, stat_card, top_bar,
 };
 use crate::web::view::{DashboardView, DetailView};
 
@@ -78,6 +78,9 @@ pub fn page(view: &DashboardView) -> Markup {
                     }
                     div id="forecast-panel" sse-swap="forecast-panel" {
                         (forecast_panel_inner(view))
+                    }
+                    div id="price-panel" sse-swap="price-panel" {
+                        (price_panel_inner(view))
                     }
                     (callout::render())
                 }
@@ -146,6 +149,12 @@ pub fn decision_log_inner(view: &DashboardView) -> Markup {
 /// payload must match.
 pub fn forecast_panel_inner(view: &DashboardView) -> Markup {
     forecast_panel::render(&view.forecast)
+}
+
+/// The price panel's contents — what the `price-panel` SSE event's payload
+/// must match.
+pub fn price_panel_inner(view: &DashboardView) -> Markup {
+    price_panel::render(&view.prices)
 }
 
 /// The full-page fallback for `/detail/{entity}`, for a browser that followed
