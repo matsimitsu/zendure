@@ -131,14 +131,14 @@
   --size-axis-gutter: 40px;
   --size-step: 30px;
   --size-chart-price: 160px;
+  --size-readout-min: 200px;
+  --size-swatch: 10px;
   --size-day-label: 118px;
   --space-modal-top: 56px;
 
   // Line chart (detail modal)
   --color-band: oklch(1 0 0 / 0.04);
   --size-chart-sm: 180px;
-  // A short bar strip: the price panel's per-day charts
-  --size-chart-strip: 110px;
   --size-chart-dot: 9px;
   --color-crosshair: oklch(1 0 0 / 0.35);
   --size-table-min: 520px;

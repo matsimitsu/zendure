@@ -10,6 +10,8 @@ mod intervals;
 mod line_chart;
 mod pack_intervals;
 mod past_days;
+mod plot;
+mod prices;
 mod routes;
 mod server;
 mod soc_bar;

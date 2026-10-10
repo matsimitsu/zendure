@@ -19,3 +19,17 @@
   font-weight: var(--weight-medium);
   color: var(--color-text-primary);
 }
+
+// An optional third line qualifying the value, tinted by what it qualifies.
+.mini-stat__sub {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+
+  &--cheap {
+    color: var(--color-price-cheap-text);
+  }
+
+  &--expensive {
+    color: var(--color-price-high-text);
+  }
+}

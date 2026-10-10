@@ -20,3 +20,31 @@
     outline: none;
   }
 }
+
+// A panel's title line.
+@mixin panel-heading {
+  margin: 0;
+  color: var(--color-text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+}
+
+// The line under a panel's title: what it shows, and how fresh it is.
+@mixin panel-caption {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+}
+
+// A small mono label on a tinted ground: the decision log's mode badges and
+// the price tier. The variant sets the colors.
+@mixin pill {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  width: fit-content;
+}
