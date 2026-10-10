@@ -47,7 +47,7 @@ class EnergyFlows extends HTMLElement {
 
   // The fragment says which day it shows; the host keeps it across swaps.
   mirrorDay() {
-    const nav = this.querySelector(`.${B}__day-nav`);
+    const nav = this.querySelector(".day-nav");
     if (!nav) return;
     if (this.dataset.day !== nav.dataset.day) {
       // Column indexes from another day point at unrelated intervals.
