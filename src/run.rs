@@ -98,7 +98,6 @@ struct Tick<'a> {
     journal: &'a Journal,
     prefix: &'a str,
     dashboard: Option<&'a web::DashboardStateSender>,
-    timezone: chrono_tz::Tz,
     /// How long the loop may go without a usable reading, for the line that
     /// says so.
     blind_window: Duration,
@@ -317,7 +316,7 @@ impl Tick<'_> {
             let snapshot = engine.state();
             let decision = step.decision.as_ref().map(|d| (d, at.now));
             tx.send_modify(|state| {
-                state.meter_tick(&snapshot, &event, decision, &at, self.timezone, limits);
+                state.meter_tick(&snapshot, &event, decision, at.now, limits);
             });
         }
     }
@@ -638,26 +637,19 @@ pub async fn run(
     if let Some(web_cfg) = &config.web {
         let history = web::seed_decision_log(&config.journal_path);
         let startup_clock = Clock::now(config.timezone);
-        let actual_solar =
-            web::seed_actual_solar(&config.journal_path, startup_clock.now, config.timezone);
         let configured: Vec<_> = devices.handles().map(|(id, _)| id).collect();
         let intervals = web::seed_interval_history(
             &config.journal_path,
             startup_clock.now,
             configured.iter().cloned(),
         );
-        let seed = web::DashboardState::seed(
-            &engine.state(),
-            history,
-            actual_solar,
-            intervals,
-            startup_clock.now,
-        )
-        .with_telemetry(telemetry.figures(
-            startup_soc,
-            engine.soc_limits(startup_clock.weekday, telemetry.min_soc),
-        ))
-        .with_prices(config.prices.as_ref());
+        let seed =
+            web::DashboardState::seed(&engine.state(), history, intervals, startup_clock.now)
+                .with_telemetry(telemetry.figures(
+                    startup_soc,
+                    engine.soc_limits(startup_clock.weekday, telemetry.min_soc),
+                ))
+                .with_prices(config.prices.as_ref());
         let (tx, rx) = tokio::sync::watch::channel(seed);
         let past_days = web::PastDays::new(config.journal_path.clone(), configured);
         web_task = web::spawn(web_cfg, rx, config.timezone, past_days, async move {
@@ -677,7 +669,7 @@ pub async fn run(
     let (forecast_stop_tx, forecast_stop_rx) = tokio::sync::oneshot::channel::<()>();
     let mut forecast_task: Option<tokio::task::JoinHandle<()>> = None;
     if let (Some(tx), Some(prediction_cfg)) = (&dashboard_tx, &config.prediction) {
-        let forecaster = prediction::from_config(prediction_cfg);
+        let forecaster = prediction::from_config(prediction_cfg, config.timezone);
         let state_path = prediction_cfg.state_path().clone();
         let poll_times = prediction_cfg.poll_times().to_vec();
         let tx = tx.clone();
@@ -803,7 +795,6 @@ pub async fn run(
         journal: &journal,
         prefix: &ha_prefix,
         dashboard: dashboard_tx.as_ref(),
-        timezone: config.timezone,
         blind_window: mqtt_timeout,
     };
 

@@ -1,19 +1,39 @@
 use super::*;
 use chrono::TimeZone;
 
-fn midnight(y: i32, m: u32, d: u32) -> chrono::DateTime<chrono::Utc> {
-    chrono::Utc.with_ymd_and_hms(y, m, d, 0, 0, 0).unwrap()
+fn utc() -> Tz {
+    chrono_tz::UTC
+}
+
+fn midnight(y: i32, m: u32, d: u32) -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(y, m, d, 0, 0, 0).unwrap()
 }
 
 #[test]
-fn produces_forty_eight_half_hourly_points() {
-    let points = clear_sky_curve(midnight(2026, 6, 1), PEAK);
-    assert_eq!(points.len(), 48);
+fn covers_today_and_tomorrow_in_half_hours() {
+    let afternoon = midnight(2026, 6, 1) + chrono::Duration::hours(15);
+    let points = clear_sky_curve(afternoon, utc(), PEAK);
+
+    assert_eq!(points.len(), 96);
+    assert_eq!(points[0].at, Timestamp::from(midnight(2026, 6, 1)));
+    assert_eq!(points[95].at, Timestamp::from(midnight(2026, 6, 3) - SLOT));
+}
+
+/// Amsterdam falls back on 25 October 2026, so tomorrow has 50 half-hours.
+#[test]
+fn follows_the_local_day_across_a_dst_change() {
+    let tz = chrono_tz::Europe::Amsterdam;
+    let now = tz.with_ymd_and_hms(2026, 10, 24, 15, 0, 0).unwrap();
+    let points = clear_sky_curve(now.with_timezone(&Utc), tz, PEAK);
+
+    assert_eq!(points.len(), 48 + 50);
+    let today = tz.with_ymd_and_hms(2026, 10, 24, 0, 0, 0).unwrap();
+    assert_eq!(points[0].at, Timestamp::from(today));
 }
 
 #[test]
 fn is_zero_outside_daylight_hours() {
-    let points = clear_sky_curve(midnight(2026, 6, 1), PEAK);
+    let points = clear_sky_curve(midnight(2026, 6, 1), utc(), PEAK);
     // Index 0 is 00:00, index 10 is 05:00 — both before the 06:00 start.
     assert_eq!(points[0].estimate.get(), 0.0);
     assert_eq!(points[10].estimate.get(), 0.0);
@@ -23,7 +43,7 @@ fn is_zero_outside_daylight_hours() {
 
 #[test]
 fn peaks_at_solar_noon() {
-    let points = clear_sky_curve(midnight(2026, 6, 1), PEAK);
+    let points = clear_sky_curve(midnight(2026, 6, 1), utc(), PEAK);
     // Index 26 is 13:00.
     let noon = points[26].estimate.get();
     assert!(
@@ -37,12 +57,14 @@ fn peaks_at_solar_noon() {
     }
 }
 
+/// Any fetch during the same local day returns the same series.
 #[test]
-fn the_same_starting_instant_always_produces_the_same_curve() {
-    let a = clear_sky_curve(midnight(2026, 6, 1), PEAK);
-    let b = clear_sky_curve(midnight(2026, 6, 1), PEAK);
-    assert_eq!(
-        a.iter().map(|p| p.estimate.get()).collect::<Vec<_>>(),
-        b.iter().map(|p| p.estimate.get()).collect::<Vec<_>>(),
+fn every_fetch_on_the_same_day_produces_the_same_curve() {
+    let morning = clear_sky_curve(midnight(2026, 6, 1), utc(), PEAK);
+    let evening = clear_sky_curve(
+        midnight(2026, 6, 1) + chrono::Duration::hours(21),
+        utc(),
+        PEAK,
     );
+    assert_eq!(morning, evening);
 }

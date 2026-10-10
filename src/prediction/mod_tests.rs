@@ -275,18 +275,24 @@ fn the_persisted_state_wire_format_is_pinned() {
 /// `PredictionConfig` becomes a live backend.
 #[test]
 fn from_config_builds_the_matching_backend() {
-    let solcast = from_config(&PredictionConfig::Solcast {
-        api_key: "k".to_string(),
-        site_east: "east".to_string(),
-        site_west: "west".to_string(),
-        state_path: "unused.json".into(),
-        poll_times: default_poll_times().to_vec(),
-    });
+    let solcast = from_config(
+        &PredictionConfig::Solcast {
+            api_key: "k".to_string(),
+            site_east: "east".to_string(),
+            site_west: "west".to_string(),
+            state_path: "unused.json".into(),
+            poll_times: default_poll_times().to_vec(),
+        },
+        chrono_tz::UTC,
+    );
     assert!(matches!(solcast, Forecaster::Solcast(_)));
 
-    let simulated = from_config(&PredictionConfig::Simulated {
-        state_path: "unused.json".into(),
-        poll_times: default_poll_times().to_vec(),
-    });
+    let simulated = from_config(
+        &PredictionConfig::Simulated {
+            state_path: "unused.json".into(),
+            poll_times: default_poll_times().to_vec(),
+        },
+        chrono_tz::UTC,
+    );
     assert!(matches!(simulated, Forecaster::Simulated(_)));
 }

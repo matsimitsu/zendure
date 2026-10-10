@@ -80,7 +80,7 @@ impl Prediction for Forecaster {
 /// The only place a [`PredictionConfig`] becomes a live backend — `run.rs`
 /// never matches on it directly, the same rule `registry::from_config`
 /// follows for devices.
-pub fn from_config(config: &PredictionConfig) -> Forecaster {
+pub fn from_config(config: &PredictionConfig, timezone: Tz) -> Forecaster {
     match config {
         PredictionConfig::Solcast {
             api_key,
@@ -93,7 +93,7 @@ pub fn from_config(config: &PredictionConfig) -> Forecaster {
             site_west.clone(),
         )),
         PredictionConfig::Simulated { .. } => {
-            Forecaster::Simulated(simulated::SimulatedForecaster::new())
+            Forecaster::Simulated(simulated::SimulatedForecaster::new(timezone))
         }
     }
 }

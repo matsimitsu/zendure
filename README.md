@@ -638,11 +638,13 @@ plain links to `/?day=…` too, so they work without JavaScript; the interval
 being shown is kept when the day changes.
 
 The forecast panel shows real solar predictions when `[prediction]` is
-configured — 48 half-hourly bars (Solcast's own resolution) for the
-forecast, a line for today's actual measured production drawn over the same
-axis, so the two are directly comparable as the day unfolds. `kind =
-"solcast"` fetches two Solcast rooftop forecasts (east/west-facing panels on
-one array) and sums them; Solcast's free tier caps usage at 10 requests/day
+configured — one bar per half-hour of the local day (Solcast's own
+resolution; 46 or 50 on a DST change) for the forecast, a line for today's
+actual measured production drawn over the same axis, so the two are directly
+comparable as the day unfolds. The line is each half-hour's mean power, read
+from the same 15-minute averages as the flows chart, so a restart keeps it.
+`kind = "solcast"` fetches 48 hours of two Solcast rooftop forecasts
+(east/west-facing panels on one array) and sums them; Solcast's free tier caps usage at 10 requests/day
 account-wide, so by default the poller spends exactly 5 requests/site at
 five fixed times spread across daylight hours (06:00, 09:30, 12:30, 15:30,
 18:30 local — configurable via `prediction.poll_times`), skipping the night
@@ -655,8 +657,8 @@ simply forfeits that slot's update, leaving the cache as it was. Every
 successful fetch is also recorded to the journal (`solar_forecast` events),
 independent of the dashboard's own today-only cache, so forecast history
 survives past midnight for future historical views. `kind = "simulated"`
-draws a synthetic clear-sky curve instead, with no network call and no daily
-quota, for local testing. No `[prediction]` table means no poller runs at
+draws a synthetic clear-sky curve for today and tomorrow instead, with no
+network call and no daily quota, for local testing. No `[prediction]` table means no poller runs at
 all — the same rule `[mqtt]`/`[web]` follow — and the panel renders an empty
 state. The poller only ever feeds the dashboard: nothing here reaches
 `src/controller.rs`.

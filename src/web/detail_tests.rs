@@ -105,7 +105,6 @@ use crate::engine::EngineState;
 use crate::fixtures::journey;
 use crate::units::{Elapsed, Timestamp};
 use crate::web::intervals::IntervalHistory;
-use crate::web::state::ActualSolarHistory;
 use crate::web::templates::detail_view;
 use crate::web::view::detail_view as detail_view_model;
 use crate::world::{DeviceId, Measurement, World};
@@ -174,13 +173,7 @@ fn battery_dashboard() -> DashboardState {
     for (minutes, soc, temp) in [(0, 40, 2981), (10, 45, 2991), (20, 50, 3001)] {
         intervals.record_packs(&device, after(minutes), &[pack(soc, temp)]);
     }
-    let mut state = DashboardState::seed(
-        &engine(Some(Soc::new(50))),
-        vec![],
-        ActualSolarHistory::default(),
-        intervals,
-        after(20),
-    );
+    let mut state = DashboardState::seed(&engine(Some(Soc::new(50))), vec![], intervals, after(20));
     state.soc_limits = limits(10, 95);
     state
 }
@@ -301,13 +294,7 @@ fn the_battery_detail_renders_stats_packs_and_both_charts() {
 
 #[test]
 fn a_battery_that_has_never_reported_shows_an_empty_state() {
-    let state = DashboardState::seed(
-        &engine(None),
-        vec![],
-        ActualSolarHistory::default(),
-        journey::interval_ring(),
-        after(0),
-    );
+    let state = DashboardState::seed(&engine(None), vec![], journey::interval_ring(), after(0));
 
     assert!(detail_body(&state, Entity::Battery, chrono_tz::UTC).is_none());
     let html = detail_view::render(&detail_view_model(&state, Entity::Battery, chrono_tz::UTC))

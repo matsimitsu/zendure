@@ -4,20 +4,12 @@
 use super::*;
 
 use crate::battery::BatteryState;
-use crate::fixtures::{journey, utc};
+use crate::fixtures::journey;
 use crate::units::{BatteryPower, GridPower, SolarPower, Timestamp};
 use crate::world::{DeviceId, Measurement, MeterReading, World};
 
 fn at(secs: i64) -> Timestamp {
     Timestamp::from_millis(journey::NOW_MS + secs * 1000)
-}
-
-fn clock(secs: i64) -> Clock {
-    journey::clock_at(secs)
-}
-
-fn tz() -> chrono_tz::Tz {
-    chrono_tz::UTC
 }
 
 fn engine_state(grid: GridPower, solar: SolarPower) -> EngineState {
@@ -46,13 +38,7 @@ fn intervals() -> IntervalHistory {
 }
 
 fn seeded() -> DashboardState {
-    DashboardState::seed(
-        &engine(),
-        vec![],
-        ActualSolarHistory::default(),
-        intervals(),
-        at(0),
-    )
+    DashboardState::seed(&engine(), vec![], intervals(), at(0))
 }
 
 fn telemetry() -> DashboardTelemetry {
@@ -71,18 +57,10 @@ fn meter_tick(
     state: &mut DashboardState,
     engine: &EngineState,
     decision: Option<(&ControlDecision, Timestamp)>,
-    clock: &Clock,
-    timezone: chrono_tz::Tz,
+    now: Timestamp,
 ) {
-    let event = journey::meter_event(clock.now, 0.0, 0.0);
-    state.meter_tick(
-        engine,
-        &event,
-        decision,
-        clock,
-        timezone,
-        SocLimits::default(),
-    );
+    let event = journey::meter_event(now, 0.0, 0.0);
+    state.meter_tick(engine, &event, decision, now, SocLimits::default());
 }
 
 fn poll_tick(
@@ -137,16 +115,14 @@ fn only_a_meter_tick_extends_the_sparklines() {
         &mut state,
         &engine_state(GridPower(100.0), SolarPower::new(10.0)),
         None,
-        &clock(3),
-        tz(),
+        at(3),
     );
     poll_tick(&mut state, &engine(), telemetry(), at(4));
     meter_tick(
         &mut state,
         &engine_state(GridPower(200.0), SolarPower::new(20.0)),
         None,
-        &clock(5),
-        tz(),
+        at(5),
     );
 
     assert_eq!(
@@ -168,8 +144,7 @@ fn a_sparkline_holds_its_capacity_and_no_more() {
             &mut state,
             &engine_state(GridPower(i as f64), SolarPower::ZERO),
             None,
-            &clock(i as i64),
-            tz(),
+            at(i as i64),
         );
     }
 
@@ -202,7 +177,7 @@ fn telemetry_survives_the_ticks_that_do_not_carry_it() {
     let mut state = seeded();
     poll_tick(&mut state, &engine(), telemetry(), at(1));
 
-    meter_tick(&mut state, &engine(), None, &clock(2), tz());
+    meter_tick(&mut state, &engine(), None, at(2));
     state.failsafe_tick(&engine(), None, at(3), SocLimits::default());
 
     assert_eq!(state.pack_capacity, KiloWattHours(3.84));
@@ -220,7 +195,7 @@ fn the_decision_log_appends_only_real_decisions_and_stays_bounded() {
     let mut state = seeded();
     assert!(state.last_decision.is_none());
 
-    meter_tick(&mut state, &engine(), None, &clock(1), tz());
+    meter_tick(&mut state, &engine(), None, at(1));
     assert!(state.recent_decisions.is_empty());
     assert!(state.last_decision.is_none());
 
@@ -230,8 +205,7 @@ fn the_decision_log_appends_only_real_decisions_and_stays_bounded() {
             &mut state,
             &engine(),
             Some((&decision, at(i as i64))),
-            &clock(i as i64),
-            tz(),
+            at(i as i64),
         );
     }
 
@@ -355,13 +329,7 @@ fn the_seeded_log_collapses_the_same_way_a_running_one_does() {
         (at(11), at_watts(145)),
         (at(16), at_watts(900)),
     ];
-    let state = DashboardState::seed(
-        &engine(),
-        history,
-        ActualSolarHistory::default(),
-        intervals(),
-        at(16),
-    );
+    let state = DashboardState::seed(&engine(), history, intervals(), at(16));
 
     assert_eq!(state.recent_decisions.len(), 2);
     let first = state.recent_decisions.front().unwrap();
@@ -432,103 +400,6 @@ fn each_sparkline_carries_its_own_quantity() {
     assert_eq!(history.solar.values().collect::<Vec<_>>(), vec![1200.0]);
     assert_eq!(history.grid.values().collect::<Vec<_>>(), vec![-450.0]);
     assert_eq!(history.home_usage.values().collect::<Vec<_>>(), vec![750.0]);
-}
-
-// --- Actual solar history --------------------------------------------------
-
-#[test]
-fn actual_solar_history_buckets_by_half_hour_and_averages() {
-    let mut history = ActualSolarHistory::default();
-    history.record(utc(1, 6, 0), tz(), 100, SolarPower::new(1000.0));
-    history.record(utc(1, 6, 10), tz(), 100, SolarPower::new(2000.0));
-    history.record(utc(1, 7, 0), tz(), 100, SolarPower::new(500.0));
-
-    let averages = history.averages();
-    assert_eq!(
-        averages[12],
-        Some(SolarPower::new(1500.0)),
-        "06:00-06:30 is bucket 12"
-    );
-    assert_eq!(
-        averages[14],
-        Some(SolarPower::new(500.0)),
-        "07:00-07:30 is bucket 14"
-    );
-    assert_eq!(
-        averages[16], None,
-        "a slot with no samples reads as unknown, not zero"
-    );
-}
-
-/// A new day ordinal must not let yesterday's samples for the same slot
-/// leak into today's average.
-#[test]
-fn actual_solar_history_resets_on_a_new_day() {
-    let mut history = ActualSolarHistory::default();
-    history.record(utc(1, 10, 0), tz(), 100, SolarPower::new(5000.0));
-    history.record(utc(1, 10, 0), tz(), 101, SolarPower::new(1000.0));
-
-    assert_eq!(
-        history.averages()[20],
-        Some(SolarPower::new(1000.0)),
-        "yesterday's sample must not survive the rollover"
-    );
-}
-
-#[test]
-fn a_meter_tick_records_into_the_actual_solar_history() {
-    let mut state = seeded();
-    let clock = Clock {
-        now: utc(1, 14, 0),
-        day_ordinal: 200,
-        ..Clock::test_at(journey::NOW_MS)
-    };
-    meter_tick(
-        &mut state,
-        &engine_state(GridPower(0.0), SolarPower::new(3000.0)),
-        None,
-        &clock,
-        tz(),
-    );
-
-    assert_eq!(
-        state.actual_solar.averages()[28],
-        Some(SolarPower::new(3000.0))
-    );
-}
-
-/// A restart mid-day shows the line the process it replaced was showing,
-/// and nothing from before midnight.
-#[tokio::test]
-async fn the_actual_solar_seed_equals_todays_live_fold() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("journal.db");
-    let yesterday = journey::meter_event(utc(1, 23, 0), 0.0, 4000.0);
-    let today = [
-        journey::meter_event(utc(2, 6, 0), 0.0, 1000.0),
-        journey::meter_event(utc(2, 6, 10), 0.0, 2000.0),
-        journey::meter_event(utc(2, 7, 0), 0.0, 500.0),
-    ];
-    let events: Vec<Event> = std::iter::once(yesterday).chain(today.clone()).collect();
-    crate::journal::testing::record(&path, &events).await;
-
-    let mut live = ActualSolarHistory::default();
-    for event in &today {
-        if let Event::Meter { at, solar, .. } = event {
-            live.record(at.now, tz(), at.day_ordinal, *solar);
-        }
-    }
-    let seeded = seed_actual_solar(&path, utc(2, 8, 0), tz());
-
-    assert_eq!(seeded.averages(), live.averages());
-    assert_eq!(seeded.averages()[46], None, "yesterday's 23:00 stays out");
-}
-
-#[test]
-fn an_unreadable_journal_seeds_an_empty_actual_solar_history() {
-    let dir = tempfile::tempdir().unwrap();
-    let seeded = seed_actual_solar(&dir.path().join("missing.db"), utc(2, 8, 0), tz());
-    assert!(seeded.averages().iter().all(Option::is_none));
 }
 
 // --- Forecast tick ----------------------------------------------------------
@@ -642,8 +513,7 @@ fn a_meter_tick_refreshes_the_limits() {
         &engine(),
         &journey::meter_event(at(1), 0.0, 0.0),
         None,
-        &clock(1),
-        tz(),
+        at(1),
         balance,
     );
 
