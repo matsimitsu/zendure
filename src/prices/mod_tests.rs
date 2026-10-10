@@ -122,9 +122,9 @@ fn no_backfill_days_means_nothing_is_missing() {
 // --- Series merge ------------------------------------------------------------
 
 #[test]
-fn a_merge_drops_points_over_before_local_midnight_and_keeps_the_fresher_value() {
+fn a_merge_drops_points_older_than_the_history_window_and_keeps_the_fresher_value() {
     let today = date(2026, 3, 10);
-    let yesterday = point(local_hour(today, -2), 5.0);
+    let yesterday = point(local_hour(today, -7 * 24 - 2), 5.0);
     let morning = point(local_hour(today, 8), 5.0);
     let mut snapshot = PriceSnapshot::default();
     snapshot.merge(&[yesterday, morning], local_hour(today, -3), AMSTERDAM);
@@ -141,11 +141,11 @@ fn a_merge_drops_points_over_before_local_midnight_and_keeps_the_fresher_value()
 }
 
 #[test]
-fn a_restored_snapshot_drops_points_over_before_local_midnight() {
+fn a_restored_snapshot_drops_points_older_than_the_history_window() {
     let today = date(2026, 3, 10);
     let fetched = local_hour(today, 13);
     let recorded = series(&[
-        point(local_hour(today, -2), 5.0),
+        point(local_hour(today, -7 * 24 - 2), 5.0),
         point(local_hour(today, 8), 5.0),
         point(local_hour(today, 30), 9.0),
     ]);
@@ -153,7 +153,7 @@ fn a_restored_snapshot_drops_points_over_before_local_midnight() {
         PriceSnapshot::restore(recorded, Some(fetched), local_hour(today, 20), AMSTERDAM);
 
     assert_eq!(snapshot.as_of, Some(fetched));
-    assert_eq!(snapshot.points.at(local_hour(today, -2)), None);
+    assert_eq!(snapshot.points.at(local_hour(today, -7 * 24 - 2)), None);
     assert!(snapshot.points.at(local_hour(today, 8)).is_some());
     assert!(snapshot.points.at(local_hour(today, 30)).is_some());
 }
@@ -188,9 +188,18 @@ async fn a_backfill_journals_one_fetch_per_missing_day() {
     let days = [date(2026, 3, 1), date(2026, 3, 3)];
     let (_stop, mut shutdown) = tokio::sync::oneshot::channel();
 
-    let summary = backfill(&feed, &days, AMSTERDAM, &journal, &mut shutdown)
-        .await
-        .unwrap();
+    let mut handed_over = Vec::new();
+    let summary = backfill(
+        &feed,
+        &days,
+        AMSTERDAM,
+        &journal,
+        &mut |points| handed_over.push(points.len()),
+        &mut shutdown,
+    )
+    .await
+    .unwrap();
+    assert_eq!(handed_over.len(), 2);
     assert_eq!(
         summary,
         BackfillSummary {
@@ -215,7 +224,15 @@ async fn a_backfill_stops_at_shutdown() {
     stop.send(()).unwrap();
 
     let days = [date(2026, 3, 1)];
-    let outcome = backfill(&feed, &days, AMSTERDAM, &journal, &mut shutdown).await;
+    let outcome = backfill(
+        &feed,
+        &days,
+        AMSTERDAM,
+        &journal,
+        &mut |_| {},
+        &mut shutdown,
+    )
+    .await;
     assert_eq!(outcome, None);
 }
 
@@ -230,4 +247,90 @@ async fn an_empty_fetch_is_not_journalled() {
 
     testing::close(journal, writer).await;
     assert!(recorded_payloads(path).await.is_empty());
+}
+
+// --- History window and per-day view -------------------------------------------
+
+#[test]
+fn history_starts_at_local_midnight_six_days_back_and_keeps_that_whole_day() {
+    let today = date(2026, 3, 10);
+    let oldest = date(2026, 3, 4);
+    let now = local_hour(today, 12);
+    let before = point(local_hour(oldest, -1), 1.0);
+    let first = point(local_hour(oldest, 0), 2.0);
+    let snapshot = PriceSnapshot::restore(series(&[before, first]), None, now, AMSTERDAM);
+
+    assert_eq!(snapshot.points.at(before.from), None);
+    assert_eq!(snapshot.points.at(first.from), Some(&first));
+}
+
+#[test]
+fn history_across_a_dst_change_still_starts_at_a_local_midnight() {
+    let today = date(2026, 4, 2);
+    let oldest = date(2026, 3, 27);
+    let now = local_hour(today, 12);
+    let kept = point(local_day_start(oldest, AMSTERDAM).unwrap(), 2.0);
+    let dropped = point(kept.from - Elapsed::HOUR, 1.0);
+    let snapshot = PriceSnapshot::restore(series(&[dropped, kept]), None, now, AMSTERDAM);
+
+    assert_eq!(snapshot.points.at(dropped.from), None);
+    assert!(snapshot.points.at(kept.from).is_some());
+}
+
+#[test]
+fn merging_keeps_backfilled_days_inside_the_window() {
+    let today = date(2026, 3, 10);
+    let now = local_hour(today, 12);
+    let mut snapshot = PriceSnapshot::default();
+    snapshot.merge(&whole_day(date(2026, 3, 5), 24), now, AMSTERDAM);
+    snapshot.merge(&whole_day(date(2026, 3, 1), 24), now, AMSTERDAM);
+
+    assert!(snapshot.prices_for(date(2026, 3, 5), AMSTERDAM).is_some());
+    assert!(snapshot.prices_for(date(2026, 3, 1), AMSTERDAM).is_none());
+}
+
+#[test]
+fn a_day_has_one_slot_per_local_hour_whatever_dst_does() {
+    let mut snapshot = PriceSnapshot::default();
+    for (day, hours) in [
+        (date(2026, 3, 28), 24),
+        (date(2026, 3, 29), 23),
+        (date(2026, 10, 25), 25),
+    ] {
+        snapshot.points = series(&whole_day(day, hours));
+        let prices = snapshot.prices_for(day, AMSTERDAM).unwrap();
+        assert_eq!(prices.slots().len(), hours as usize, "{day}");
+        assert!(prices.slots().iter().all(Option::is_some), "{day}");
+        assert_eq!(
+            (prices.end - prices.start).as_millis(),
+            hours * Elapsed::HOUR.as_millis(),
+            "{day}"
+        );
+    }
+}
+
+#[test]
+fn an_unpriced_hour_is_a_none_slot_and_an_unpriced_day_is_none() {
+    let day = date(2026, 3, 10);
+    let mut snapshot = PriceSnapshot::default();
+    assert_eq!(snapshot.prices_for(day, AMSTERDAM), None);
+
+    snapshot.points = series(&[point(local_hour(day, 5), 8.0)]);
+    let prices = snapshot.prices_for(day, AMSTERDAM).unwrap();
+    assert_eq!(prices.slots()[5], Some(CentsPerKwh(8.0)));
+    assert_eq!(prices.slots().iter().flatten().count(), 1);
+}
+
+#[test]
+fn tomorrow_is_published_only_when_fully_priced() {
+    let today = date(2026, 3, 10);
+    let tomorrow = today.succ_opt().unwrap();
+    let mut snapshot = PriceSnapshot {
+        points: series(&whole_day(tomorrow, 23)),
+        ..Default::default()
+    };
+    assert!(!snapshot.tomorrow_published(today, AMSTERDAM));
+
+    snapshot.points = series(&whole_day(tomorrow, 24));
+    assert!(snapshot.tomorrow_published(today, AMSTERDAM));
 }

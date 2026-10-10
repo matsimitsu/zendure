@@ -25,7 +25,7 @@ use crate::config::{PriceKind, PricesConfig};
 use crate::fetch::FetchError;
 use crate::journal::Journal;
 use crate::schedule::{AnchorSchedule, LocalNow};
-use crate::units::{BackfillDays, Elapsed, Timestamp};
+use crate::units::{BackfillDays, CentsPerKwh, Elapsed, Timestamp};
 use crate::web::DashboardStateSender;
 
 pub mod energyzero;
@@ -115,13 +115,52 @@ pub fn covered_days(series: &PriceSeries, tz: Tz) -> BTreeSet<NaiveDate> {
         .collect()
 }
 
+/// The start of each local hour in `[start, end)`.
+fn hour_starts(start: Timestamp, end: Timestamp) -> impl Iterator<Item = Timestamp> {
+    std::iter::successors(Some(start), |at| Some(*at + Elapsed::HOUR))
+        .take_while(move |at| *at < end)
+}
+
 fn fully_priced(series: &PriceSeries, day: NaiveDate, tz: Tz) -> bool {
     let Some((start, end)) = local_day_bounds(day, tz) else {
         return false;
     };
-    std::iter::successors(Some(start), |at| Some(*at + Elapsed::HOUR))
-        .take_while(|at| *at < end)
-        .all(|at| series.at(at).is_some())
+    hour_starts(start, end).all(|at| series.at(at).is_some())
+}
+
+/// How many days before local today the dashboard keeps prices for; the day
+/// navigation reaches exactly this far back.
+pub const PRICE_HISTORY_DAYS: BackfillDays = BackfillDays::new(6);
+
+/// Local start of the oldest day the dashboard keeps prices for.
+fn history_start(now: Timestamp, tz: Tz) -> Timestamp {
+    let fallback = local_midnight(now, tz);
+    local_date(now, tz)
+        .and_then(|today| {
+            today.checked_sub_days(chrono::Days::new(u64::from(PRICE_HISTORY_DAYS.count())))
+        })
+        .and_then(|oldest| local_day_start(oldest, tz))
+        .unwrap_or(fallback)
+}
+
+/// One local day as a renderer needs it: the day's bounds and one slot per
+/// local hour, so 23, 24 or 25 of them across DST changes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DayPrices {
+    pub date: NaiveDate,
+    pub start: Timestamp,
+    pub end: Timestamp,
+    slots: Vec<Option<CentsPerKwh>>,
+}
+
+impl DayPrices {
+    /// The wholesale price per local-hour slot, `None` for an hour the feed
+    /// has not priced. This is the shape `tiers` takes.
+    // Consumed by the price panel (E4) and the day navigation (E5).
+    #[allow(dead_code)]
+    pub fn slots(&self) -> &[Option<CentsPerKwh>] {
+        &self.slots
+    }
 }
 
 /// The last `backfill_days` days before `today` that `covered` lacks,
@@ -139,8 +178,8 @@ pub fn missing_days(
     days
 }
 
-/// The latest prices the poller fetched, keyed by interval: today onwards,
-/// freshest value per interval. Empty and `as_of: None` until the first fetch
+/// The latest prices the poller fetched, keyed by interval: the last
+/// `PRICE_HISTORY_DAYS` days onwards, freshest value per interval. Empty and `as_of: None` until the first fetch
 /// lands.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PriceSnapshot {
@@ -157,18 +196,43 @@ impl PriceSnapshot {
         now: Timestamp,
         tz: Tz,
     ) -> PriceSnapshot {
-        points.drop_ending_before(local_midnight(now, tz));
+        points.drop_ending_before(history_start(now, tz));
         PriceSnapshot { points, as_of }
     }
 
-    /// Anything over before local midnight of `at` is dropped: the journal
-    /// holds history, this only covers what the dashboard displays.
+    /// Anything over before the start of the oldest kept day is dropped: the
+    /// journal holds all history, this only covers what the dashboard shows.
     pub fn merge(&mut self, points: &[PricePoint], at: Timestamp, tz: Tz) {
         for point in points {
             self.points.insert(*point);
         }
-        self.points.drop_ending_before(local_midnight(at, tz));
+        self.points.drop_ending_before(history_start(at, tz));
         self.as_of = Some(self.as_of.map_or(at, |prev| prev.max(at)));
+    }
+
+    /// `date`'s local hours, `None` when none of them is priced.
+    // Consumed by the price panel (E4) and the day navigation (E5).
+    #[allow(dead_code)]
+    pub fn prices_for(&self, date: NaiveDate, tz: Tz) -> Option<DayPrices> {
+        let (start, end) = local_day_bounds(date, tz)?;
+        let slots: Vec<Option<CentsPerKwh>> = hour_starts(start, end)
+            .map(|at| self.points.at(at).map(|p| p.wholesale))
+            .collect();
+        slots.iter().any(Option::is_some).then_some(DayPrices {
+            date,
+            start,
+            end,
+            slots,
+        })
+    }
+
+    /// Whether every hour of the day after `today` is priced.
+    // Consumed by the price panel (E4).
+    #[allow(dead_code)]
+    pub fn tomorrow_published(&self, today: NaiveDate, tz: Tz) -> bool {
+        today
+            .succ_opt()
+            .is_some_and(|tomorrow| fully_priced(&self.points, tomorrow, tz))
     }
 }
 
@@ -220,13 +284,14 @@ pub struct BackfillSummary {
     pub failed: usize,
 }
 
-/// Fetches each of `days` in turn, one request per day. `None` when
-/// `shutdown` fired first.
+/// Fetches each of `days` in turn, one request per day, handing every
+/// fetched day to `on_fetched`. `None` when `shutdown` fired first.
 async fn backfill(
     feed: &PriceFeed,
     days: &[NaiveDate],
     tz: Tz,
     journal: &Journal,
+    on_fetched: &mut impl FnMut(&[PricePoint]),
     shutdown: &mut tokio::sync::oneshot::Receiver<()>,
 ) -> Option<BackfillSummary> {
     let mut summary = BackfillSummary::default();
@@ -240,7 +305,10 @@ async fn backfill(
             biased;
             _ = &mut *shutdown => return None,
             result = fetch(feed, from, until, journal, &what) => match result {
-                Some(_) => summary.fetched += 1,
+                Some(points) => {
+                    on_fetched(&points);
+                    summary.fetched += 1;
+                }
                 None => summary.failed += 1,
             },
         }
@@ -384,11 +452,20 @@ impl Poller {
         let today = LocalNow::now(self.timezone).date;
         let missing = missing_days(today, backfill_days, &covered);
         let present = usize::from(backfill_days.count()) - missing.len();
+        let timezone = self.timezone;
+        let snapshot = &mut self.snapshot;
+        let dashboard_tx = &self.dashboard_tx;
+        let mut merge_and_publish = |points: &[PricePoint]| {
+            snapshot.merge(points, Timestamp::from(chrono::Utc::now()), timezone);
+            let current = snapshot.clone();
+            dashboard_tx.send_modify(|s| s.prices_tick(current));
+        };
         let Some(summary) = backfill(
             &self.feed,
             &missing,
-            self.timezone,
+            timezone,
             &self.journal,
+            &mut merge_and_publish,
             &mut shutdown,
         )
         .await
