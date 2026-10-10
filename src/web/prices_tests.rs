@@ -607,6 +607,20 @@ fn the_subtitle_names_the_price_shown_and_when_it_was_fetched() {
 // --- Markup ---------------------------------------------------------------------
 
 #[test]
+fn the_markup_holds_still_within_a_minute_so_the_stream_does_not_resend_it() {
+    let snapshot = snapshot(&whole_day(4, rising));
+    let render = |now| price_panel::render(&view_at(date(9, 4), &snapshot, now)).into_string();
+    let minute = local(9, 4, 13, 20);
+    let later = minute + Elapsed::of(Duration::from_secs(59));
+
+    assert_eq!(render(minute), render(later));
+    assert_ne!(
+        render(minute),
+        render(minute + Elapsed::of(Duration::from_secs(60)))
+    );
+}
+
+#[test]
 fn the_markup_carries_what_the_readout_script_reads() {
     let view = view_at(
         date(9, 4),

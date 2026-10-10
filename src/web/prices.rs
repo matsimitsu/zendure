@@ -4,6 +4,8 @@
 //! asks for is parsed once at the edge (`CONTROL-1`) and clamped to the days
 //! the nav reaches.
 
+use std::time::Duration;
+
 use chrono::offset::LocalResult;
 use chrono::{DateTime, NaiveDate, Offset, TimeZone};
 use chrono_tz::Tz;
@@ -26,6 +28,11 @@ const MIN_BAR_HEIGHT: f64 = 1.0;
 
 /// The y axis steps in whole tens of cents.
 const SCALE_STEP: CentsPerKwh = CentsPerKwh(10.0);
+
+/// The now line moves in whole minutes: the stream resends the panel
+/// whenever its markup changes, and a line placed to the second would change
+/// it every tick.
+const NOW_LINE_STEP: Duration = Duration::from_secs(60);
 
 /// The days the nav reaches: `PRICE_HISTORY_DAYS` back, and forward to
 /// tomorrow only once it is fully priced, so an empty tomorrow never shows.
@@ -366,7 +373,10 @@ fn chart(
     PriceChartView {
         plot: DayPlotView {
             grid_lines: ticks.iter().map(|tick| scale.y(tick.0)).collect(),
-            now_x: day.now.map(|(now, _)| frame.x(now)),
+            now_x: day
+                .now
+                .and_then(|(now, _)| frame.slot_containing(NOW_LINE_STEP, now))
+                .map(|minute| frame.x(minute)),
             highlight: day.current().map(|index| span_of(&day.hours[index])),
             y_axis: ticks
                 .iter()
