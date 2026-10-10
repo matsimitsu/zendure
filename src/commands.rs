@@ -4,16 +4,17 @@
 //! synchronous and touch no device. `export` and `replay_fixture` read no
 //! configuration at all — see `cli.rs`'s module doc for why `Invocation`
 //! cannot even hand them one. `check_config` is the exception: strictly reading
-//! configuration is its entire job.
+//! configuration is its entire job. `analyze` reads one only when given, and
+//! only for its tariffs.
 
 use std::io::Write;
 use std::path::Path;
 
-use crate::analyze;
+use crate::analyze::{self, Pricing, Tariffs};
 use crate::config::Config;
 use crate::journal::read;
 use crate::replay::{self, Fixture};
-use crate::units::Timestamp;
+use crate::units::{PriceSeries, Timestamp};
 
 /// `zendure export` — a stretch of the journal as a replay fixture. Reads no
 /// configuration: a fixture carries the tuning it was decided under, recorded
@@ -50,18 +51,66 @@ pub fn export(
     Ok(())
 }
 
-/// `zendure analyze` — the journal between two instants, as daily energy.
-/// Reads no configuration for the same reason `export` doesn't: the rows carry
-/// everything the arithmetic needs, so this runs against a copied database
-/// anywhere.
+/// `zendure analyze` — the journal between two instants, as daily energy,
+/// and with `config` what it would have cost under each contract. The energy
+/// needs nothing beyond the rows, so without a config this still runs against
+/// a copied database anywhere and only the cost table is skipped.
 pub fn analyze(
     db: &Path,
     from: Timestamp,
     to: Timestamp,
+    config: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let pricing = pricing(db, config)?;
     let events = read::read_events_in_range(db, from, to)?;
-    write_stdout(&analyze::render(&analyze::daily(&events)))?;
+    write_stdout(&analyze::render(
+        &analyze::daily(&events, &pricing),
+        &pricing,
+    ))?;
     Ok(())
+}
+
+/// The tariffs from `config` and the prices from the journal, or why the cost
+/// table cannot be drawn.
+fn pricing(db: &Path, config: Option<&Path>) -> Result<Pricing, Box<dyn std::error::Error>> {
+    let Some(path) = config else {
+        return Ok(Pricing::Skipped(
+            "pass --config to compare tariffs".to_string(),
+        ));
+    };
+    // Warnings dropped: a lenient parse is what the daemon would run with, and
+    // `--check` is where a config's warnings get read.
+    let (config, _) = Config::from_toml(path)?;
+    let tariffs = match config.prices.as_ref().map(|p| (p.dynamic, p.fixed)) {
+        Some((Some(dynamic), Some(fixed))) => Tariffs { dynamic, fixed },
+        _ => {
+            return Ok(Pricing::Skipped(format!(
+                "{} needs both [prices.dynamic] and [prices.fixed] to compare them",
+                path.display()
+            )));
+        }
+    };
+
+    // Every price row, not just the range's: a row is stamped when it was
+    // fetched, which for a backfill is weeks after the hours it prices, so no
+    // window around `from`/`to` is sure to catch them. The rows are a few
+    // hundred bytes a day.
+    let rows = read::read_raw_in_range(
+        db,
+        analyze::PRICE_KIND,
+        Timestamp::from_millis(i64::MIN),
+        Timestamp::from_millis(i64::MAX),
+    )?;
+    let (series, undecodable) = analyze::price_series(&rows);
+    if undecodable > 0 {
+        eprintln!("warning: skipped {undecodable} price row(s) that did not decode");
+    }
+    if series == PriceSeries::default() {
+        return Ok(Pricing::Skipped(
+            "the journal holds no energy prices".to_string(),
+        ));
+    }
+    Ok(Pricing::Priced { series, tariffs })
 }
 
 /// `zendure replay` — the same events through the same fold, printed.

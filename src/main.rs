@@ -71,8 +71,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(cli::Invocation::Export { from, to, db, out }) => {
             return finish(commands::export(&db, from, to, out.as_deref()));
         }
-        Ok(cli::Invocation::Analyze { from, to, db }) => {
-            return finish(commands::analyze(&db, from, to));
+        Ok(cli::Invocation::Analyze {
+            from,
+            to,
+            db,
+            config,
+        }) => {
+            return finish(commands::analyze(&db, from, to, config.as_deref()));
         }
         Ok(cli::Invocation::Replay {
             fixture,

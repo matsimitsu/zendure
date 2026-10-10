@@ -8,6 +8,8 @@
 //! `export`/`replay` run on a laptop with no broker; [`Invocation::Export`] and
 //! [`Invocation::Replay`] carry no config field, so `--config` is rejected on both
 //! structurally rather than by a check someone has to remember.
+//! [`Invocation::Analyze`] takes one, optionally: energy needs none, and only
+//! the cost comparison reads the tariffs from it.
 
 use std::path::PathBuf;
 
@@ -33,11 +35,13 @@ zendure — home battery controller
         the last decision at or before --from, since that is the most recent
         state a replay can resume from. Writes to stdout without --out.
 
-    zendure analyze --from <when> --to <when> [--db <path>]
+    zendure analyze --from <when> --to <when> [--db <path>] [--config <path>]
         Integrate the journal between two instants into daily energy: grid
         import and export, how much export the battery did not take, what it
         charged and discharged, demand above its discharge limit, and the
-        same import/export split per phase. All kWh.
+        same import/export split per phase. All kWh. With --config naming a
+        file that has [prices.dynamic] and [prices.fixed], also prices that
+        energy under both contracts from the journalled energy prices.
 
     zendure replay <fixture> [--verify] [--set <knob>=<value>]...
         Re-run a fixture's events through the decision engine and print the
@@ -72,13 +76,14 @@ pub enum Invocation {
         verify: bool,
         overrides: Vec<(String, String)>,
     },
-    // No config field either, for the same reason `Export` has none: energy is
-    // integrated from what was recorded, and nothing about how to reach a
-    // device could change the answer.
+    // Optional, unlike `Daemon`'s: energy is integrated from what was recorded
+    // and needs no config, so leaving it out still gets the energy tables. Only
+    // the tariffs are read from it, and only when given.
     Analyze {
         from: Timestamp,
         to: Timestamp,
         db: PathBuf,
+        config: Option<PathBuf>,
     },
 }
 
@@ -158,17 +163,20 @@ fn parse_export<I: Iterator<Item = String>>(mut args: I) -> Result<Invocation, S
 }
 
 /// Same range arguments as `export`, minus `--out`: this prints a table for a
-/// human to read, not a fixture to feed back in.
+/// human to read, not a fixture to feed back in. Plus `--config`, for the
+/// tariffs the cost table compares.
 fn parse_analyze<I: Iterator<Item = String>>(mut args: I) -> Result<Invocation, String> {
     let mut from = None;
     let mut to = None;
     let mut db = None;
+    let mut config = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--from" => from = Some(instant(&value(&mut args, "--from")?)?),
             "--to" => to = Some(instant(&value(&mut args, "--to")?)?),
             "--db" => db = Some(PathBuf::from(value(&mut args, "--db")?)),
+            "--config" => config = Some(PathBuf::from(value(&mut args, "--config")?)),
             other => return Err(format!("analyze: unexpected argument `{other}`")),
         }
     }
@@ -183,6 +191,7 @@ fn parse_analyze<I: Iterator<Item = String>>(mut args: I) -> Result<Invocation, 
         from,
         to,
         db: db.unwrap_or_else(|| PathBuf::from(DEFAULT_JOURNAL_PATH)),
+        config,
     })
 }
 
@@ -379,6 +388,7 @@ mod tests {
                 from: Timestamp::from_millis(1000),
                 to: Timestamp::from_millis(2000),
                 db: PathBuf::from(DEFAULT_JOURNAL_PATH),
+                config: None,
             })
         );
     }
@@ -390,10 +400,11 @@ mod tests {
         assert!(parse_args(&["analyze", "--from", "2000", "--to", "1000"]).is_err());
     }
 
-    /// `analyze` reads no configuration either — see the module doc comment.
+    /// `analyze` takes a config only for its tariffs, and never defaults one:
+    /// leaving it out is how a copied journal gets analysed on a laptop.
     #[test]
-    fn analyze_rejects_config() {
-        let err = parse_args(&[
+    fn analyze_takes_an_optional_config() {
+        let Ok(Invocation::Analyze { config, .. }) = parse_args(&[
             "analyze",
             "--from",
             "1000",
@@ -401,9 +412,10 @@ mod tests {
             "2000",
             "--config",
             "/tmp/zendure.toml",
-        ])
-        .unwrap_err();
-        assert!(err.contains("--config"), "{err}");
+        ]) else {
+            panic!("should parse");
+        };
+        assert_eq!(config, Some(PathBuf::from("/tmp/zendure.toml")));
     }
 
     /// `--out` belongs to `export`, which writes a fixture; `analyze` prints a

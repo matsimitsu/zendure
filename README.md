@@ -404,6 +404,46 @@ Battery telemetry arrives on the same tick as the meter reading it is decided
 against, so the two are the same age; both are up to one tick old against the
 instant the decision reaches the device.
 
+### What-if cost: dynamic vs fixed
+
+Given `--config` pointing at a file with both `[prices.dynamic]` and
+`[prices.fixed]`, and a journal holding `energy_price` rows from the price
+poller, `analyze` also prices the same import and export under each contract:
+
+```
+zendure analyze --from 2026-09-13T00:00:00Z --to 2026-09-17T00:00:00Z \
+  --db ./journal.db --config /etc/zendure/config.toml
+```
+
+```
+day          priced  dyn.import  dyn.export   dyn.net  fix.import  fix.export   fix.net         Δ
+2026-09-13    100%       €0.24       €0.00     €0.24       €0.30       €0.00     €0.30    -€0.06
+2026-09-14    100%       €0.24       €0.00     €0.24       €0.30       €0.00     €0.30    -€0.06
+total         100%       €0.48       €0.00     €0.48       €0.60       €0.00     €0.60    -€0.12
+```
+
+- **`priced`** is the share of measured time that had a known price. Only that
+  time is costed, under *both* contracts, so the two sides always describe the
+  same energy; a gap in the price feed shows up here rather than as a cheaper day.
+- **`dyn.import`** is import at `(wholesale + markup + energy_tax)` plus VAT;
+  **`dyn.export`** credits export at `wholesale − export_markup`, VAT-free.
+  Each interval is priced at the price in force when it started.
+- **`fix.import`/`fix.export`** use the flat, VAT-inclusive rates.
+- **net** is import paid less export credited. **Δ** is `dyn.net − fix.net`:
+  negative means the dynamic contract would have been cheaper.
+
+Each day is rounded to the cent once, and the total row is the sum of the rounded
+days. Without `--config`, or without both tariffs, or with no prices in the
+journal, the energy tables print as usual and the cost table is replaced by a
+one-line note saying why. Price rows are read regardless of `--from`/`--to`: a
+row is stamped when it was fetched, and a backfill fetches weeks of past prices
+at once.
+
+**Caveat: this ignores net metering (salderingsregeling).** Until it ends on
+2027-01-01, a fixed contract nets export against import at the full import rate,
+which this table does not do — it shows the post-2027 picture, and for 2026 it
+understates how good the fixed contract is.
+
 ## Replay
 
 A journal is only worth keeping if you can ask it questions. `export` turns a
