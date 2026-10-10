@@ -211,15 +211,58 @@ struct PersistedForecastState {
     fetched_at: Option<i64>,
 }
 
+/// Which `poll_times` anchors have fired on the current local day. Shared by
+/// every anchor-driven poller; any date mismatch with `now` means the day
+/// rolled over and nothing has fired yet.
+#[derive(Debug, Clone)]
+pub struct AnchorSchedule {
+    date: NaiveDate,
+    fired: BTreeSet<TimeOfDay>,
+    poll_times: Vec<TimeOfDay>,
+}
+
+impl AnchorSchedule {
+    pub fn new(poll_times: Vec<TimeOfDay>) -> Self {
+        AnchorSchedule {
+            // Never compared equal to a real `now`, so it reads as "fresh".
+            date: NaiveDate::from_ymd_opt(1970, 1, 1).expect("1970-01-01 is a valid date"),
+            fired: BTreeSet::new(),
+            poll_times,
+        }
+    }
+
+    /// The latest anchor at-or-before `now.time` that hasn't fired today.
+    /// Returning the *latest* rather than the earliest collapses a catch-up
+    /// after downtime into a single fetch.
+    pub fn next_due(&self, now: &LocalNow) -> Option<TimeOfDay> {
+        let fresh_day = self.date != now.date;
+        self.poll_times
+            .iter()
+            .rev()
+            .find(|slot| **slot <= now.time && (fresh_day || !self.fired.contains(slot)))
+            .copied()
+    }
+
+    /// Records `slot` and every earlier anchor as used today, matching
+    /// `next_due`'s catch-up collapse. Called after a failed fetch too.
+    pub fn mark_used(&mut self, now: &LocalNow, slot: TimeOfDay) {
+        if self.date != now.date {
+            self.date = now.date;
+            self.fired.clear();
+        }
+        for anchor in self.poll_times.iter().copied().filter(|a| *a <= slot) {
+            self.fired.insert(anchor);
+        }
+    }
+}
+
 /// Tracks the daily poll budget and the last cached forecast, surviving a
 /// restart the same way `rte::RteTracker` does: `load` on construction (a
 /// missing file or corrupt JSON warns and starts fresh, never panics), `save`
 /// after every change (a write failure warns once via a latch, then goes
 /// quiet).
 pub struct ForecastTracker {
-    date: NaiveDate,
-    fired: BTreeSet<TimeOfDay>,
-    poll_times: Vec<TimeOfDay>,
+    schedule: AnchorSchedule,
     points: Vec<SolarForecastPoint>,
     fetched_at: Option<Timestamp>,
     state_path: PathBuf,
@@ -230,12 +273,7 @@ pub struct ForecastTracker {
 impl ForecastTracker {
     pub fn new(state_path: PathBuf, poll_times: Vec<TimeOfDay>, timezone: Tz) -> Self {
         let mut tracker = ForecastTracker {
-            // A date with nothing fired yet — `next_due`/`mark_used` both
-            // treat any date mismatch as "budget is fresh", so this default
-            // never needs to be a real placeholder.
-            date: NaiveDate::from_ymd_opt(1970, 1, 1).expect("1970-01-01 is a valid date"),
-            fired: BTreeSet::new(),
-            poll_times,
+            schedule: AnchorSchedule::new(poll_times),
             points: Vec::new(),
             fetched_at: None,
             state_path,
@@ -255,41 +293,13 @@ impl ForecastTracker {
         tracker
     }
 
-    /// The latest anchor at-or-before `now.time` that hasn't fired today, or
-    /// `None` if every anchor up to now has already fired (or none has
-    /// passed yet). Returning the *latest* rather than the earliest collapses
-    /// a catch-up after downtime into a single fetch: if the process was down
-    /// through two earlier anchors, only the one closest to now is offered.
     pub fn next_due(&self, now: &LocalNow) -> Option<TimeOfDay> {
-        if self.date != now.date {
-            // A new day: nothing has fired yet, regardless of what `fired`
-            // still holds from yesterday.
-            return self
-                .poll_times
-                .iter()
-                .rev()
-                .find(|slot| **slot <= now.time)
-                .copied();
-        }
-        self.poll_times
-            .iter()
-            .rev()
-            .find(|slot| **slot <= now.time && !self.fired.contains(slot))
-            .copied()
+        self.schedule.next_due(now)
     }
 
-    /// Records that `slot` (and every earlier anchor, per `next_due`'s
-    /// catch-up collapse) has been used today. Rolls `fired` over first if
-    /// `now` is a new day. Called after both a successful and a failed
-    /// fetch — a failed fetch still spent the request.
+    /// A failed fetch still spent the request, so this runs after both.
     pub fn mark_used(&mut self, now: &LocalNow, slot: TimeOfDay) {
-        if self.date != now.date {
-            self.date = now.date;
-            self.fired.clear();
-        }
-        for anchor in self.poll_times.iter().copied().filter(|a| *a <= slot) {
-            self.fired.insert(anchor);
-        }
+        self.schedule.mark_used(now, slot);
         self.save();
     }
 
@@ -326,8 +336,8 @@ impl ForecastTracker {
 
     fn save(&self) {
         let state = PersistedForecastState {
-            date: self.date.format("%Y-%m-%d").to_string(),
-            fired: self.fired.iter().copied().collect(),
+            date: self.schedule.date.format("%Y-%m-%d").to_string(),
+            fired: self.schedule.fired.iter().copied().collect(),
             points: self.points.clone(),
             fetched_at: self.fetched_at.map(Timestamp::as_millis),
         };
@@ -365,8 +375,8 @@ impl ForecastTracker {
             tracing::warn!("Failed to parse forecast state date {:?}", state.date);
             return;
         };
-        self.date = date;
-        self.fired = state.fired.into_iter().collect();
+        self.schedule.date = date;
+        self.schedule.fired = state.fired.into_iter().collect();
         self.points = state.points;
         self.fetched_at = state.fetched_at.map(Timestamp::from_millis);
     }

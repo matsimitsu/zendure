@@ -22,6 +22,7 @@ use crate::journal::Writer;
 use crate::models::ControlDecision;
 use crate::mqtt::{self, MqttPublisher, PublisherTask};
 use crate::prediction;
+use crate::prices;
 use crate::publish::{NullPublisher, Publisher};
 use crate::registry::{self, Battery, Devices};
 use crate::scan::{self, Delivery, Failures, Inbox, TickSeq};
@@ -695,6 +696,33 @@ pub async fn run(
         }));
     }
 
+    // The price poller: same posture and gating as the forecast poller —
+    // dashboard-only, so absent `[web]` or `[prices]` nothing is fetched.
+    let (prices_stop_tx, prices_stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut prices_task: Option<tokio::task::JoinHandle<()>> = None;
+    if let (Some(tx), Some(prices_cfg)) = (&dashboard_tx, &config.prices) {
+        let feed = prices::PriceFeed::from_config(prices_cfg);
+        let poll_times = prices_cfg.poll_times.clone();
+        let backfill_days = prices_cfg.backfill_days;
+        let journal_path = config.journal_path.clone();
+        let tx = tx.clone();
+        let timezone = config.timezone;
+        let prices_journal = journal.clone();
+        prices_task = Some(tokio::spawn(async move {
+            prices::run_price_poller(
+                feed,
+                timezone,
+                poll_times,
+                backfill_days,
+                journal_path,
+                tx,
+                prices_journal,
+                prices_stop_rx,
+            )
+            .await;
+        }));
+    }
+
     // The car-battery poller: same independent-of-`Event`/`Engine::step`
     // posture as the forecast poller, but gated only on `[car_battery]`
     // being configured, not also on a dashboard — publishing to Home
@@ -875,6 +903,7 @@ pub async fn run(
     // hold `with_graceful_shutdown` to the deadline below.
     let _ = web_stop_tx.send(());
     let _ = forecast_stop_tx.send(());
+    let _ = prices_stop_tx.send(());
     let _ = car_battery_stop_tx.send(());
     drop(dashboard_tx);
 
@@ -918,6 +947,19 @@ pub async fn run(
         handle.abort();
         tracing::warn!(
             "Forecast poller did not stop within {}s — aborted",
+            DRAIN_DEADLINE.as_secs(),
+        );
+    }
+
+    // Every fetch is journalled as it lands, so an abort loses nothing.
+    if let Some(mut handle) = prices_task
+        && tokio::time::timeout(DRAIN_DEADLINE, &mut handle)
+            .await
+            .is_err()
+    {
+        handle.abort();
+        tracing::warn!(
+            "Price poller did not stop within {}s — aborted",
             DRAIN_DEADLINE.as_secs(),
         );
     }

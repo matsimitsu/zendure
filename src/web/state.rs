@@ -228,7 +228,6 @@ pub struct ForecastSnapshot {
 
 /// The latest prices the poller fetched, keyed by interval — see
 /// `crate::prices`. Empty and `as_of: None` until the first fetch lands.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PriceSnapshot {
     pub points: PriceSeries,
@@ -270,6 +269,9 @@ pub struct DashboardState {
     /// The forecast poller's latest cached series — see `crate::prediction`.
     /// Updated only by `forecast_tick`, on that poller's own schedule.
     pub forecast: ForecastSnapshot,
+    /// The price poller's latest series — see `crate::prices`. Updated only
+    /// by `prices_tick`, on that poller's own schedule.
+    pub prices: PriceSnapshot,
     /// The car's last-known state of charge and when it was read — see
     /// `crate::car_battery`. `None` until `[car_battery]` is configured and
     /// its first successful poll lands; updated only by `car_soc_tick`, on
@@ -312,6 +314,7 @@ impl DashboardState {
             actual_solar,
             intervals,
             forecast: ForecastSnapshot::default(),
+            prices: PriceSnapshot::default(),
             car_soc: None,
             as_of,
         };
@@ -360,6 +363,12 @@ impl DashboardState {
     /// independent of every event the engine folds.
     pub fn forecast_tick(&mut self, forecast: ForecastSnapshot) {
         self.forecast = forecast;
+    }
+
+    /// The price poller's own tick — same posture as `forecast_tick` (see
+    /// `crate::prices::run_price_poller`).
+    pub fn prices_tick(&mut self, prices: PriceSnapshot) {
+        self.prices = prices;
     }
 
     /// The car-battery poller's own tick — same posture as `forecast_tick`:
