@@ -109,6 +109,11 @@
   --radius-xl: 10px;
   --radius-2xl: 12px;
 
+  // Line weights
+  --width-border: 1px;
+  --stroke-rule: 1;
+  --stroke-now-line: 1.5;
+
   // Elevation
   --shadow-modal: 0 24px 64px oklch(0 0 0 / 0.5);
   --shadow-focus-ring: 0 0 0 1px var(--color-accent-ring);

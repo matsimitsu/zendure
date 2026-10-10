@@ -9,7 +9,7 @@
     align-items: center;
     justify-content: center;
     height: var(--size-step);
-    border: 1px solid var(--color-border-strong);
+    border: var(--width-border) solid var(--color-border-strong);
     border-radius: var(--radius-md);
     text-decoration: none;
     cursor: pointer;

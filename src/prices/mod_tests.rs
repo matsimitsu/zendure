@@ -314,8 +314,11 @@ fn a_day_has_one_slot_per_local_hour_whatever_dst_does() {
     ] {
         snapshot.points = series(&whole_day(day, hours));
         let prices = snapshot.prices_for(day, AMSTERDAM).unwrap();
-        assert_eq!(prices.slots().len(), hours as usize, "{day}");
-        assert!(prices.slots().iter().all(Option::is_some), "{day}");
+        assert_eq!(prices.hours().len(), hours as usize, "{day}");
+        assert!(
+            prices.hours().iter().all(|hour| hour.wholesale.is_some()),
+            "{day}"
+        );
         assert_eq!(
             (prices.end - prices.start).as_millis(),
             hours * Elapsed::HOUR.as_millis(),
@@ -332,8 +335,15 @@ fn an_unpriced_hour_is_a_none_slot_and_an_unpriced_day_is_none() {
 
     snapshot.points = series(&[point(local_hour(day, 5), 8.0)]);
     let prices = snapshot.prices_for(day, AMSTERDAM).unwrap();
-    assert_eq!(prices.slots()[5], Some(CentsPerKwh(8.0)));
-    assert_eq!(prices.slots().iter().flatten().count(), 1);
+    assert_eq!(prices.hours()[5].wholesale, Some(CentsPerKwh(8.0)));
+    assert_eq!(
+        prices
+            .hours()
+            .iter()
+            .filter(|hour| hour.wholesale.is_some())
+            .count(),
+        1
+    );
 }
 
 #[test]

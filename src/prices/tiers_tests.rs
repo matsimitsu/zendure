@@ -11,15 +11,33 @@ fn day(prices: &[f64]) -> Vec<Option<CentsPerKwh>> {
 #[test]
 fn thresholds_are_the_thirds_ranks_of_24_hours() {
     let prices: Vec<_> = (0..24).map(|h| c(f64::from(h))).collect();
-    assert_eq!(tiers(&prices), Some((c(8.0), c(16.0))));
+    assert_eq!(
+        tiers(&prices),
+        Some(Thresholds {
+            lo: c(8.0),
+            hi: c(16.0)
+        })
+    );
 }
 
 #[test]
 fn thresholds_work_on_dst_slot_counts() {
     let p23: Vec<_> = (0..23).map(|h| c(f64::from(h))).collect();
     let p25: Vec<_> = (0..25).map(|h| c(f64::from(h))).collect();
-    assert_eq!(tiers(&p23), Some((c(7.0), c(15.0))));
-    assert_eq!(tiers(&p25), Some((c(8.0), c(16.0))));
+    assert_eq!(
+        tiers(&p23),
+        Some(Thresholds {
+            lo: c(7.0),
+            hi: c(15.0)
+        })
+    );
+    assert_eq!(
+        tiers(&p25),
+        Some(Thresholds {
+            lo: c(8.0),
+            hi: c(16.0)
+        })
+    );
 }
 
 #[test]
@@ -29,7 +47,10 @@ fn no_prices_means_no_thresholds() {
 
 #[test]
 fn tier_boundaries_and_ties() {
-    let t = (c(8.0), c(16.0));
+    let t = Thresholds {
+        lo: c(8.0),
+        hi: c(16.0),
+    };
     assert_eq!(Tier::of(c(7.9), t), Tier::Cheap);
     assert_eq!(Tier::of(c(8.0), t), Tier::Normal);
     assert_eq!(Tier::of(c(15.9), t), Tier::Normal);

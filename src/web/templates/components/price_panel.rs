@@ -3,8 +3,8 @@ use maud::{Markup, html};
 
 use crate::web::day_nav::DayNavView;
 use crate::web::prices::{
-    PRICE_CHART_HEIGHT, PRICE_CHART_WIDTH, PriceBarView, PriceChartView, PricePanelView,
-    PricedDayView,
+    PRICE_BAR_RADIUS, PRICE_CHART_HEIGHT, PRICE_CHART_WIDTH, PriceBarView, PriceChartView,
+    PricePanelView, PricedDayView,
 };
 use crate::web::templates::day_nav::{self, DayNav, DayNavLink};
 use crate::web::templates::{axis, mini_stat, price_tier};
@@ -141,7 +141,7 @@ fn plot(chart: &PriceChartView) -> Markup {
                         y=(format!("{:.2}", bar.y))
                         width=(format!("{:.2}", bar.span.width))
                         height=(format!("{:.2}", bar.height))
-                        rx="1" {}
+                        rx=(PRICE_BAR_RADIUS) {}
                 }
                 @if let Some(y) = chart.zero_y {
                     (rule("price-panel__zero", y))

@@ -4,6 +4,7 @@
 
 use crate::device::PackStatus;
 use crate::models::ControlMode;
+use crate::prices::tiers::Tier;
 use crate::units::{
     Elapsed, KiloWattHours, Percent, Soc, SolarForecastPoint, SolarPower, Timestamp, Watts,
 };
@@ -79,7 +80,7 @@ pub struct MiniStatView {
 pub struct MiniStatSub {
     pub text: String,
     /// BEM modifier: "cheap" | "expensive".
-    pub tone: &'static str,
+    pub tone: Tier,
 }
 
 pub struct BatteryPanelView {

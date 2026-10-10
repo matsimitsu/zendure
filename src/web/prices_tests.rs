@@ -400,7 +400,7 @@ fn today_looks_ahead_for_its_windows() {
     assert_eq!(cheapest.sub.unwrap().text, "15.0 ct avg");
     assert_eq!(priciest.label, "Priciest 3 h ahead");
     assert_eq!(priciest.value, "21:00–24:00");
-    assert_eq!(priciest.sub.unwrap().tone, "expensive");
+    assert_eq!(priciest.sub.unwrap().tone, Tier::Expensive);
 }
 
 #[test]
@@ -660,4 +660,10 @@ fn next_is_disabled_at_the_end_of_the_range() {
     let tomorrow = nav_html(7, now, &with_tomorrow);
     assert!(tomorrow.contains(NEXT_DISABLED));
     assert!(tomorrow.contains(r#"data-day="2025-09-11""#));
+}
+
+#[test]
+fn the_viewbox_is_as_tall_as_the_token_it_is_shown_at() {
+    let tokens = include_str!("../../assets/scss/tokens.scss");
+    assert!(tokens.contains(&format!("--size-chart-price: {PRICE_CHART_HEIGHT:.0}px;")));
 }
