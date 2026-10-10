@@ -491,7 +491,6 @@ async fn a_device_found_down_is_written_to_once_per_outage() {
         journal: &journal,
         prefix: "test",
         dashboard: None,
-        timezone: config.timezone,
         blind_window: config.mqtt_timeout,
     };
     let at = Clock::now(config.timezone);

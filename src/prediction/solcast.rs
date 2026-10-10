@@ -31,6 +31,10 @@ struct SolcastEntry {
     // response but not carried further for v1 — see the plan's open items.
 }
 
+/// Covers the rest of today and all of tomorrow from any fetch; the
+/// default is a week the dashboard never shows.
+const FORECAST_HOURS: u32 = 48;
+
 pub struct SolcastForecaster {
     http: reqwest::Client,
     api_key: String,
@@ -54,7 +58,7 @@ impl SolcastForecaster {
 
     async fn fetch_site(&self, site_id: &str) -> Result<Vec<SolarForecastPoint>, FetchError> {
         let url = format!(
-            "https://api.solcast.com.au/rooftop_sites/{site_id}/forecasts?format=json&api_key={}",
+            "https://api.solcast.com.au/rooftop_sites/{site_id}/forecasts?format=json&hours={FORECAST_HOURS}&api_key={}",
             self.api_key,
         );
         // Never log `url` — it carries the API key. Only the site id and

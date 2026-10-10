@@ -6,16 +6,13 @@
 use std::collections::VecDeque;
 use std::path::Path;
 
-use chrono_tz::Tz;
-
-use crate::clock::Clock;
 use crate::command::Command;
 use crate::config::{DynamicTariff, PricesConfig};
 use crate::controller::SocLimits;
 use crate::device::PackStatus;
 use crate::engine::EngineState;
 use crate::event::Event;
-use crate::journal::read::{ReadError, read_events_in_range, read_recent_decisions};
+use crate::journal::read::{ReadError, read_recent_decisions};
 use crate::models::ControlDecision;
 use crate::prices::PriceSnapshot;
 use crate::rte;
@@ -25,17 +22,7 @@ use crate::units::{
 };
 use crate::world::DeviceId;
 
-use super::intervals::{IntervalHistory, Mean};
-
-/// Solcast's own resolution (see `SolcastEntry`'s doc comment in
-/// `prediction/solcast.rs`) — the forecast panel's bars and
-/// [`ActualSolarHistory`]'s buckets both use this, so the two series share
-/// one axis.
-pub(super) const SOLAR_BUCKETS_PER_DAY: usize = 48;
-
-/// One bucket's width: the half-hour [`SOLAR_BUCKETS_PER_DAY`] divides the
-/// day into.
-pub(super) const SOLAR_BUCKET_MS: i64 = 30 * 60 * 1000;
+use super::intervals::IntervalHistory;
 
 /// How many meter readings each sparkline keeps. Only a meter tick appends
 /// one, so at the meter's ~1/s cadence this is ~96 seconds of history —
@@ -171,54 +158,6 @@ pub struct PolledPacks<'a> {
     pub packs: &'a [PackStatus],
 }
 
-/// Today's *actual* measured solar production, bucketed into the same 48
-/// local half-hours the forecast panel's bars use, so the two share one
-/// x-axis. Reset at local midnight, keyed on the `day_ordinal` a meter tick
-/// already carries via its `Clock`.
-#[derive(Debug, Clone)]
-pub struct ActualSolarHistory {
-    day_ordinal: Option<u32>,
-    buckets: [Mean<SolarPower>; SOLAR_BUCKETS_PER_DAY],
-}
-
-impl Default for ActualSolarHistory {
-    fn default() -> Self {
-        ActualSolarHistory {
-            day_ordinal: None,
-            buckets: std::array::from_fn(|_| Mean::default()),
-        }
-    }
-}
-
-impl ActualSolarHistory {
-    /// Folds one meter reading into its local half-hour's running average,
-    /// resetting every bucket first if `day_ordinal` has moved on from
-    /// whatever this last saw. The bucket comes from `now`/`timezone` rather
-    /// than `Clock`, which deliberately resolves no finer than the hour (see
-    /// `schedule::LocalNow`'s doc comment) — extending it would touch every
-    /// journalled `Event`.
-    pub fn record(&mut self, now: Timestamp, timezone: Tz, day_ordinal: u32, solar: SolarPower) {
-        if self.day_ordinal != Some(day_ordinal) {
-            *self = ActualSolarHistory {
-                day_ordinal: Some(day_ordinal),
-                ..ActualSolarHistory::default()
-            };
-        }
-        let today_start = crate::clock::local_midnight(now, timezone);
-        let bucket = usize::try_from((now - today_start).as_millis() / SOLAR_BUCKET_MS)
-            .unwrap_or(0)
-            .min(SOLAR_BUCKETS_PER_DAY - 1);
-        self.buckets[bucket].add(solar);
-    }
-
-    /// One average per local half-hour, `None` where nothing has been
-    /// recorded yet today (every slot from now on, and any slot lost to
-    /// downtime before this process's first meter tick or its startup seed).
-    pub fn averages(&self) -> [Option<SolarPower>; SOLAR_BUCKETS_PER_DAY] {
-        std::array::from_fn(|h| self.buckets[h].get())
-    }
-}
-
 /// The dashboard's view of the forecast poller's cached series — see
 /// `crate::prediction`. Empty and `as_of: None` until `[prediction]` is
 /// configured and its first fetch lands.
@@ -254,9 +193,6 @@ pub struct DashboardState {
     pub packs: Vec<PackStatus>,
     pub soc_limits: SocLimits,
     pub sparklines: SparklineHistory,
-    /// Today's actual solar production, seeded from the journal at startup
-    /// and extended by every `meter_tick` thereafter.
-    pub actual_solar: ActualSolarHistory,
     /// Seeded from the journal at startup, then extended by every meter and
     /// device event the loop folds.
     pub intervals: IntervalHistory,
@@ -289,15 +225,12 @@ impl DashboardState {
     /// it cannot speak for what the battery is doing now — `last_decision`
     /// stays `None` until this process decides. It arrives uncollapsed and is
     /// folded through [`record_decision`](Self::record_decision), so a page
-    /// load and a long-running process show the same runs. `actual_solar` is
-    /// likewise seeded from the journal (see
-    /// [`seed_actual_solar`]) so a restart doesn't
-    /// blank today's actual-production line, and `intervals` so it doesn't
-    /// blank the flows chart.
+    /// load and a long-running process show the same runs. `intervals` is
+    /// likewise seeded from the journal, so a restart blanks neither the flows
+    /// chart nor today's actual solar.
     pub fn seed(
         engine: &EngineState,
         history: Vec<(Timestamp, ControlDecision)>,
-        actual_solar: ActualSolarHistory,
         intervals: IntervalHistory,
         as_of: Timestamp,
     ) -> Self {
@@ -311,7 +244,6 @@ impl DashboardState {
             packs: Vec::new(),
             soc_limits: SocLimits::default(),
             sparklines: SparklineHistory::default(),
-            actual_solar,
             intervals,
             forecast: ForecastSnapshot::default(),
             prices: PriceSnapshot::default(),
@@ -340,19 +272,15 @@ impl DashboardState {
     }
 
     /// A meter reading: the only tick that extends the sparklines, which is
-    /// what keeps them on the meter's cadence. Takes the whole `Clock`
-    /// (rather than a bare `Timestamp`, as the other ticks do) because
-    /// `actual_solar` needs the day ordinal it already carries; `timezone` is
-    /// separate because `Clock` deliberately resolves no finer than the hour.
-    /// `limits` arrives on every tick but a poll's, so a weekday change shows
-    /// without waiting for a device to answer.
+    /// what keeps them on the meter's cadence. `limits` arrives on every tick
+    /// but a poll's, so a weekday change shows without waiting for a device
+    /// to answer.
     pub fn meter_tick(
         &mut self,
         engine: &EngineState,
         event: &Event,
         decision: Option<(&ControlDecision, Timestamp)>,
-        clock: &Clock,
-        timezone: Tz,
+        as_of: Timestamp,
         limits: SocLimits,
     ) {
         self.intervals.record(event);
@@ -360,9 +288,7 @@ impl DashboardState {
         self.sparklines.solar.push(engine.world.solar);
         self.sparklines.grid.push(engine.world.grid.total);
         self.sparklines.home_usage.push(engine.world.home_usage());
-        self.actual_solar
-            .record(clock.now, timezone, clock.day_ordinal, engine.world.solar);
-        self.refresh(engine, decision, clock.now);
+        self.refresh(engine, decision, as_of);
     }
 
     /// The forecast poller's own tick — not folded through `refresh` like the
@@ -505,27 +431,6 @@ pub fn seed_decision_log(journal_path: &Path) -> Vec<(Timestamp, ControlDecision
         |row| log.push((row.at, row.decision)),
     );
     log
-}
-
-/// Today's meter readings since local midnight, folded through the same
-/// [`ActualSolarHistory::record`] a meter tick uses, so a restart mid-day
-/// doesn't blank today's line.
-pub fn seed_actual_solar(journal_path: &Path, now: Timestamp, timezone: Tz) -> ActualSolarHistory {
-    let mut history = ActualSolarHistory::default();
-    seed_from(
-        read_events_in_range(
-            journal_path,
-            crate::clock::local_midnight(now, timezone),
-            now,
-        ),
-        "actual-solar history",
-        |event| {
-            if let Event::Meter { at, solar, .. } = event {
-                history.record(at.now, timezone, at.day_ordinal, solar);
-            }
-        },
-    );
-    history
 }
 
 pub type DashboardStateSender = tokio::sync::watch::Sender<DashboardState>;

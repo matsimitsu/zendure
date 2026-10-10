@@ -17,6 +17,7 @@ mod routes;
 mod server;
 mod soc_bar;
 mod solar;
+mod solar_day;
 mod sse;
 mod state;
 mod templates;
@@ -29,5 +30,5 @@ pub use past_days::PastDays;
 pub use server::spawn;
 pub use state::{
     DashboardState, DashboardStateSender, DashboardTelemetry, ForecastSnapshot, PolledPacks,
-    seed_actual_solar, seed_decision_log,
+    seed_decision_log,
 };

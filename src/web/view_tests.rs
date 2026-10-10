@@ -10,7 +10,7 @@ use crate::device::PackStatus;
 use crate::engine::EngineState;
 use crate::fixtures::journey;
 use crate::models::ControlDecision;
-use crate::units::{BatteryPower, GridPower, Soc, SolarPower, Timestamp, Watts};
+use crate::units::{BatteryPower, Elapsed, GridPower, Soc, SolarPower, Timestamp, Watts};
 use crate::web::sse::{FRAGMENTS, SentFragments};
 use crate::web::state::DashboardState;
 use crate::web::templates::layout;
@@ -22,10 +22,6 @@ fn tz() -> chrono_tz::Tz {
 
 fn at(secs: i64) -> Timestamp {
     Timestamp::from_millis(journey::NOW_MS + secs * 1000)
-}
-
-fn clock(secs: i64) -> crate::clock::Clock {
-    journey::clock_at(secs)
 }
 
 /// A world with one battery and a meter reading, which is what the battery
@@ -58,7 +54,6 @@ fn state(history: Vec<(Timestamp, ControlDecision)>) -> DashboardState {
     DashboardState::seed(
         &engine_state(BatteryPower::ZERO),
         history,
-        crate::web::state::ActualSolarHistory::default(),
         journey::interval_ring(),
         at(0),
     )
@@ -350,8 +345,7 @@ fn the_mode_badge_follows_the_first_real_decision() {
         &engine_state(BatteryPower(-1200)),
         &journey::meter_event(at(1), 400.0, 750.0),
         Some((&decision(ControlMode::Charge, "solar surplus"), at(1))),
-        &clock(1),
-        tz(),
+        at(1),
         SocLimits::default(),
     );
 
@@ -669,55 +663,11 @@ fn a_sub_watt_grid_reading_reads_as_zero_without_a_sign() {
 
 // --- Forecast panel ----------------------------------------------------------
 
-fn forecast_point(hours_after_midnight: i64, minutes: i64, watts: f64) -> SolarForecastPoint {
-    SolarForecastPoint {
-        at: Timestamp::from_millis(hours_after_midnight * 3_600_000 + minutes * 60_000),
-        estimate: SolarPower::new(watts),
-    }
-}
-
-/// Two samples landing in the same half-hour slot average — normally only
-/// reachable with a misaligned or duplicated fetch, since Solcast's own
-/// resolution is one sample per slot.
-#[test]
-fn bucketed_forecast_watts_averages_two_samples_in_the_same_slot() {
-    let points = vec![forecast_point(6, 0, 1000.0), forecast_point(6, 10, 2000.0)];
-    let buckets = bucketed_forecast_watts(&points, Timestamp::from_millis(0));
-
-    assert_eq!(buckets[12], Some(1500.0), "06:00-06:30 is bucket 12");
-    assert_eq!(buckets[13], None, "06:30-07:00 has no sample");
-}
-
-#[test]
-fn bucketed_forecast_watts_excludes_points_outside_the_24h_window() {
-    let today_start = Timestamp::from_millis(0);
-    // One hour before today, and exactly at tomorrow's start.
-    let points = vec![
-        SolarForecastPoint {
-            at: today_start - Elapsed::of(std::time::Duration::from_secs(3600)),
-            estimate: SolarPower::new(500.0),
-        },
-        SolarForecastPoint {
-            at: today_start + Elapsed::of(std::time::Duration::from_secs(24 * 3600)),
-            estimate: SolarPower::new(500.0),
-        },
-    ];
-
-    let buckets = bucketed_forecast_watts(&points, today_start);
-    assert!(buckets.iter().all(Option::is_none));
-}
-
-#[test]
-fn bucketed_forecast_watts_of_an_empty_series_is_all_none() {
-    let buckets = bucketed_forecast_watts(&[], Timestamp::from_millis(0));
-    assert!(buckets.iter().all(Option::is_none));
-}
-
 #[test]
 fn forecast_panel_view_of_an_empty_snapshot_has_no_data() {
     let view = forecast_panel_view(
         &ForecastSnapshot::default(),
-        &ActualSolarHistory::default(),
+        &journey::interval_ring(),
         at(0),
         tz(),
     );
@@ -759,7 +709,6 @@ fn the_home_card_reports_the_houses_own_draw() {
     let discharging = DashboardState::seed(
         &engine_state(BatteryPower(600)),
         vec![],
-        ActualSolarHistory::default(),
         journey::interval_ring(),
         at(0),
     );
