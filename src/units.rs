@@ -873,18 +873,32 @@ impl fmt::Display for RetentionDays {
     }
 }
 
+/// How many past days a price backfill reaches for. Zero is legitimate: it
+/// turns the backfill off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct BackfillDays(u16);
+
+impl BackfillDays {
+    pub const fn new(days: u16) -> Self {
+        BackfillDays(days)
+    }
+
+    pub fn count(self) -> u16 {
+        self.0
+    }
+}
+
+forward_display!(BackfillDays, u16);
+
 // --- Money ----------------------------------------------------------------
-// Nothing outside the tests reads these until the price feed and `analyze`
-// land, so the bin crate would otherwise flag every item as dead code.
 
 /// Whole euro-cents: a settled amount of money, never a rate. Integer so sums
 /// of settled amounts are exact; the only way in from a float is [`Cost::total`].
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Cents(pub i64);
 
-#[allow(dead_code)]
 impl Cents {
     pub const ZERO: Cents = Cents(0);
 }
@@ -928,12 +942,10 @@ impl fmt::Display for Cents {
 /// A price per kilowatt-hour, in euro-cents. A rate, not money: multiplying it
 /// by energy is what makes [`Cents`], so the two cannot be added by accident.
 /// Negative is legitimate — wholesale prices go below zero.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CentsPerKwh(pub f64);
 
-#[allow(dead_code)]
 impl CentsPerKwh {
     /// The consumer rate once VAT is added on top. A negative price grows more
     /// negative, which is what the invoice does too.
@@ -941,14 +953,20 @@ impl CentsPerKwh {
         CentsPerKwh(self.0 * (1.0 + vat.fraction()))
     }
 
+    // The price panel (E4) is the consumer; until it lands only tests call this.
+    #[allow(dead_code)]
     pub fn min(self, other: Self) -> Self {
         CentsPerKwh(self.0.min(other.0))
     }
 
+    // The price panel (E4) is the consumer; until it lands only tests call this.
+    #[allow(dead_code)]
     pub fn max(self, other: Self) -> Self {
         CentsPerKwh(self.0.max(other.0))
     }
 
+    // The price panel (E4) is the consumer; until it lands only tests call this.
+    #[allow(dead_code)]
     pub fn abs(self) -> Self {
         CentsPerKwh(self.0.abs())
     }
@@ -991,11 +1009,9 @@ impl Sub for CentsPerKwh {
 /// 10-second interval's energy by a price, and one interval is worth far less
 /// than a cent: rounding per interval would floor a whole day to zero, so the
 /// sum stays in `f64` and is rounded once, in [`Cost::total`].
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Cost(f64);
 
-#[allow(dead_code)]
 impl Cost {
     pub fn add(&mut self, energy: WattHours, price: CentsPerKwh) {
         self.0 += energy.to_kwh().get() * price.0;
@@ -1005,54 +1021,6 @@ impl Cost {
     /// round to equal and opposite amounts. The single `f64`-to-[`Cents`] path.
     pub fn total(self) -> Cents {
         Cents(self.0.round() as i64)
-    }
-}
-
-/// A wholesale price over the interval it applies to. Carries its own end so
-/// hourly and quarter-hourly feeds share one type.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct PricePoint {
-    pub from: Timestamp,
-    pub until: Timestamp,
-    pub wholesale: CentsPerKwh,
-}
-
-/// Prices keyed by the start of their interval.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct PriceSeries(std::collections::BTreeMap<Timestamp, PricePoint>);
-
-#[allow(dead_code)]
-impl PriceSeries {
-    /// A point with the same `from` replaces the old one: a re-fetched feed
-    /// carries the newer value.
-    pub fn insert(&mut self, point: PricePoint) {
-        self.0.insert(point.from, point);
-    }
-
-    /// In order of `from`.
-    pub fn iter(&self) -> impl Iterator<Item = &PricePoint> {
-        self.0.values()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// Drops every point whose interval is over by `cutoff`.
-    pub fn drop_ending_before(&mut self, cutoff: Timestamp) {
-        self.0.retain(|_, point| point.until > cutoff);
-    }
-
-    /// The point whose interval contains `ts`, `until` being exclusive so
-    /// adjacent intervals never both match. `None` in a gap.
-    pub fn at(&self, ts: Timestamp) -> Option<&PricePoint> {
-        self.0
-            .range(..=ts)
-            .next_back()
-            .map(|(_, point)| point)
-            .filter(|point| ts < point.until)
     }
 }
 

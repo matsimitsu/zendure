@@ -9,11 +9,11 @@ use serde::{Deserialize, Serialize};
 
 // `SolarPhase` is the meter's own idea of how many wires it watches, so it
 // belongs to the adapter that reads them, not here.
-use crate::prediction::TimeOfDay;
+use crate::schedule::TimeOfDay;
 use crate::source::shelly::SolarPhase;
 use crate::units::{
-    CentsPerKwh, Efficiency, Gain, GridPower, Percent, PowerMargin, RetentionDays, SlewLimit, Soc,
-    SolarPower, WattHours, Watts,
+    BackfillDays, CentsPerKwh, Efficiency, Gain, GridPower, Percent, PowerMargin, RetentionDays,
+    SlewLimit, Soc, SolarPower, WattHours, Watts,
 };
 use crate::zendure::POLL_INTERVAL_FLOOR;
 
@@ -438,7 +438,6 @@ impl PredictionConfig {
 
 /// Which wholesale feed `[prices]` reads, selected by `prices.kind` the same
 /// way `prediction.kind` selects its backend.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PriceKind {
     EnergyZero,
@@ -448,7 +447,6 @@ pub enum PriceKind {
 /// `[prices.dynamic]`: what a dynamic contract adds to the wholesale price to
 /// reach the consumer rate. Every field is required: a missing one would
 /// silently price energy wrong, and money is not a knob to default.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DynamicTariff {
     /// Supplier surcharge on imported energy, excl. VAT.
@@ -476,7 +474,6 @@ impl DynamicTariff {
 }
 
 /// `[prices.fixed]`: a flat contract, already VAT-inclusive.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FixedTariff {
     pub import: CentsPerKwh,
@@ -487,19 +484,17 @@ pub struct FixedTariff {
 /// `[prediction]` follows. A struct rather than an enum like
 /// [`PredictionConfig`]: no backend has fields of its own (EnergyZero needs no
 /// key), so only `kind` varies.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct PricesConfig {
     pub kind: PriceKind,
     pub poll_times: Vec<TimeOfDay>,
-    /// How many past days the first fetch reaches back for. The unit is in the
-    /// name because a bare count says nothing about days vs. fetches.
-    pub backfill_days: u16,
+    /// How many past days the first fetch reaches back for.
+    pub backfill_days: BackfillDays,
     pub dynamic: Option<DynamicTariff>,
     pub fixed: Option<FixedTariff>,
 }
 
-pub const DEFAULT_PRICES_BACKFILL_DAYS: u16 = 60;
+pub const DEFAULT_PRICES_BACKFILL_DAYS: BackfillDays = BackfillDays::new(60);
 
 /// EnergyZero publishes day-ahead prices in the early afternoon, so the
 /// afternoon anchors catch tomorrow's; the small-hours one catches a late
@@ -897,7 +892,6 @@ pub struct Config {
     /// the dashboard's forecast panel renders its empty state.
     pub prediction: Option<PredictionConfig>,
     /// `None` when `[prices]` is absent — nothing fetches or applies prices.
-    #[allow(dead_code)]
     pub prices: Option<PricesConfig>,
     /// `None` when `[car_battery]` is absent — no car-battery poller runs,
     /// and the dashboard's EV card stays a placeholder.
@@ -1307,8 +1301,8 @@ impl Config {
             };
             let poll_times =
                 taker.lenient::<Vec<TimeOfDay>>("prices.poll_times", default_price_poll_times())?;
-            let backfill_days =
-                taker.lenient::<u16>("prices.backfill_days", DEFAULT_PRICES_BACKFILL_DAYS)?;
+            let backfill_days = taker
+                .lenient::<BackfillDays>("prices.backfill_days", DEFAULT_PRICES_BACKFILL_DAYS)?;
             let dynamic = if taker.has_table("prices.dynamic")? {
                 Some(DynamicTariff {
                     markup: taker.required("prices.dynamic.markup")?,

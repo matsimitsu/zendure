@@ -14,7 +14,7 @@ use crate::analyze::{self, Pricing, Tariffs};
 use crate::config::Config;
 use crate::journal::read;
 use crate::replay::{self, Fixture};
-use crate::units::{PriceSeries, Timestamp};
+use crate::units::Timestamp;
 
 /// `zendure export` — a stretch of the journal as a replay fixture. Reads no
 /// configuration: a fixture carries the tuning it was decided under, recorded
@@ -101,11 +101,11 @@ fn pricing(db: &Path, config: Option<&Path>) -> Result<Pricing, Box<dyn std::err
         Timestamp::from_millis(i64::MIN),
         Timestamp::from_millis(i64::MAX),
     )?;
-    let (series, undecodable) = analyze::price_series(&rows);
+    let (series, undecodable) = crate::prices::decode_rows(&rows);
     if undecodable > 0 {
         eprintln!("warning: skipped {undecodable} price row(s) that did not decode");
     }
-    if series == PriceSeries::default() {
+    if series.is_empty() {
         return Ok(Pricing::Skipped(
             "the journal holds no energy prices".to_string(),
         ));

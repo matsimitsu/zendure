@@ -702,26 +702,14 @@ pub async fn run(
     let (prices_stop_tx, prices_stop_rx) = tokio::sync::oneshot::channel::<()>();
     let mut prices_task: Option<tokio::task::JoinHandle<()>> = None;
     if let (Some(tx), Some(prices_cfg)) = (&dashboard_tx, &config.prices) {
-        let feed = prices::PriceFeed::from_config(prices_cfg);
-        let poll_times = prices_cfg.poll_times.clone();
-        let backfill_days = prices_cfg.backfill_days;
-        let journal_path = config.journal_path.clone();
-        let tx = tx.clone();
-        let timezone = config.timezone;
-        let prices_journal = journal.clone();
-        prices_task = Some(tokio::spawn(async move {
-            prices::run_price_poller(
-                feed,
-                timezone,
-                poll_times,
-                backfill_days,
-                journal_path,
-                tx,
-                prices_journal,
-                prices_stop_rx,
-            )
-            .await;
-        }));
+        prices_task = Some(tokio::spawn(prices::run_price_poller(
+            prices_cfg,
+            config.timezone,
+            config.journal_path.clone(),
+            tx.clone(),
+            journal.clone(),
+            prices_stop_rx,
+        )));
     }
 
     // The car-battery poller: same independent-of-`Event`/`Engine::step`

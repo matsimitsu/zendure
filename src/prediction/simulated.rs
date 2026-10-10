@@ -4,7 +4,8 @@
 //! side, letting the scheduler/persistence/dashboard pipeline be exercised
 //! locally without a real Solcast API key.
 
-use super::{ForecastError, Prediction};
+use super::Prediction;
+use crate::fetch::FetchError;
 use crate::units::{SolarForecastPoint, SolarPower, Timestamp, Watts};
 
 /// A rooftop array's rough peak output — enough to draw a plausible curve,
@@ -26,7 +27,7 @@ impl Default for SimulatedForecaster {
 }
 
 impl Prediction for SimulatedForecaster {
-    async fn forecast(&self) -> Result<Vec<SolarForecastPoint>, ForecastError> {
+    async fn forecast(&self) -> Result<Vec<SolarForecastPoint>, FetchError> {
         Ok(clear_sky_curve(chrono::Utc::now(), PEAK))
     }
 }

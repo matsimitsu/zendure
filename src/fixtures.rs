@@ -137,3 +137,11 @@ pub fn utc(day: u32, hour: u32, minute: u32) -> Timestamp {
             .expect("a valid UTC instant"),
     )
 }
+
+/// An anchor-driven poller's clock read at local `hour:minute` on `y-m-d`.
+pub fn local_now(y: i32, m: u32, d: u32, hour: u32, minute: u32) -> crate::schedule::LocalNow {
+    crate::schedule::LocalNow {
+        date: chrono::NaiveDate::from_ymd_opt(y, m, d).expect("a valid date"),
+        time: crate::schedule::TimeOfDay::new(hour, minute).expect("a valid time of day"),
+    }
+}

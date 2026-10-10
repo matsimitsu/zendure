@@ -987,7 +987,7 @@ fn prices_defaults_apply_and_tariffs_are_absent() {
     let prices = config.prices.unwrap();
     assert_eq!(prices.kind, PriceKind::EnergyZero);
     assert_eq!(prices.poll_times, default_price_poll_times());
-    assert_eq!(prices.backfill_days, 60);
+    assert_eq!(prices.backfill_days, BackfillDays::new(60));
     assert_eq!(prices.dynamic, None);
     assert_eq!(prices.fixed, None);
 }
@@ -1004,7 +1004,7 @@ fn prices_with_both_tariffs_parses() {
     let prices = config.prices.unwrap();
     assert_eq!(prices.kind, PriceKind::Simulated);
     assert_eq!(prices.poll_times, vec![TimeOfDay::new(1, 0).unwrap()]);
-    assert_eq!(prices.backfill_days, 7);
+    assert_eq!(prices.backfill_days, BackfillDays::new(7));
     assert_eq!(
         prices.dynamic,
         Some(DynamicTariff {
@@ -1048,6 +1048,6 @@ fn a_malformed_backfill_falls_back_with_a_warning() {
         "kind = \"energyzero\"\nbackfill_days = \"lots\"\n",
     ))
     .unwrap();
-    assert_eq!(config.prices.unwrap().backfill_days, 60);
+    assert_eq!(config.prices.unwrap().backfill_days, BackfillDays::new(60));
     assert!(warnings.iter().any(|w| w.contains("prices.backfill_days")));
 }

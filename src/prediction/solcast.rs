@@ -1,15 +1,15 @@
 //! The real backend: two Solcast rooftop sites (east/west-facing panels on
 //! one physical array), fetched concurrently and summed into one series.
-//! Mirrors `zendure.rs`'s rule: capture the response body as text first, then
-//! parse, so an undecodable payload is still logged rather than silently
-//! lost.
+//! The body goes through `crate::fetch`, so an undecodable payload is still
+//! logged rather than silently lost.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::{ForecastError, Prediction};
+use super::Prediction;
+use crate::fetch::{FetchError, fetch_parsed};
 use crate::units::{SolarForecastPoint, SolarPower, Timestamp};
 
 /// Deserialize-only, like `ZendureReport` — this crate never writes to
@@ -52,33 +52,19 @@ impl SolcastForecaster {
         }
     }
 
-    /// The response body, captured as text before anything tries to parse
-    /// it — same rule `zendure.rs`'s `get_properties_raw` follows.
-    async fn fetch_site_raw(&self, site_id: &str) -> Result<String, ForecastError> {
+    async fn fetch_site(&self, site_id: &str) -> Result<Vec<SolarForecastPoint>, FetchError> {
         let url = format!(
             "https://api.solcast.com.au/rooftop_sites/{site_id}/forecasts?format=json&api_key={}",
             self.api_key,
         );
         // Never log `url` — it carries the API key. Only the site id and
         // anchor name (logged by the poller) are worth a line.
-        self.http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| ForecastError::Request(e.to_string()))?
-            .text()
-            .await
-            .map_err(|e| ForecastError::Request(e.to_string()))
-    }
-
-    async fn fetch_site(&self, site_id: &str) -> Result<Vec<SolarForecastPoint>, ForecastError> {
-        let body = self.fetch_site_raw(site_id).await?;
-        parse_forecast_response(&body).map_err(|error| ForecastError::Parse { body, error })
+        fetch_parsed(self.http.get(&url), parse_forecast_response).await
     }
 }
 
 impl Prediction for SolcastForecaster {
-    async fn forecast(&self) -> Result<Vec<SolarForecastPoint>, ForecastError> {
+    async fn forecast(&self) -> Result<Vec<SolarForecastPoint>, FetchError> {
         let (east, west) = tokio::try_join!(
             self.fetch_site(&self.site_east),
             self.fetch_site(&self.site_west),

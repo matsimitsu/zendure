@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::prices::PricePoint;
 use crate::units::{BatteryPower, CentsPerKwh, GridPower, Percent, PowerCap};
 use crate::world::DeviceId;
 
@@ -419,30 +420,4 @@ fn the_cost_table_carries_each_day_and_the_period_total() {
     assert!(total.contains("€0.60"), "{total}");
     assert!(total.contains("-€0.12"), "{total}");
     assert!(table.contains("salderingsregeling"), "{table}");
-}
-
-/// A later fetch of the same interval is a revision and wins; a row that does
-/// not decode is counted, not fatal.
-#[test]
-fn price_rows_fold_newest_wins_and_count_what_does_not_decode() {
-    let row = |wholesale: f64| {
-        (
-            Timestamp::from_millis(0),
-            serde_json::to_string(&vec![point(wholesale, 0, 3600)]).unwrap(),
-        )
-    };
-    let rows = vec![
-        row(10.0),
-        (Timestamp::from_millis(0), "not json".to_string()),
-        row(12.0),
-    ];
-
-    let (series, undecodable) = price_series(&rows);
-    assert_eq!(undecodable, 1);
-    assert_eq!(
-        series
-            .at(Timestamp::from_millis(BASE_MS))
-            .map(|p| p.wholesale),
-        Some(CentsPerKwh(12.0))
-    );
 }

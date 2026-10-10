@@ -26,7 +26,7 @@ use crate::web::DashboardStateSender;
 pub mod simulated;
 pub mod vw_portal;
 
-/// What can go wrong fetching the car's SoC. Mirrors `ForecastError`'s rule:
+/// What can go wrong fetching the car's SoC. Mirrors `crate::fetch::FetchError`'s rule:
 /// a response this build cannot decode is the one most worth keeping.
 #[derive(Debug)]
 pub enum CarBatteryError {

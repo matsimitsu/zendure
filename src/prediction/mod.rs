@@ -7,24 +7,25 @@
 //! (`solcast.rs`), `"simulated"` a synthetic one (`simulated.rs`) for local
 //! dev and testing with no network call and no daily quota to spend.
 //!
-//! Everything in *this* file is backend-agnostic: the poll schedule, the
-//! persisted daily budget, and the poller loop only ever see
+//! Everything in *this* file is backend-agnostic: the persisted daily budget
+//! and the poller loop only ever see
 //! `Vec<SolarForecastPoint>`, never which backend produced them. This is
 //! display-only — nothing here feeds `crate::controller`.
 
-use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use chrono::{NaiveDate, Timelike};
+use chrono::NaiveDate;
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
 use crate::config::PredictionConfig;
+use crate::fetch::FetchError;
 use crate::journal::Journal;
+use crate::schedule::{AnchorSchedule, LocalNow, TimeOfDay};
 use crate::units::{SolarForecastPoint, Timestamp};
 use crate::web::{DashboardStateSender, ForecastSnapshot};
 
@@ -34,66 +35,6 @@ pub mod solcast;
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
-
-/// A local time-of-day anchor (hour, minute) — an entry in `poll_times`, and
-/// what `fired` remembers having used today. Hand-written `"HH:MM"`
-/// `Serialize`/`Deserialize` so the TOML config and the persisted state's
-/// `fired` list share one representation. `Ord`/`Eq` derived so the scheduler
-/// can compare anchors and a `BTreeSet` can hold them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TimeOfDay {
-    hour: u32,
-    minute: u32,
-}
-
-impl TimeOfDay {
-    pub fn new(hour: u32, minute: u32) -> Result<Self, String> {
-        if hour >= 24 {
-            return Err(format!("hour must be 0-23, found {hour}"));
-        }
-        if minute >= 60 {
-            return Err(format!("minute must be 0-59, found {minute}"));
-        }
-        Ok(TimeOfDay { hour, minute })
-    }
-}
-
-impl std::fmt::Display for TimeOfDay {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:02}:{:02}", self.hour, self.minute)
-    }
-}
-
-impl std::str::FromStr for TimeOfDay {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, String> {
-        let (h, m) = s
-            .split_once(':')
-            .ok_or_else(|| format!("must be \"HH:MM\", found {s:?}"))?;
-        let hour = h
-            .parse::<u32>()
-            .map_err(|_| format!("must be \"HH:MM\", found {s:?}"))?;
-        let minute = m
-            .parse::<u32>()
-            .map_err(|_| format!("must be \"HH:MM\", found {s:?}"))?;
-        TimeOfDay::new(hour, minute)
-    }
-}
-
-impl Serialize for TimeOfDay {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.collect_str(self)
-    }
-}
-
-impl<'de> Deserialize<'de> for TimeOfDay {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        String::deserialize(d)?
-            .parse()
-            .map_err(serde::de::Error::custom)
-    }
-}
 
 /// The daily budget's default shape: five anchors spread across daylight,
 /// spending Solcast's 10-request/day account cap (5/site) where cloud cover
@@ -109,47 +50,6 @@ pub fn default_poll_times() -> [TimeOfDay; 5] {
     ]
 }
 
-/// This poller's own clock read — deliberately not `crate::clock::Clock`,
-/// which only resolves the hour (0-23) and is journalled/replayed
-/// byte-for-byte; extending it with minutes would touch every journalled
-/// `Event`. Read once per check, at the poller's own edge; every scheduling
-/// decision below takes this as a plain argument, so it stays pure and
-/// testable with no wall clock.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LocalNow {
-    pub date: NaiveDate,
-    pub time: TimeOfDay,
-}
-
-impl LocalNow {
-    pub fn now(tz: Tz) -> Self {
-        let local = chrono::Utc::now().with_timezone(&tz);
-        LocalNow {
-            date: local.date_naive(),
-            time: TimeOfDay::new(local.hour(), local.minute())
-                .expect("chrono's own hour()/minute() are always in range"),
-        }
-    }
-}
-
-/// What can go wrong fetching a forecast. Mirrors `PollError`'s rule: a
-/// response this build cannot decode is the one most worth keeping, so the
-/// raw body rides along on a parse failure.
-#[derive(Debug)]
-pub enum ForecastError {
-    Request(String),
-    Parse { body: String, error: String },
-}
-
-impl std::fmt::Display for ForecastError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ForecastError::Request(e) => write!(f, "request failed: {e}"),
-            ForecastError::Parse { error, .. } => write!(f, "parse error: {error}"),
-        }
-    }
-}
-
 /// One combined forecast series for the whole day. What "combined" means —
 /// one site, several sites summed, a synthetic curve — is entirely the
 /// implementor's affair; this trait's only contract is "the day's predicted
@@ -157,9 +57,7 @@ impl std::fmt::Display for ForecastError {
 /// Future + Send`) and for the same reason: an unboxed future per adapter, no
 /// `dyn`.
 pub trait Prediction {
-    fn forecast(
-        &self,
-    ) -> impl Future<Output = Result<Vec<SolarForecastPoint>, ForecastError>> + Send;
+    fn forecast(&self) -> impl Future<Output = Result<Vec<SolarForecastPoint>, FetchError>> + Send;
 }
 
 /// Whichever backend `[prediction]` selected. Mirrors `registry::Battery`:
@@ -171,7 +69,7 @@ pub enum Forecaster {
 }
 
 impl Prediction for Forecaster {
-    async fn forecast(&self) -> Result<Vec<SolarForecastPoint>, ForecastError> {
+    async fn forecast(&self) -> Result<Vec<SolarForecastPoint>, FetchError> {
         match self {
             Forecaster::Solcast(f) => f.forecast().await,
             Forecaster::Simulated(f) => f.forecast().await,
@@ -211,51 +109,6 @@ struct PersistedForecastState {
     fetched_at: Option<i64>,
 }
 
-/// Which `poll_times` anchors have fired on the current local day. Shared by
-/// every anchor-driven poller; any date mismatch with `now` means the day
-/// rolled over and nothing has fired yet.
-#[derive(Debug, Clone)]
-pub struct AnchorSchedule {
-    date: NaiveDate,
-    fired: BTreeSet<TimeOfDay>,
-    poll_times: Vec<TimeOfDay>,
-}
-
-impl AnchorSchedule {
-    pub fn new(poll_times: Vec<TimeOfDay>) -> Self {
-        AnchorSchedule {
-            // Never compared equal to a real `now`, so it reads as "fresh".
-            date: NaiveDate::from_ymd_opt(1970, 1, 1).expect("1970-01-01 is a valid date"),
-            fired: BTreeSet::new(),
-            poll_times,
-        }
-    }
-
-    /// The latest anchor at-or-before `now.time` that hasn't fired today.
-    /// Returning the *latest* rather than the earliest collapses a catch-up
-    /// after downtime into a single fetch.
-    pub fn next_due(&self, now: &LocalNow) -> Option<TimeOfDay> {
-        let fresh_day = self.date != now.date;
-        self.poll_times
-            .iter()
-            .rev()
-            .find(|slot| **slot <= now.time && (fresh_day || !self.fired.contains(slot)))
-            .copied()
-    }
-
-    /// Records `slot` and every earlier anchor as used today, matching
-    /// `next_due`'s catch-up collapse. Called after a failed fetch too.
-    pub fn mark_used(&mut self, now: &LocalNow, slot: TimeOfDay) {
-        if self.date != now.date {
-            self.date = now.date;
-            self.fired.clear();
-        }
-        for anchor in self.poll_times.iter().copied().filter(|a| *a <= slot) {
-            self.fired.insert(anchor);
-        }
-    }
-}
-
 /// Tracks the daily poll budget and the last cached forecast, surviving a
 /// restart the same way `rte::RteTracker` does: `load` on construction (a
 /// missing file or corrupt JSON warns and starts fresh, never panics), `save`
@@ -293,8 +146,8 @@ impl ForecastTracker {
         tracker
     }
 
-    pub fn next_due(&self, now: &LocalNow) -> Option<TimeOfDay> {
-        self.schedule.next_due(now)
+    pub fn schedule(&self) -> &AnchorSchedule {
+        &self.schedule
     }
 
     /// A failed fetch still spent the request, so this runs after both.
@@ -336,8 +189,8 @@ impl ForecastTracker {
 
     fn save(&self) {
         let state = PersistedForecastState {
-            date: self.schedule.date.format("%Y-%m-%d").to_string(),
-            fired: self.schedule.fired.iter().copied().collect(),
+            date: self.schedule.date().format("%Y-%m-%d").to_string(),
+            fired: self.schedule.fired().collect(),
             points: self.points.clone(),
             fetched_at: self.fetched_at.map(Timestamp::as_millis),
         };
@@ -375,8 +228,7 @@ impl ForecastTracker {
             tracing::warn!("Failed to parse forecast state date {:?}", state.date);
             return;
         };
-        self.schedule.date = date;
-        self.schedule.fired = state.fired.into_iter().collect();
+        self.schedule.resume(date, state.fired);
         self.points = state.points;
         self.fetched_at = state.fetched_at.map(Timestamp::from_millis);
     }
@@ -411,7 +263,7 @@ pub async fn run_forecast_poller(
             _ = &mut shutdown => break,
             _ = check.tick() => {
                 let now = LocalNow::now(timezone);
-                let Some(slot) = tracker.next_due(&now) else { continue };
+                let Some(slot) = tracker.schedule().next_due(&now) else { continue };
                 tracing::info!("Fetching solar forecast ({slot} anchor)");
                 match forecaster.forecast().await {
                     Ok(points) => {
@@ -428,7 +280,7 @@ pub async fn run_forecast_poller(
                     }
                     Err(e) => {
                         tracing::warn!("Solar forecast fetch failed for {slot} anchor: {e}");
-                        if let ForecastError::Parse { body, .. } = &e {
+                        if let FetchError::Parse { body, .. } = &e {
                             tracing::debug!("Undecodable forecast body: {body}");
                         }
                         tracker.mark_used(&now, slot);
