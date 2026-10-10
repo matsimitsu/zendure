@@ -16,6 +16,7 @@ use crate::sync::guard;
 use crate::units::{Elapsed, Timestamp};
 use crate::world::DeviceId;
 
+use super::day_nav::{BadQuery, parse_day_param, query_values};
 use super::flows::{EnergyFlowsView, FlowResolution, FlowsRequest, requested_flows_view};
 use super::intervals::{IntervalHistory, history_of_day};
 
@@ -26,16 +27,6 @@ const CACHED_DAYS: usize = 8;
 /// behind the live loop, so the day's last rows can land after its midnight.
 const SETTLE: Duration = Duration::from_secs(5 * 60);
 
-/// A query string the panel cannot show; the caller answers 400.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BadFlowsQuery(String);
-
-impl std::fmt::Display for BadFlowsQuery {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
 /// `?day=YYYY-MM-DD&interval=1h|15m`, both optional, before today is known.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlowsQuery {
@@ -44,28 +35,14 @@ pub struct FlowsQuery {
 }
 
 impl FlowsQuery {
-    /// Other keys are ignored, so the page's own query can carry more. An
-    /// empty value reads as absent, the way an empty form field submits.
-    pub fn parse(raw: Option<&str>) -> Result<Self, BadFlowsQuery> {
-        let mut query = FlowsQuery {
-            day: None,
-            interval: FlowResolution::Hour,
-        };
-        for pair in raw.unwrap_or_default().split('&') {
-            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-            match key {
-                _ if value.is_empty() => {}
-                "day" => {
-                    let day = NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| {
-                        BadFlowsQuery(format!("day={value} is not a YYYY-MM-DD date"))
-                    })?;
-                    query.day = Some(day);
-                }
-                "interval" => query.interval = value.parse().map_err(BadFlowsQuery)?,
-                _ => {}
-            }
-        }
-        Ok(query)
+    /// Other keys are ignored, so the page's own query can carry more.
+    pub fn parse(raw: Option<&str>) -> Result<Self, BadQuery> {
+        let day = parse_day_param(raw, "day")?;
+        let interval = query_values(raw, "interval")
+            .try_fold(FlowResolution::Hour, |_, value| {
+                value.parse().map_err(BadQuery)
+            })?;
+        Ok(FlowsQuery { day, interval })
     }
 
     /// A day after today clamps to today: nothing has been measured there,

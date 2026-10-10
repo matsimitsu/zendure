@@ -15,6 +15,7 @@ use crate::prices::{DayPrices, PRICE_HISTORY_DAYS, PriceSnapshot};
 use crate::units::{CentsPerKwh, Timestamp};
 
 use super::axis::{AxisDensity, AxisPosition, AxisTick};
+use super::day_nav::{BadQuery, DayNavView, parse_day_param};
 use super::plot::{Day, YScale};
 use super::state::DashboardState;
 use super::view::{MISSING, MiniStatSub, MiniStatView};
@@ -33,17 +34,6 @@ const MIN_BAR_HEIGHT: f64 = 1.0;
 /// The y axis steps in whole tens of cents.
 const SCALE_STEP: CentsPerKwh = CentsPerKwh(10.0);
 
-/// A query string naming a day the panel cannot parse; the caller answers
-/// 400.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BadPriceQuery(String);
-
-impl std::fmt::Display for BadPriceQuery {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
 /// The day a request asks the panel for, before today is known. `None` is
 /// today.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -53,29 +43,18 @@ pub struct PriceDayQuery {
 
 impl PriceDayQuery {
     /// `/fragments/price-panel?day=YYYY-MM-DD`.
-    pub fn parse_fragment(raw: Option<&str>) -> Result<Self, BadPriceQuery> {
-        Self::parse(raw, "day")
+    pub fn parse_fragment(raw: Option<&str>) -> Result<Self, BadQuery> {
+        Ok(PriceDayQuery {
+            day: parse_day_param(raw, "day")?,
+        })
     }
 
     /// `/?price_day=YYYY-MM-DD`: its own key, so the flows panel's `?day=`
     /// can share the page's query.
-    pub fn parse_page(raw: Option<&str>) -> Result<Self, BadPriceQuery> {
-        Self::parse(raw, "price_day")
-    }
-
-    /// Other keys are ignored, and an empty value reads as absent.
-    fn parse(raw: Option<&str>, key: &str) -> Result<Self, BadPriceQuery> {
-        let mut query = PriceDayQuery::default();
-        for pair in raw.unwrap_or_default().split('&') {
-            let (each, value) = pair.split_once('=').unwrap_or((pair, ""));
-            if each != key || value.is_empty() {
-                continue;
-            }
-            let day = NaiveDate::parse_from_str(value, "%Y-%m-%d")
-                .map_err(|_| BadPriceQuery(format!("{key}={value} is not a YYYY-MM-DD date")))?;
-            query.day = Some(day);
-        }
-        Ok(query)
+    pub fn parse_page(raw: Option<&str>) -> Result<Self, BadQuery> {
+        Ok(PriceDayQuery {
+            day: parse_day_param(raw, "price_day")?,
+        })
     }
 
     /// The asked-for day pulled into `range`, so a stale or hand-typed link
@@ -121,7 +100,7 @@ pub enum PricePanelView {
     Empty(EmptyReason),
     /// A day the nav reaches that holds no prices, e.g. a gap in the
     /// journal: the nav stays so the user can step on.
-    Unpriced(PriceNavView),
+    Unpriced(DayNavView),
     Priced(Box<PricedDayView>),
 }
 
@@ -130,8 +109,8 @@ impl PricePanelView {
     pub fn data_day(&self) -> String {
         match self {
             PricePanelView::Empty(_) => "today".to_string(),
-            PricePanelView::Unpriced(nav) => nav.data_day(),
-            PricePanelView::Priced(day) => day.nav.data_day(),
+            PricePanelView::Unpriced(nav) => day_marker(nav),
+            PricePanelView::Priced(day) => day_marker(&day.nav),
         }
     }
 }
@@ -155,7 +134,7 @@ impl EmptyReason {
 pub struct PricedDayView {
     /// `All-in import price incl. VAT · fetched 13:00`.
     pub subtitle: String,
-    pub nav: PriceNavView,
+    pub nav: DayNavView,
     /// What the readout shows with nothing hovered.
     pub readout: PriceReadoutView,
     /// The cheapest and priciest 3-hour blocks; `None` when no full block is
@@ -165,53 +144,12 @@ pub struct PricedDayView {
     pub legend: [PriceLegendItem; 3],
 }
 
-/// Which day the panel shows, and which days its steps reach.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PriceNavView {
-    pub shown: NaiveDate,
-    pub today: NaiveDate,
-    pub previous: Option<NaiveDate>,
-    /// `None` on tomorrow, and on today until tomorrow is fully priced.
-    pub next: Option<NaiveDate>,
-    /// "Today", "Tomorrow", "Yesterday" or "Wed 7 Oct".
-    pub label: String,
-    /// "7 Oct".
-    pub date: String,
-}
-
-impl PriceNavView {
-    fn new(shown: NaiveDate, today: NaiveDate, range: NavRange) -> Self {
-        let label = if shown == today {
-            "Today".to_string()
-        } else if today.succ_opt() == Some(shown) {
-            "Tomorrow".to_string()
-        } else if today.pred_opt() == Some(shown) {
-            "Yesterday".to_string()
-        } else {
-            shown.format("%a %-d %b").to_string()
-        };
-        PriceNavView {
-            shown,
-            today,
-            previous: shown.pred_opt().filter(|day| *day >= range.earliest),
-            next: shown.succ_opt().filter(|day| *day <= range.latest),
-            label,
-            date: shown.format("%-d %b").to_string(),
-        }
-    }
-
-    /// Only today has a now, and only today takes the live stream.
-    pub fn is_today(&self) -> bool {
-        self.shown == self.today
-    }
-
-    /// The `data-day` marker the host mirrors: `today` or the date.
-    pub fn data_day(&self) -> String {
-        if self.is_today() {
-            "today".to_string()
-        } else {
-            self.shown.to_string()
-        }
+/// The `data-day` marker the host mirrors: `today` or the date.
+fn day_marker(nav: &DayNavView) -> String {
+    if nav.is_today() {
+        "today".to_string()
+    } else {
+        nav.shown.to_string()
     }
 }
 
@@ -461,8 +399,7 @@ fn subtitle(snapshot: &PriceSnapshot, tariff: Option<&DynamicTariff>, tz: Tz) ->
     }
 }
 
-/// The panel on the day `query` asks for, clamped to the days the nav
-/// reaches.
+/// The panel on the day `query` asks for.
 pub fn requested_price_panel(
     state: &DashboardState,
     query: PriceDayQuery,
@@ -473,16 +410,14 @@ pub fn requested_price_panel(
         tariff: state.tariff.as_ref(),
         configured: state.price_feed,
     };
-    let today = local_date(state.as_of, tz).unwrap_or_default();
-    let day = query.resolve(today, NavRange::of(today, &state.prices, tz));
-    price_panel_view(day, &context, state.as_of, tz)
+    price_panel_view(query, &context, state.as_of, tz)
 }
 
-/// `day` from the snapshot. Today has a now: its readout defaults to the
-/// current hour, its past hours dim and its windows only look ahead. Any
-/// other day defaults to its average.
+/// The day `query` asks for, clamped to the days the nav reaches. Today has
+/// a now: its readout defaults to the current hour, its past hours dim and
+/// its windows only look ahead. Any other day defaults to its average.
 pub fn price_panel_view(
-    day: NaiveDate,
+    query: PriceDayQuery,
     context: &PriceContext,
     now: Timestamp,
     tz: Tz,
@@ -490,8 +425,13 @@ pub fn price_panel_view(
     if !context.configured {
         return PricePanelView::Empty(EmptyReason::NotConfigured);
     }
-    let today = local_date(now, tz).unwrap_or_default();
-    let nav = PriceNavView::new(day, today, NavRange::of(today, context.snapshot, tz));
+    // A clock no calendar can place has no today to show prices for.
+    let Some(today) = local_date(now, tz) else {
+        return PricePanelView::Empty(EmptyReason::Waiting);
+    };
+    let range = NavRange::of(today, context.snapshot, tz);
+    let day = query.resolve(today, range);
+    let nav = DayNavView::new(day, today, Some(range.earliest), range.latest);
     let priced_day = context.snapshot.prices_for(day, tz).and_then(|prices| {
         let slots = hour_slots(&prices, context.tariff);
         let priced: Vec<CentsPerKwh> = slots.iter().filter_map(|slot| slot.price).collect();

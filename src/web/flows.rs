@@ -13,6 +13,7 @@ use crate::clock::local_date;
 use crate::units::{BatteryPower, Elapsed, GridPower, SolarPower, Timestamp, Watts};
 
 use super::axis::{AxisDensity, AxisPosition, AxisTick, power_step};
+use super::day_nav::DayNavView;
 use super::entity::Entity;
 use super::intervals::{
     HOUR, INTERVAL, IntervalAverages, IntervalHistory, IntervalIndex, IntervalSlot, merged,
@@ -237,48 +238,6 @@ pub struct FlowPlotView {
     pub now_x: Option<f64>,
 }
 
-/// Which day the panel shows, and where its step controls lead.
-#[derive(Debug, Clone, PartialEq)]
-pub struct DayNavView {
-    pub shown: NaiveDate,
-    pub today: NaiveDate,
-    /// `None` on the oldest day the journal still holds.
-    pub previous: Option<NaiveDate>,
-    /// `None` on today: there is nothing to show after it.
-    pub next: Option<NaiveDate>,
-    /// "Today", "Yesterday" or "Mon 5 Oct".
-    pub label: String,
-    /// "5 Oct".
-    pub date: String,
-}
-
-impl DayNavView {
-    fn new(shown: NaiveDate, today: NaiveDate, earliest: Option<NaiveDate>) -> Self {
-        let label = if shown == today {
-            "Today".to_string()
-        } else if today.pred_opt() == Some(shown) {
-            "Yesterday".to_string()
-        } else {
-            shown.format("%a %-d %b").to_string()
-        };
-        DayNavView {
-            shown,
-            today,
-            previous: shown
-                .pred_opt()
-                .filter(|_| earliest.is_none_or(|earliest| shown > earliest)),
-            next: shown.succ_opt().filter(|_| shown < today),
-            label,
-            date: shown.format("%-d %b").to_string(),
-        }
-    }
-
-    /// Only today takes the live stream; a past day never changes.
-    pub fn live(&self) -> bool {
-        self.shown == self.today
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct EnergyFlowsView {
     pub nav: DayNavView,
@@ -478,7 +437,7 @@ pub fn requested_flows_view(
 
     let ticks = scale.ticks();
     EnergyFlowsView {
-        nav: DayNavView::new(request.day, today, earliest),
+        nav: DayNavView::new(request.day, today, earliest, today),
         interval: request.interval,
         y_axis: ticks
             .iter()

@@ -84,7 +84,7 @@ crossed a boundary without anyone saying what the conversion meant.
 - `src/replay.rs` — Decision diff: a recorded event stream re-folded through the engine, hermetic
 - `src/analyze.rs` — Integrating a recorded run into daily energy, offline
 - `src/fixtures.rs` — Test scenarios shared across modules
-- `src/web/` — Live dashboard: Axum routes, SSE fan-out, live-state cell (`state`), the 15-minute flows ring (`intervals`) and its per-pack figures (`pack_intervals`), the four charted and detailed entities (`entity`), axis ticks (`axis`), the day charts' shared x and y geometry (`plot`), the flows chart's geometry (`flows`) and its past days from the journal (`past_days`), the price panel's single-day chart (`prices`), line-chart geometry (`line_chart`), the detail panels' summaries (`detail`), Maud view-models (`view`)
+- `src/web/` — Live dashboard: Axum routes, SSE fan-out, live-state cell (`state`), the 15-minute flows ring (`intervals`) and its per-pack figures (`pack_intervals`), the four charted and detailed entities (`entity`), axis ticks (`axis`), the day nav both day-stepping panels share and its `?day=` parser (`day_nav`), the day charts' shared x and y geometry (`plot`), the flows chart's geometry (`flows`) and its past days from the journal (`past_days`), the price panel's single-day chart (`prices`), line-chart geometry (`line_chart`), the detail panels' summaries (`detail`), Maud view-models (`view`)
 - `assets/scss/` — Dashboard component stylesheets (Grass), compiled by `build.rs` and served via `rust-embed`
 
 ## Dashboard styling

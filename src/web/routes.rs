@@ -9,6 +9,7 @@ use axum::routing::get;
 use chrono_tz::Tz;
 use rust_embed::Embed;
 
+use super::day_nav::BadQuery;
 use super::entity::Entity;
 use super::flows::{EnergyFlowsView, requested_flows_view};
 use super::past_days::{FlowsQuery, PastDays};
@@ -45,48 +46,40 @@ pub fn router(state: AppState) -> Router {
 
 /// `?day=` and `?interval=` choose the flows panel's day and `?price_day=`
 /// the price panel's, so a step link still works in a browser without htmx.
-async fn index(State(state): State<AppState>, RawQuery(raw): RawQuery) -> Response {
-    let query = match FlowsQuery::parse(raw.as_deref()) {
-        Ok(query) => query,
-        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-    };
-    let price_day = match PriceDayQuery::parse_page(raw.as_deref()) {
-        Ok(query) => query,
-        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-    };
+async fn index(
+    State(state): State<AppState>,
+    RawQuery(raw): RawQuery,
+) -> Result<Response, Refused> {
+    let query = FlowsQuery::parse(raw.as_deref())?;
+    let price_day = PriceDayQuery::parse_page(raw.as_deref())?;
     let current = state.dashboard.borrow().clone();
-    let mut view = dashboard_view(&current, state.timezone);
-    view.prices = requested_price_panel(&current, price_day, state.timezone);
-    view.energy_flows = match flows_view(&state, &current, query).await {
-        Ok(flows) => flows,
-        Err(failed) => return failed.into_response(),
-    };
-    layout::page(&view).into_response()
+    let mut view = dashboard_view(&current, price_day, state.timezone);
+    view.energy_flows = flows_view(&state, &current, query).await?;
+    Ok(layout::page(&view).into_response())
 }
 
 /// The flows panel's contents for one day, which the step links swap into
 /// its host.
-async fn energy_flows(State(state): State<AppState>, RawQuery(query): RawQuery) -> Response {
-    let query = match FlowsQuery::parse(query.as_deref()) {
-        Ok(query) => query,
-        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-    };
+async fn energy_flows(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+) -> Result<Response, Refused> {
+    let query = FlowsQuery::parse(query.as_deref())?;
     let current = state.dashboard.borrow().clone();
-    match flows_view(&state, &current, query).await {
-        Ok(view) => energy_flows::render(&view).into_response(),
-        Err(failed) => failed.into_response(),
-    }
+    let view = flows_view(&state, &current, query).await?;
+    Ok(energy_flows::render(&view).into_response())
 }
 
 /// The price panel's contents for one day, which the step links swap into
 /// its host. Every day it reaches is already in the snapshot.
-async fn price_panel(State(state): State<AppState>, RawQuery(raw): RawQuery) -> Response {
-    let query = match PriceDayQuery::parse_fragment(raw.as_deref()) {
-        Ok(query) => query,
-        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-    };
+async fn price_panel(
+    State(state): State<AppState>,
+    RawQuery(raw): RawQuery,
+) -> Result<Response, BadQuery> {
+    let query = PriceDayQuery::parse_fragment(raw.as_deref())?;
     let current = state.dashboard.borrow().clone();
-    price_panel::render(&requested_price_panel(&current, query, state.timezone)).into_response()
+    let view = requested_price_panel(&current, query, state.timezone);
+    Ok(price_panel::render(&view).into_response())
 }
 
 /// Today from the live ring, which the stream keeps current; any earlier day
@@ -127,6 +120,39 @@ impl IntoResponse for PastDayFailed {
     }
 }
 
+impl IntoResponse for BadQuery {
+    fn into_response(self) -> Response {
+        (StatusCode::BAD_REQUEST, self.to_string()).into_response()
+    }
+}
+
+/// Why a panel request was not answered with the panel.
+enum Refused {
+    BadQuery(BadQuery),
+    PastDayFailed(PastDayFailed),
+}
+
+impl From<BadQuery> for Refused {
+    fn from(bad: BadQuery) -> Self {
+        Refused::BadQuery(bad)
+    }
+}
+
+impl From<PastDayFailed> for Refused {
+    fn from(failed: PastDayFailed) -> Self {
+        Refused::PastDayFailed(failed)
+    }
+}
+
+impl IntoResponse for Refused {
+    fn into_response(self) -> Response {
+        match self {
+            Refused::BadQuery(bad) => bad.into_response(),
+            Refused::PastDayFailed(failed) => failed.into_response(),
+        }
+    }
+}
+
 /// The panel alone for htmx, which swaps it into the dialog; a whole page for
 /// a browser that followed the card's link itself. The two share a URL, so
 /// the response must say it varies by who is asking.
@@ -145,7 +171,7 @@ async fn detail(
     if headers.contains_key(HeaderName::from_static("hx-request")) {
         return (vary, layout::detail_fragment(&detail)).into_response();
     }
-    let dashboard = dashboard_view(&current, state.timezone);
+    let dashboard = dashboard_view(&current, PriceDayQuery::default(), state.timezone);
     (vary, layout::detail_page(&dashboard, &detail)).into_response()
 }
 

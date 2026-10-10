@@ -161,7 +161,7 @@ async fn the_oldest_journal_day_has_no_step_back() {
     assert_eq!(next.nav.previous, Some(date(6)));
     assert_eq!(next.nav.next, Some(date(8)));
     assert_eq!(next.nav.label, "Yesterday");
-    assert!(!next.nav.live());
+    assert!(!next.nav.is_today());
 }
 
 /// Both plots are rendered either way, so one entry serves both intervals.

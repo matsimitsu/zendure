@@ -79,7 +79,7 @@ fn decision(mode: ControlMode, reason: &str) -> ControlDecision {
 /// wired into one but not the other freezes in the browser without failing.
 #[test]
 fn page_is_live_everywhere_it_claims_to_be() {
-    let view = dashboard_view(&state(vec![]), tz());
+    let view = dashboard_view(&state(vec![]), PriceDayQuery::default(), tz());
     let html = layout::page(&view).into_string();
 
     let mut on_page: Vec<String> = html
@@ -101,7 +101,7 @@ fn page_is_live_everywhere_it_claims_to_be() {
 /// every tick rather than replacing it.
 #[test]
 fn no_fragment_repeats_its_own_sse_swap_wrapper() {
-    let view = dashboard_view(&state(vec![]), tz());
+    let view = dashboard_view(&state(vec![]), PriceDayQuery::default(), tz());
 
     for (name, render) in FRAGMENTS {
         let fragment = render(&view).into_string();
@@ -165,7 +165,7 @@ fn start_tags_with_ancestors(html: &str) -> Vec<(StartTag<'_>, Vec<StartTag<'_>>
 /// the modal instead of itself.
 #[test]
 fn no_sse_swap_inherits_an_hx_target_from_an_ancestor() {
-    let view = dashboard_view(&state(vec![]), tz());
+    let view = dashboard_view(&state(vec![]), PriceDayQuery::default(), tz());
     let html = layout::page(&view).into_string();
 
     let mut inside_a_target = 0;
@@ -210,7 +210,12 @@ fn app_script_tags(html: &str) -> Vec<(bool, String)> {
 /// same top-level `const` throw and the second element is never defined.
 #[test]
 fn every_app_script_loads_as_a_module_with_its_own_scope() {
-    let html = layout::page(&dashboard_view(&state(vec![]), tz())).into_string();
+    let html = layout::page(&dashboard_view(
+        &state(vec![]),
+        PriceDayQuery::default(),
+        tz(),
+    ))
+    .into_string();
     let scripts = app_script_tags(&html);
 
     let names: Vec<&str> = scripts.iter().map(|(_, name)| name.as_str()).collect();
@@ -246,7 +251,12 @@ fn every_app_script_defines_its_element_when_loaded_together() {
         console.log(defined.join(","));
     "#;
 
-    let html = layout::page(&dashboard_view(&state(vec![]), tz())).into_string();
+    let html = layout::page(&dashboard_view(
+        &state(vec![]),
+        PriceDayQuery::default(),
+        tz(),
+    ))
+    .into_string();
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/js");
     let args = app_script_tags(&html).into_iter().map(|(module, name)| {
         let kind = if module { "module" } else { "classic" };
@@ -284,7 +294,7 @@ fn the_mode_badge_awaits_a_decision_rather_than_inheriting_a_journalled_one() {
         at(-50_000),
         decision(ControlMode::Discharge, "yesterday evening"),
     )]);
-    let view = dashboard_view(&seeded, tz());
+    let view = dashboard_view(&seeded, PriceDayQuery::default(), tz());
     let battery = view.battery.expect("the fixture world has a battery");
 
     assert_eq!(battery.mode_label, "Awaiting decision");
@@ -311,7 +321,7 @@ fn a_collapsed_run_renders_its_repeat_count_and_the_span_it_covers() {
         );
     }
 
-    let view = dashboard_view(&state, tz());
+    let view = dashboard_view(&state, PriceDayQuery::default(), tz());
     assert_eq!(view.decision_log.len(), 1);
     let repeat = view.decision_log[0]
         .repeat
@@ -344,7 +354,7 @@ fn the_mode_badge_follows_the_first_real_decision() {
         SocLimits::default(),
     );
 
-    let battery = dashboard_view(&charging, tz())
+    let battery = dashboard_view(&charging, PriceDayQuery::default(), tz())
         .battery
         .expect("the fixture world has a battery");
     assert_eq!(battery.mode_label, "Charging");
@@ -549,7 +559,7 @@ fn the_battery_panel_lists_every_pack_in_order() {
         pack_status(Some("AB3000L"), None),
     ];
 
-    let battery = dashboard_view(&state, tz())
+    let battery = dashboard_view(&state, PriceDayQuery::default(), tz())
         .battery
         .expect("the fixture world has a battery");
 
@@ -567,7 +577,7 @@ fn pack_rows_carry_compact_bars_at_the_system_limits_under_a_header() {
     };
     seeded.packs = vec![pack_status(Some("AB3000L"), None)];
 
-    let battery = dashboard_view(&seeded, tz())
+    let battery = dashboard_view(&seeded, PriceDayQuery::default(), tz())
         .battery
         .expect("the fixture world has a battery");
     let bar = &battery.packs[0].bar;
@@ -624,7 +634,7 @@ fn a_flat_sparkline_does_not_divide_by_a_zero_range() {
 /// out for the reader, so it has to match the sign it is describing.
 #[test]
 fn the_grid_card_names_the_direction_its_sign_means() {
-    let importing = dashboard_view(&state(vec![]), tz());
+    let importing = dashboard_view(&state(vec![]), PriceDayQuery::default(), tz());
     assert_eq!(importing.stat_cards.grid.detail, "Importing from grid");
 
     let mut exporting_state = state(vec![]);
@@ -633,7 +643,7 @@ fn the_grid_card_names_the_direction_its_sign_means() {
         MeterReading::total_only(GridPower(-900.0)),
         SolarPower::ZERO,
     );
-    let exporting = dashboard_view(&exporting_state, tz());
+    let exporting = dashboard_view(&exporting_state, PriceDayQuery::default(), tz());
     assert_eq!(exporting.stat_cards.grid.detail, "Exporting to grid");
 }
 
@@ -647,7 +657,13 @@ fn a_sub_watt_grid_reading_reads_as_zero_without_a_sign() {
         SolarPower::ZERO,
     );
 
-    assert_eq!(dashboard_view(&drifting, tz()).stat_cards.grid.value, "0");
+    assert_eq!(
+        dashboard_view(&drifting, PriceDayQuery::default(), tz())
+            .stat_cards
+            .grid
+            .value,
+        "0"
+    );
 }
 
 // --- Forecast panel ----------------------------------------------------------
@@ -746,7 +762,7 @@ fn the_home_card_reports_the_houses_own_draw() {
         journey::interval_ring(),
         at(0),
     );
-    let view = dashboard_view(&discharging, tz());
+    let view = dashboard_view(&discharging, PriceDayQuery::default(), tz());
 
     assert_eq!(view.stat_cards.home.label, "Home usage");
     assert_eq!(view.stat_cards.home.value, "1,750");
@@ -757,7 +773,7 @@ fn the_home_card_reports_the_houses_own_draw() {
 #[test]
 fn the_ev_card_placeholders_with_no_reading_yet() {
     let s = state(vec![]);
-    let view = dashboard_view(&s, tz());
+    let view = dashboard_view(&s, PriceDayQuery::default(), tz());
 
     assert_eq!(view.stat_cards.ev.variant, "ev");
     assert_eq!(view.stat_cards.ev.value, "--");
@@ -770,7 +786,7 @@ fn the_ev_card_placeholders_with_no_reading_yet() {
 fn the_ev_card_reports_the_last_polled_soc() {
     let mut s = state(vec![]);
     s.car_soc_tick(crate::units::Soc::new(62), at(300));
-    let view = dashboard_view(&s, tz());
+    let view = dashboard_view(&s, PriceDayQuery::default(), tz());
 
     assert_eq!(view.stat_cards.ev.value, "62");
     assert!(
@@ -785,13 +801,13 @@ fn the_ev_card_reports_the_last_polled_soc() {
 #[test]
 fn an_unchanged_fragment_is_not_sent_again_but_a_changed_one_is() {
     let mut sent = SentFragments::default();
-    let first = dashboard_view(&state(vec![]), tz());
+    let first = dashboard_view(&state(vec![]), PriceDayQuery::default(), tz());
 
     assert_eq!(sent.changed(&first).len(), FRAGMENTS.len());
     assert!(sent.changed(&first).is_empty());
 
     let logged = state(vec![(at(0), decision(ControlMode::Idle, "now"))]);
-    let second = dashboard_view(&logged, tz());
+    let second = dashboard_view(&logged, PriceDayQuery::default(), tz());
     let names: Vec<_> = sent.changed(&second).into_iter().map(|(n, _)| n).collect();
     assert!(names.contains(&"decision-log"), "{names:?}");
     assert!(names.len() < FRAGMENTS.len(), "{names:?}");
@@ -799,7 +815,7 @@ fn an_unchanged_fragment_is_not_sent_again_but_a_changed_one_is() {
 
 #[test]
 fn a_new_connection_is_sent_every_fragment_again() {
-    let view = dashboard_view(&state(vec![]), tz());
+    let view = dashboard_view(&state(vec![]), PriceDayQuery::default(), tz());
     SentFragments::default().changed(&view);
 
     assert_eq!(
@@ -835,7 +851,7 @@ fn the_battery_panel_reads_usable_energy_against_a_full_bar() {
     };
     seeded.pack_capacity = KiloWattHours(5.0);
 
-    let battery = dashboard_view(&seeded, tz())
+    let battery = dashboard_view(&seeded, PriceDayQuery::default(), tz())
         .battery
         .expect("the fixture world has a battery");
 
@@ -896,7 +912,7 @@ fn close_limits_stack_their_labels_instead_of_overlapping() {
 /// would be rebuilt closed on the next tick.
 #[test]
 fn the_detail_dialog_sits_outside_every_swap_region() {
-    let view = dashboard_view(&state(vec![]), tz());
+    let view = dashboard_view(&state(vec![]), PriceDayQuery::default(), tz());
     let html = layout::page(&view).into_string();
 
     assert_eq!(html.matches("id=\"detail-modal\"").count(), 1);
@@ -909,7 +925,7 @@ fn the_detail_dialog_sits_outside_every_swap_region() {
 
 #[test]
 fn every_card_but_the_car_opens_its_detail() {
-    let view = dashboard_view(&state(vec![]), tz());
+    let view = dashboard_view(&state(vec![]), PriceDayQuery::default(), tz());
     let html = layout::page(&view).into_string();
 
     for slug in ["solar", "home", "grid", "battery"] {
@@ -963,7 +979,7 @@ fn swap_regions(html: &str) -> Vec<(usize, usize)> {
 /// click, and would take keyboard focus down with it.
 #[test]
 fn card_links_persist_across_ticks() {
-    let view = dashboard_view(&state(vec![]), tz());
+    let view = dashboard_view(&state(vec![]), PriceDayQuery::default(), tz());
     let html = layout::page(&view).into_string();
     let regions = swap_regions(&html);
     assert_eq!(regions.len(), FRAGMENTS.len());
@@ -988,7 +1004,7 @@ fn card_links_persist_across_ticks() {
 /// fragment each, so a reading still reaches them without replacing the link.
 #[test]
 fn each_card_is_live_inside_its_shell() {
-    let view = dashboard_view(&state(vec![]), tz());
+    let view = dashboard_view(&state(vec![]), PriceDayQuery::default(), tz());
     let html = layout::page(&view).into_string();
 
     for (shell, swap) in [
@@ -1046,7 +1062,8 @@ fn the_price_panel_renders_todays_chart_from_the_dashboard_state() {
         points: series,
         as_of: Some(at(0)),
     };
-    let html = layout::price_panel_inner(&dashboard_view(&s, tz())).into_string();
+    let html = layout::price_panel_inner(&dashboard_view(&s, PriceDayQuery::default(), tz()))
+        .into_string();
 
     assert!(html.contains("price-panel__chart"));
     assert!(html.contains("data-day=\"today\""));
@@ -1054,7 +1071,12 @@ fn the_price_panel_renders_todays_chart_from_the_dashboard_state() {
 
 #[test]
 fn the_price_panel_without_prices_renders_its_empty_state() {
-    let html = layout::price_panel_inner(&dashboard_view(&state(vec![]), tz())).into_string();
+    let html = layout::price_panel_inner(&dashboard_view(
+        &state(vec![]),
+        PriceDayQuery::default(),
+        tz(),
+    ))
+    .into_string();
 
     assert!(html.contains("No prices configured — add [prices] to config.toml"));
     assert!(!html.contains("price-panel__chart"));
