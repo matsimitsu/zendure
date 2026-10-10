@@ -2,7 +2,6 @@
 //! structs. Newtypes mostly stop here: a template renders strings, never a
 //! `Watts`, and a `Soc` only where it also places something by it.
 
-use crate::clock::local_date;
 use crate::device::PackStatus;
 use crate::models::ControlMode;
 use crate::units::{
@@ -14,7 +13,7 @@ use super::detail::detail_body;
 use super::entity::Entity;
 use super::flows::{EnergyFlowsView, energy_flows_view};
 use super::line_chart::LineChartView;
-use super::prices::{PriceContext, PricePanelView, price_panel_view};
+use super::prices::{PriceDayQuery, PricePanelView, requested_price_panel};
 use super::soc_bar::SocBarView;
 use super::state::{
     ActualSolarHistory, DashboardState, ForecastSnapshot, Plottable, SOLAR_BUCKET_MS,
@@ -656,16 +655,7 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
         battery,
         decision_log,
         forecast: forecast_panel_view(&state.forecast, &state.actual_solar, state.as_of, timezone),
-        prices: price_panel_view(
-            local_date(state.as_of, timezone).unwrap_or_default(),
-            &PriceContext {
-                snapshot: &state.prices,
-                tariff: state.tariff.as_ref(),
-                configured: state.price_feed,
-            },
-            state.as_of,
-            timezone,
-        ),
+        prices: requested_price_panel(state, PriceDayQuery::default(), timezone),
         energy_flows: energy_flows_view(&state.intervals, state.as_of, timezone),
     }
 }

@@ -12,9 +12,10 @@ use rust_embed::Embed;
 use super::entity::Entity;
 use super::flows::{EnergyFlowsView, requested_flows_view};
 use super::past_days::{FlowsQuery, PastDays};
+use super::prices::{PriceDayQuery, requested_price_panel};
 use super::sse::fragment_stream;
 use super::state::{DashboardState, DashboardStateReceiver};
-use super::templates::{energy_flows, layout};
+use super::templates::{energy_flows, layout, price_panel};
 use super::view::{dashboard_view, detail_view};
 use crate::clock::local_date;
 
@@ -36,20 +37,26 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(index))
         .route("/events", get(events))
         .route("/fragments/energy-flows", get(energy_flows))
+        .route("/fragments/price-panel", get(price_panel))
         .route("/detail/{entity}", get(detail))
         .route("/assets/{*path}", get(asset))
         .with_state(state)
 }
 
-/// `?day=` and `?interval=` choose the flows panel's day, so a step link
-/// still works in a browser without htmx.
-async fn index(State(state): State<AppState>, RawQuery(query): RawQuery) -> Response {
-    let query = match FlowsQuery::parse(query.as_deref()) {
+/// `?day=` and `?interval=` choose the flows panel's day and `?price_day=`
+/// the price panel's, so a step link still works in a browser without htmx.
+async fn index(State(state): State<AppState>, RawQuery(raw): RawQuery) -> Response {
+    let query = match FlowsQuery::parse(raw.as_deref()) {
+        Ok(query) => query,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    let price_day = match PriceDayQuery::parse_page(raw.as_deref()) {
         Ok(query) => query,
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
     let current = state.dashboard.borrow().clone();
     let mut view = dashboard_view(&current, state.timezone);
+    view.prices = requested_price_panel(&current, price_day, state.timezone);
     view.energy_flows = match flows_view(&state, &current, query).await {
         Ok(flows) => flows,
         Err(failed) => return failed.into_response(),
@@ -69,6 +76,17 @@ async fn energy_flows(State(state): State<AppState>, RawQuery(query): RawQuery) 
         Ok(view) => energy_flows::render(&view).into_response(),
         Err(failed) => failed.into_response(),
     }
+}
+
+/// The price panel's contents for one day, which the step links swap into
+/// its host. Every day it reaches is already in the snapshot.
+async fn price_panel(State(state): State<AppState>, RawQuery(raw): RawQuery) -> Response {
+    let query = match PriceDayQuery::parse_fragment(raw.as_deref()) {
+        Ok(query) => query,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    let current = state.dashboard.borrow().clone();
+    price_panel::render(&requested_price_panel(&current, query, state.timezone)).into_response()
 }
 
 /// Today from the live ring, which the stream keeps current; any earlier day

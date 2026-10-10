@@ -561,14 +561,16 @@ Add `[web]` to run a live browser dashboard (`src/web/`) — solar/home/grid
 stat cards, the battery panel (SOC, mode, RTE, usable energy, capacity, and
 a row per pack with its model, serial, SOC, flow, temperature and capacity),
 and a decision log, all real data, updating every scan tick over
-server-sent events. Four routes: `GET /` (the full page), `GET /events`
+server-sent events. Five routes: `GET /` (the full page), `GET /events`
 (the SSE stream fragments it swaps in via htmx), `GET
 /fragments/energy-flows?day=YYYY-MM-DD&interval=1h|15m` (the energy flows
-panel alone, for one day) and `GET /detail/{entity}`
+panel alone, for one day), `GET /fragments/price-panel?day=YYYY-MM-DD` (the
+price panel alone, for one day) and `GET /detail/{entity}`
 (`solar`, `home`, `grid` or `battery`; anything else is a 404). `GET /` takes
-the same `day` and `interval` parameters. Both parameters are optional: a
-missing `day` means today, a day after today shows today, and a value that
-isn't a date (or an interval other than `1h`/`15m`) is a 400. The solar,
+the same `day` and `interval` parameters, plus `price_day` for the price
+panel, so the two panels' days are chosen independently. Every parameter is
+optional: a missing `day` means today, a day after today shows today, and a
+value that isn't a date (or an interval other than `1h`/`15m`) is a 400. The solar,
 home and grid cards and the battery panel open `/detail/{entity}` in a modal
 `<dialog>` (Esc, the close button or a click beside it dismisses it); the
 modal is a snapshot taken when opened, not live. The solar, home and grid
@@ -676,21 +678,28 @@ the first due anchor's fetch, the poller backfills: for each of the last
 one request per day, in sequence — and journals it, then logs how many days
 were fetched, already present or failed. A row's timestamp is when it was
 fetched, so coverage is decided from the prices inside the payloads. The
-dashboard is seeded from the journal's prices for today onwards, stamped
-with the newest row's fetch time. Nothing here reaches `src/controller.rs`.
+dashboard is seeded from the journal's prices for the last 6 days onwards,
+stamped with the newest row's fetch time. Nothing here reaches
+`src/controller.rs`.
 
-The price panel draws one bar per price interval for local today, and a
-second chart for tomorrow once its prices are published (around 15:00). With
-`[prices.dynamic]` configured the bars are the all-in import price —
-`(wholesale + markup + energy_tax)` plus VAT, the same figure `analyze`
-charges — and the chart says so; without it they are the bare wholesale
-price. Both days share one scale, negative prices hang below a zero line, and
-the interval in progress is highlighted. Above the charts sit the current
-price and today's minimum and maximum, in ct/kWh. Bars sit on the local
-clock hour they start at, matching the hour axis: on the autumn DST day the
-repeated hour's two bars overlap, and on the spring one the skipped hour is
-empty. Without `[prices]` the panel says how to configure it; with it, but
-before the first fetch lands, it says it is waiting for prices.
+The price panel charts one local day at a time, one bar per local hour
+(quarter-hour prices are averaged into their hour), tinted cheap, normal or
+expensive by that day's thirds. With `[prices.dynamic]` configured the bars
+are the all-in import price — `(wholesale + markup + energy_tax)` plus VAT,
+the same figure `analyze` charges — and the subtitle says so; without it they
+are the bare wholesale price. Every day shares one scale, and negative prices
+hang below a zero line. Today shows a now line, dims the hours gone by, reads
+the current hour by default and finds the cheapest and priciest 3 hours
+still ahead; any other day reads its average and searches the whole day. The
+day nav steps from 6 days back to tomorrow once tomorrow is fully priced
+(today until then), with a Today button on past days; a day in range with no
+prices says so and keeps the nav. Out-of-range days clamp to the nearest end.
+Only today is live: the stream's updates are ignored while another day is
+shown. The steps are plain links to `/?price_day=…` too, so they work
+without JavaScript. A DST change gives 23 or 25 bars; on the autumn day the
+repeated hour names its offset (`02:00–03:00 CEST`, then `02:00–03:00 CET`).
+Without `[prices]` the panel says how to configure it; with it, but before
+the first fetch lands, it says it is waiting for prices.
 
 The EV card shows a car's battery state of charge when `[car_battery]` is
 configured. `kind = "vw_portal"` reads it from the VW Group EU Data Act

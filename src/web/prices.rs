@@ -1,28 +1,28 @@
 //! The price panel's view model: one local day's prices as an hourly bar
 //! chart, tinted by tier, on a y scale shared by every day the snapshot
-//! holds so stepping between days never rescales the bars.
+//! holds so stepping between days never rescales the bars. The day a request
+//! asks for is parsed once at the edge (`CONTROL-1`) and clamped to the days
+//! the nav reaches.
 
-use std::time::Duration;
-
-use chrono::NaiveDate;
+use chrono::offset::LocalResult;
+use chrono::{DateTime, NaiveDate, Offset, TimeZone};
 use chrono_tz::Tz;
 
 use crate::clock::local_date;
 use crate::config::DynamicTariff;
 use crate::prices::tiers::{Block, Slot, Tier, cheapest_block, priciest_block, tiers};
-use crate::prices::{PricePoint, PriceSnapshot};
+use crate::prices::{DayPrices, PRICE_HISTORY_DAYS, PriceSnapshot};
 use crate::units::{CentsPerKwh, Timestamp};
 
 use super::axis::{AxisDensity, AxisPosition, AxisTick};
 use super::plot::{Day, YScale};
-use super::view::{MISSING, MiniStatSub, MiniStatView, format_time};
+use super::state::DashboardState;
+use super::view::{MISSING, MiniStatSub, MiniStatView};
 
 /// The chart's viewBox. The height matches `--size-chart-price`, so the bars
 /// are drawn at the proportions they are shown at.
 pub(super) const PRICE_CHART_WIDTH: f64 = super::plot::CHART_WIDTH;
 pub(super) const PRICE_CHART_HEIGHT: f64 = 160.0;
-
-const HOUR: Duration = Duration::from_secs(60 * 60);
 
 /// The share of a slot left empty on each side of its bar.
 const BAR_INSET: f64 = 0.14;
@@ -33,8 +33,79 @@ const MIN_BAR_HEIGHT: f64 = 1.0;
 /// The y axis steps in whole tens of cents.
 const SCALE_STEP: CentsPerKwh = CentsPerKwh(10.0);
 
-/// The oldest day the nav steps back to, counted from today.
-const HISTORY_DAYS: u64 = 6;
+/// A query string naming a day the panel cannot parse; the caller answers
+/// 400.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BadPriceQuery(String);
+
+impl std::fmt::Display for BadPriceQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The day a request asks the panel for, before today is known. `None` is
+/// today.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PriceDayQuery {
+    day: Option<NaiveDate>,
+}
+
+impl PriceDayQuery {
+    /// `/fragments/price-panel?day=YYYY-MM-DD`.
+    pub fn parse_fragment(raw: Option<&str>) -> Result<Self, BadPriceQuery> {
+        Self::parse(raw, "day")
+    }
+
+    /// `/?price_day=YYYY-MM-DD`: its own key, so the flows panel's `?day=`
+    /// can share the page's query.
+    pub fn parse_page(raw: Option<&str>) -> Result<Self, BadPriceQuery> {
+        Self::parse(raw, "price_day")
+    }
+
+    /// Other keys are ignored, and an empty value reads as absent.
+    fn parse(raw: Option<&str>, key: &str) -> Result<Self, BadPriceQuery> {
+        let mut query = PriceDayQuery::default();
+        for pair in raw.unwrap_or_default().split('&') {
+            let (each, value) = pair.split_once('=').unwrap_or((pair, ""));
+            if each != key || value.is_empty() {
+                continue;
+            }
+            let day = NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                .map_err(|_| BadPriceQuery(format!("{key}={value} is not a YYYY-MM-DD date")))?;
+            query.day = Some(day);
+        }
+        Ok(query)
+    }
+
+    /// The asked-for day pulled into `range`, so a stale or hand-typed link
+    /// still lands on a day the panel can show.
+    fn resolve(self, today: NaiveDate, range: NavRange) -> NaiveDate {
+        self.day
+            .map_or(today, |day| day.clamp(range.earliest, range.latest))
+    }
+}
+
+/// The days the nav reaches: `PRICE_HISTORY_DAYS` back, and forward to
+/// tomorrow only once it is fully priced, so an empty tomorrow never shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NavRange {
+    earliest: NaiveDate,
+    latest: NaiveDate,
+}
+
+impl NavRange {
+    fn of(today: NaiveDate, snapshot: &PriceSnapshot, tz: Tz) -> Self {
+        let back = chrono::Days::new(u64::from(PRICE_HISTORY_DAYS.count()));
+        let tomorrow = today
+            .succ_opt()
+            .filter(|_| snapshot.tomorrow_published(today, tz));
+        NavRange {
+            earliest: today.checked_sub_days(back).unwrap_or(today),
+            latest: tomorrow.unwrap_or(today),
+        }
+    }
+}
 
 /// What the panel renders from besides the day and the clock.
 pub struct PriceContext<'a> {
@@ -48,7 +119,21 @@ pub struct PriceContext<'a> {
 
 pub enum PricePanelView {
     Empty(EmptyReason),
+    /// A day the nav reaches that holds no prices, e.g. a gap in the
+    /// journal: the nav stays so the user can step on.
+    Unpriced(PriceNavView),
     Priced(Box<PricedDayView>),
+}
+
+impl PricePanelView {
+    /// The host's `data-day` on first render.
+    pub fn data_day(&self) -> String {
+        match self {
+            PricePanelView::Empty(_) => "today".to_string(),
+            PricePanelView::Unpriced(nav) => nav.data_day(),
+            PricePanelView::Priced(day) => day.nav.data_day(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,8 +141,6 @@ pub enum EmptyReason {
     NotConfigured,
     /// Today has no prices yet.
     Waiting,
-    /// Another day the snapshot holds no prices for.
-    Unpriced,
 }
 
 impl EmptyReason {
@@ -65,7 +148,6 @@ impl EmptyReason {
         match self {
             EmptyReason::NotConfigured => "No prices configured — add [prices] to config.toml",
             EmptyReason::Waiting => "Waiting for prices…",
-            EmptyReason::Unpriced => "No prices for this day",
         }
     }
 }
@@ -98,12 +180,10 @@ pub struct PriceNavView {
 }
 
 impl PriceNavView {
-    fn new(shown: NaiveDate, today: NaiveDate, tomorrow_priced: bool) -> Self {
-        let tomorrow = today.succ_opt();
-        let earliest = today.checked_sub_days(chrono::Days::new(HISTORY_DAYS));
+    fn new(shown: NaiveDate, today: NaiveDate, range: NavRange) -> Self {
         let label = if shown == today {
             "Today".to_string()
-        } else if Some(shown) == tomorrow {
+        } else if today.succ_opt() == Some(shown) {
             "Tomorrow".to_string()
         } else if today.pred_opt() == Some(shown) {
             "Yesterday".to_string()
@@ -113,12 +193,8 @@ impl PriceNavView {
         PriceNavView {
             shown,
             today,
-            previous: shown
-                .pred_opt()
-                .filter(|day| earliest.is_none_or(|earliest| *day >= earliest)),
-            next: shown
-                .succ_opt()
-                .filter(|day| *day <= today || (Some(*day) == tomorrow && tomorrow_priced)),
+            previous: shown.pred_opt().filter(|day| *day >= range.earliest),
+            next: shown.succ_opt().filter(|day| *day <= range.latest),
             label,
             date: shown.format("%-d %b").to_string(),
         }
@@ -195,7 +271,7 @@ pub struct PriceLegendItem {
     pub range: String,
 }
 
-/// One local clock hour of the shown day.
+/// One local clock hour of the shown day, at the price a consumer is shown.
 struct HourSlot {
     start: Timestamp,
     end: Timestamp,
@@ -204,10 +280,8 @@ struct HourSlot {
 
 /// The price a consumer is shown: the all-in import price under a dynamic
 /// contract, the bare wholesale price without one.
-fn shown_price(point: &PricePoint, tariff: Option<&DynamicTariff>) -> CentsPerKwh {
-    tariff.map_or(point.wholesale, |tariff| {
-        tariff.import_price(point.wholesale)
-    })
+fn shown_price(wholesale: CentsPerKwh, tariff: Option<&DynamicTariff>) -> CentsPerKwh {
+    tariff.map_or(wholesale, |tariff| tariff.import_price(wholesale))
 }
 
 /// One decimal with the typographic minus, as every price on the panel reads.
@@ -215,28 +289,13 @@ fn format_cents(price: CentsPerKwh) -> String {
     price.to_string().replacen('-', "−", 1)
 }
 
-/// Each clock hour of `day` with the mean of the prices starting in it. A
-/// coarser point that started earlier still prices the hours it covers.
-fn hour_slots(day: &Day, points: &[(PricePoint, CentsPerKwh)]) -> Vec<HourSlot> {
-    let day_end = day.end();
-    day.slot_starts(HOUR)
-        .map(|start| {
-            let end = (start + crate::units::Elapsed::of(HOUR)).min(day_end);
-            let starting = points
-                .iter()
-                .filter(|(point, _)| point.from >= start && point.from < end)
-                .map(|(_, price)| *price);
-            let covering = || {
-                points
-                    .iter()
-                    .find(|(point, _)| point.from <= start && start < point.until)
-                    .map(|(_, price)| *price)
-            };
-            HourSlot {
-                start,
-                end,
-                price: CentsPerKwh::mean(starting).or_else(covering),
-            }
+fn hour_slots(day: &DayPrices, tariff: Option<&DynamicTariff>) -> Vec<HourSlot> {
+    day.hours()
+        .zip(day.slots())
+        .map(|((start, end), price)| HourSlot {
+            start,
+            end,
+            price: price.map(|price| shown_price(price, tariff)),
         })
         .collect()
 }
@@ -254,11 +313,16 @@ fn round_out(value: CentsPerKwh) -> CentsPerKwh {
 
 /// The y scale over every price the snapshot holds: zero up to the highest,
 /// rounded up to a whole step, and down past zero only for a negative price.
-fn price_scale(points: &[(PricePoint, CentsPerKwh)]) -> (CentsPerKwh, CentsPerKwh) {
+fn price_scale(
+    snapshot: &PriceSnapshot,
+    tariff: Option<&DynamicTariff>,
+) -> (CentsPerKwh, CentsPerKwh) {
     let zero = CentsPerKwh(0.0);
-    let (high, low) = points
+    let (high, low) = snapshot
+        .points
         .iter()
-        .fold((zero, zero), |(hi, lo), (_, p)| (hi.max(*p), lo.min(*p)));
+        .map(|point| shown_price(point.wholesale, tariff))
+        .fold((zero, zero), |(hi, lo), p| (hi.max(p), lo.min(p)));
     (round_out(high).max(SCALE_STEP), round_out(low))
 }
 
@@ -277,12 +341,44 @@ fn tick_label(tick: CentsPerKwh) -> String {
     format!("{sign}{:.0}", tick.abs().0)
 }
 
-fn hour_range(slot: &HourSlot, tz: Tz) -> String {
-    format!(
-        "{}–{}",
-        format_time(slot.start, tz),
-        format_time(slot.end, tz)
+/// Whether the local clock shows `at`'s time twice that day.
+fn repeated(at: &DateTime<Tz>, tz: Tz) -> bool {
+    matches!(
+        tz.from_local_datetime(&at.naive_local()),
+        LocalResult::Ambiguous(..)
     )
+}
+
+/// `14:00–17:00`, ending `24:00` at the day's close. Where the clock repeats
+/// an hour, the end reads in the start's offset and the offset is named, so
+/// the repeated hour reads `02:00–03:00 CEST` then `02:00–03:00 CET` rather
+/// than seeming to end where it began.
+fn range_label(start: Timestamp, end: Timestamp, day_end: Timestamp, tz: Tz) -> String {
+    let local = |at: Timestamp| tz.timestamp_millis_opt(at.as_millis()).single();
+    let (Some(from), Some(to)) = (local(start), local(end)) else {
+        return MISSING.to_string();
+    };
+    let from_repeated = repeated(&from, tz);
+    let from_offset = from.offset().fix();
+    let to_repeated = end < day_end && repeated(&to, tz);
+    let (to_text, to_offset) = if end >= day_end {
+        ("24:00".to_string(), from_offset)
+    } else if to_repeated {
+        let to = to.with_timezone(&from_offset);
+        (to.format("%H:%M").to_string(), from_offset)
+    } else {
+        (to.format("%H:%M").to_string(), to.offset().fix())
+    };
+    let from_text = from.format("%H:%M");
+    if !from_repeated && !to_repeated {
+        format!("{from_text}–{to_text}")
+    } else if from_offset == to_offset {
+        format!("{from_text}–{to_text} {}", from.format("%Z"))
+    } else {
+        // Only a repeated start in one offset ending past the change in the
+        // other: the end's own wall time is unambiguous.
+        format!("{from_text} {}–{to_text}", from.format("%Z"))
+    }
 }
 
 fn readout(label: String, price: Option<CentsPerKwh>, thresholds: Thresholds) -> PriceReadoutView {
@@ -295,27 +391,30 @@ fn readout(label: String, price: Option<CentsPerKwh>, thresholds: Thresholds) ->
 
 type Thresholds = (CentsPerKwh, CentsPerKwh);
 
-/// `14:00–17:00`; a block ending at midnight reads `24:00` rather than
-/// wrapping to the start of the day.
-fn block_range(slots: &[HourSlot], block: Block, tz: Tz) -> String {
-    let start = slots
-        .get(block.start.0)
-        .map_or_else(|| MISSING.to_string(), |slot| format_time(slot.start, tz));
-    let end = slots
-        .get(block.end().0)
-        .map_or_else(|| "24:00".to_string(), |slot| format_time(slot.start, tz));
-    format!("{start}–{end}")
+fn block_range(slots: &[HourSlot], block: Block, day_end: Timestamp, tz: Tz) -> String {
+    let first = slots.get(block.start.0);
+    let last = block.end().0.checked_sub(1).and_then(|at| slots.get(at));
+    match (first, last) {
+        (Some(first), Some(last)) => range_label(first.start, last.end, day_end, tz),
+        _ => MISSING.to_string(),
+    }
 }
 
 /// The cheapest and priciest blocks starting at or after `from`, or `None`
 /// when no full block is left.
-fn windows(slots: &[HourSlot], from: Slot, today: bool, tz: Tz) -> Option<[MiniStatView; 2]> {
+fn windows(
+    slots: &[HourSlot],
+    from: Slot,
+    today: bool,
+    day_end: Timestamp,
+    tz: Tz,
+) -> Option<[MiniStatView; 2]> {
     let prices: Vec<Option<CentsPerKwh>> = slots.iter().map(|slot| slot.price).collect();
     let cheapest = cheapest_block(&prices, from)?;
     let priciest = priciest_block(&prices, from)?;
     let stat = |label, block: Block, tone| MiniStatView {
         label,
-        value: block_range(slots, block, tz),
+        value: block_range(slots, block, day_end, tz),
         sub: Some(MiniStatSub {
             text: format!("{} ct avg", format_cents(block.mean)),
             tone,
@@ -357,14 +456,31 @@ fn subtitle(snapshot: &PriceSnapshot, tariff: Option<&DynamicTariff>, tz: Tz) ->
         "Wholesale price"
     };
     match snapshot.as_of {
-        Some(at) => format!("{label} · fetched {}", format_time(at, tz)),
+        Some(at) => format!("{label} · fetched {}", super::view::format_time(at, tz)),
         None => format!("{label} · fetch pending"),
     }
 }
 
-/// `day` from the snapshot, for any day the nav can reach. Today has a now:
-/// its readout defaults to the current hour, its past hours dim and its
-/// windows only look ahead. Any other day defaults to its average.
+/// The panel on the day `query` asks for, clamped to the days the nav
+/// reaches.
+pub fn requested_price_panel(
+    state: &DashboardState,
+    query: PriceDayQuery,
+    tz: Tz,
+) -> PricePanelView {
+    let context = PriceContext {
+        snapshot: &state.prices,
+        tariff: state.tariff.as_ref(),
+        configured: state.price_feed,
+    };
+    let today = local_date(state.as_of, tz).unwrap_or_default();
+    let day = query.resolve(today, NavRange::of(today, &state.prices, tz));
+    price_panel_view(day, &context, state.as_of, tz)
+}
+
+/// `day` from the snapshot. Today has a now: its readout defaults to the
+/// current hour, its past hours dim and its windows only look ahead. Any
+/// other day defaults to its average.
 pub fn price_panel_view(
     day: NaiveDate,
     context: &PriceContext,
@@ -375,30 +491,22 @@ pub fn price_panel_view(
         return PricePanelView::Empty(EmptyReason::NotConfigured);
     }
     let today = local_date(now, tz).unwrap_or_default();
-    let points: Vec<(PricePoint, CentsPerKwh)> = context
-        .snapshot
-        .points
-        .iter()
-        .map(|point| (*point, shown_price(point, context.tariff)))
-        .collect();
-
-    let frame = Day::of(day, tz);
-    let slots = hour_slots(&frame, &points);
-    let priced: Vec<CentsPerKwh> = slots.iter().filter_map(|slot| slot.price).collect();
-    let Some(thresholds) = tiers(&priced) else {
-        return PricePanelView::Empty(if day == today {
-            EmptyReason::Waiting
-        } else {
-            EmptyReason::Unpriced
-        });
-    };
-
-    let tomorrow_priced = today.succ_opt().is_some_and(|tomorrow| {
-        let slots = hour_slots(&Day::of(tomorrow, tz), &points);
-        !slots.is_empty() && slots.iter().all(|slot| slot.price.is_some())
+    let nav = PriceNavView::new(day, today, NavRange::of(today, context.snapshot, tz));
+    let priced_day = context.snapshot.prices_for(day, tz).and_then(|prices| {
+        let slots = hour_slots(&prices, context.tariff);
+        let priced: Vec<CentsPerKwh> = slots.iter().filter_map(|slot| slot.price).collect();
+        tiers(&priced).map(|thresholds| (prices, slots, priced, thresholds))
     });
-    let nav = PriceNavView::new(day, today, tomorrow_priced);
+    let Some((prices, slots, priced, thresholds)) = priced_day else {
+        return if nav.is_today() {
+            PricePanelView::Empty(EmptyReason::Waiting)
+        } else {
+            PricePanelView::Unpriced(nav)
+        };
+    };
     let is_today = nav.is_today();
+    let day_end = prices.end;
+    let frame = Day::of(day, tz);
 
     let current = is_today
         .then(|| {
@@ -408,9 +516,10 @@ pub fn price_panel_view(
         })
         .flatten();
 
+    let hour_label = |slot: &HourSlot| range_label(slot.start, slot.end, day_end, tz);
     let default_readout = match current.and_then(|index| slots.get(index)) {
         Some(slot) => readout(
-            format!("Now · {}", hour_range(slot, tz)),
+            format!("Now · {}", hour_label(slot)),
             slot.price,
             thresholds,
         ),
@@ -422,7 +531,7 @@ pub fn price_panel_view(
         ),
     };
 
-    let (top, bottom) = price_scale(&points);
+    let (top, bottom) = price_scale(context.snapshot, context.tariff);
     let scale = YScale::new(top.0, bottom.0, PRICE_CHART_HEIGHT);
     let ticks = scale_ticks(top, bottom);
     let span_of = |slot: &HourSlot| {
@@ -455,7 +564,7 @@ pub fn price_panel_view(
         });
         hits.push(PriceHitView {
             span,
-            readout: readout(hour_range(slot, tz), Some(price), thresholds),
+            readout: readout(hour_label(slot), Some(price), thresholds),
         });
     }
 
@@ -482,9 +591,9 @@ pub fn price_panel_view(
     let from = current.map_or(Slot(0), Slot);
     PricePanelView::Priced(Box::new(PricedDayView {
         subtitle: subtitle(context.snapshot, context.tariff, tz),
+        windows: windows(&slots, from, is_today, day_end, tz),
         nav,
         readout: default_readout,
-        windows: windows(&slots, from, is_today, tz),
         chart,
         legend: legend(thresholds),
     }))
