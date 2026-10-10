@@ -68,6 +68,28 @@ port = 8080
 # there is something here to change if this file later gains a broker.
 publish_prefix = "zendure"
 
+[prices]
+# A deterministic day-shaped curve (`src/prices/simulated.rs`) rather than the
+# EnergyZero feed, so the dashboard's price panel has something to draw with
+# no network call. Display and analysis only, as with a real feed: nothing
+# here reaches the controller.
+kind = "simulated"
+# Matches [journal] retention_days below: the panel steps back six days, and
+# backfilling further than the journal keeps would only be pruned again.
+backfill_days = 7
+
+# The two contracts `zendure analyze --config` compares, and what the panel's
+# "all-in import price" is built from. Same figures as config.example.toml.
+[prices.dynamic]
+markup = 1.5
+energy_tax = 9.161
+export_markup = 0.0
+vat = 21.0
+
+[prices.fixed]
+import = 28.0
+export = 5.0
+
 [clock]
 timezone = "Europe/Amsterdam"
 
