@@ -138,6 +138,30 @@ pub fn utc(day: u32, hour: u32, minute: u32) -> Timestamp {
     )
 }
 
+const YEAR: i32 = 2026;
+
+/// The dashboard tests' zone: one with DST, so a day can be 23, 24 or 25
+/// hours long.
+pub fn amsterdam() -> chrono_tz::Tz {
+    chrono_tz::Europe::Amsterdam
+}
+
+/// A date in 2026, the year every local-day helper here shares.
+pub fn date(month: u32, day: u32) -> chrono::NaiveDate {
+    chrono::NaiveDate::from_ymd_opt(YEAR, month, day).expect("a valid date")
+}
+
+/// Amsterdam wall-clock time on `month`/`day` 2026.
+pub fn local(month: u32, day: u32, hour: u32, minute: u32) -> Timestamp {
+    use chrono::TimeZone;
+    Timestamp::from(
+        amsterdam()
+            .with_ymd_and_hms(YEAR, month, day, hour, minute, 0)
+            .single()
+            .expect("a wall-clock time that occurs once"),
+    )
+}
+
 /// An anchor-driven poller's clock read at local `hour:minute` on `y-m-d`.
 pub fn local_now(y: i32, m: u32, d: u32, hour: u32, minute: u32) -> crate::schedule::LocalNow {
     crate::schedule::LocalNow {

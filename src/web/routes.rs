@@ -9,16 +9,16 @@ use axum::routing::get;
 use chrono_tz::Tz;
 use rust_embed::Embed;
 
-use super::day_nav::{BadQuery, kept_query, parse_day_param};
+use super::day_nav::{BadQuery, DayQuery, PagePanel};
 use super::entity::Entity;
 use super::flows::{EnergyFlowsView, requested_flows_view};
 use super::past_days::{FlowsQuery, PastDays};
-use super::prices::{PriceDayQuery, requested_price_panel};
+use super::prices::requested_price_panel;
 use super::solar::requested_forecast_panel;
 use super::sse::fragment_stream;
 use super::state::{DashboardState, DashboardStateReceiver};
 use super::templates::{energy_flows, forecast_panel, layout, price_panel};
-use super::view::{dashboard_view, detail_view};
+use super::view::{PanelDays, dashboard_view, detail_view};
 use crate::clock::local_date;
 
 /// The Grass-compiled CSS, written to `OUT_DIR` by `build.rs` — see its own
@@ -46,27 +46,27 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// `?day=` and `?interval=` choose the flows panel's day and `?price_day=`
-/// the price panel's, so a step link still works in a browser without htmx.
+/// Each day panel reads its own keys of the page's query (see
+/// [`PagePanel`]), so a step link still works in a browser without htmx.
 async fn index(
     State(state): State<AppState>,
     RawQuery(raw): RawQuery,
 ) -> Result<Response, Refused> {
-    let query = FlowsQuery::parse(raw.as_deref())?;
-    let price_day = PriceDayQuery::parse_page(raw.as_deref())?;
-    let solar_day = parse_day_param(raw.as_deref(), "solar_day")?;
+    let raw = raw.as_deref();
+    let query = FlowsQuery::parse(raw)?;
+    let days = PanelDays {
+        prices: DayQuery::parse_page(raw, PagePanel::Prices)?,
+        solar: DayQuery::parse_page(raw, PagePanel::Solar)?,
+    };
     let current = state.dashboard.borrow().clone();
-    let mut view = dashboard_view(&current, price_day, state.timezone);
-    view.forecast = requested_forecast_panel(&current, solar_day, state.timezone);
+    let mut view = dashboard_view(&current, days, state.timezone);
     view.energy_flows = flows_view(&state, &current, query).await?;
-    // Each panel's full-page links keep the other panels' days, for a
-    // browser without htmx.
-    view.energy_flows.nav.keep = kept_query(raw.as_deref(), &["price_day", "solar_day"]);
+    view.energy_flows.nav.keep = PagePanel::Flows.kept_query(raw);
     if let Some(nav) = view.prices.nav_mut() {
-        nav.keep = kept_query(raw.as_deref(), &["day", "interval", "solar_day"]);
+        nav.keep = PagePanel::Prices.kept_query(raw);
     }
     if let Some(nav) = view.forecast.nav_mut() {
-        nav.keep = kept_query(raw.as_deref(), &["day", "interval", "price_day"]);
+        nav.keep = PagePanel::Solar.kept_query(raw);
     }
     Ok(layout::page(&view).into_response())
 }
@@ -89,7 +89,7 @@ async fn price_panel(
     State(state): State<AppState>,
     RawQuery(raw): RawQuery,
 ) -> Result<Response, BadQuery> {
-    let query = PriceDayQuery::parse_fragment(raw.as_deref())?;
+    let query = DayQuery::parse_fragment(raw.as_deref())?;
     let current = state.dashboard.borrow().clone();
     let view = requested_price_panel(&current, query, state.timezone);
     Ok(price_panel::render(&view).into_response())
@@ -101,9 +101,9 @@ async fn forecast_panel(
     State(state): State<AppState>,
     RawQuery(raw): RawQuery,
 ) -> Result<Response, BadQuery> {
-    let day = parse_day_param(raw.as_deref(), "day")?;
+    let query = DayQuery::parse_fragment(raw.as_deref())?;
     let current = state.dashboard.borrow().clone();
-    let view = requested_forecast_panel(&current, day, state.timezone);
+    let view = requested_forecast_panel(&current, query, state.timezone);
     Ok(forecast_panel::render(&view).into_response())
 }
 
@@ -196,7 +196,7 @@ async fn detail(
     if headers.contains_key(HeaderName::from_static("hx-request")) {
         return (vary, layout::detail_fragment(&detail)).into_response();
     }
-    let dashboard = dashboard_view(&current, PriceDayQuery::default(), state.timezone);
+    let dashboard = dashboard_view(&current, PanelDays::default(), state.timezone);
     (vary, layout::detail_page(&dashboard, &detail)).into_response()
 }
 

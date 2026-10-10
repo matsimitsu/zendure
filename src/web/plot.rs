@@ -19,6 +19,12 @@ pub(super) const CHART_WIDTH: f64 = 1000.0;
 /// the bars are drawn at the proportions they are shown at.
 pub(super) const DAY_CHART_HEIGHT: f64 = 160.0;
 
+/// A bar's corner radius, in viewBox units.
+pub(super) const BAR_RADIUS: f64 = 1.0;
+
+/// The share of a slot left empty on each side of its bar.
+const BAR_INSET: f64 = 0.14;
+
 const HOUR: Duration = Duration::from_secs(60 * 60);
 
 /// A rectangle's horizontal extent, in viewBox units.
@@ -26,6 +32,16 @@ const HOUR: Duration = Duration::from_secs(60 * 60);
 pub struct SlotSpan {
     pub x: f64,
     pub width: f64,
+}
+
+impl SlotSpan {
+    /// The bar drawn in this slot, inset so neighbouring bars stand apart.
+    pub fn bar(self) -> SlotSpan {
+        SlotSpan {
+            x: self.x + self.width * BAR_INSET,
+            width: self.width * (1.0 - 2.0 * BAR_INSET),
+        }
+    }
 }
 
 /// The local day a chart spans, as an absolute window: 23 or 25 hours on a
@@ -160,5 +176,21 @@ impl YScale {
         } else {
             (zero, height)
         }
+    }
+}
+
+#[cfg(test)]
+pub(super) mod testing {
+    use super::{CHART_WIDTH, SlotSpan};
+
+    /// Hit targets tile the chart left to right without overlapping or
+    /// overrunning it.
+    pub fn assert_tiled(spans: impl IntoIterator<Item = SlotSpan>) {
+        let mut edge = 0.0;
+        for span in spans {
+            assert!((span.x - edge).abs() < 1e-6, "gap or overlap at {edge}");
+            edge = span.x + span.width;
+        }
+        assert!((edge - CHART_WIDTH).abs() < 1e-6);
     }
 }

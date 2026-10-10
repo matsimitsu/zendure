@@ -7,13 +7,14 @@ use crate::models::ControlMode;
 use crate::prices::tiers::Tier;
 use crate::units::{KiloWattHours, Percent, Soc, Timestamp, Watts};
 
+use super::day_nav::DayQuery;
 use super::detail::detail_body;
 use super::entity::Entity;
 use super::flows::{EnergyFlowsView, energy_flows_view};
 use super::line_chart::LineChartView;
-use super::prices::{PriceDayQuery, PricePanelView, requested_price_panel};
+use super::prices::{PricePanelView, requested_price_panel};
 use super::soc_bar::SocBarView;
-use super::solar::{ForecastPanelView, todays_forecast_panel};
+use super::solar::{ForecastPanelView, requested_forecast_panel};
 use super::state::{DashboardState, Plottable, Sparkline};
 use crate::controller::SocLimits;
 
@@ -401,10 +402,18 @@ fn format_log_time(at: Timestamp, now: Timestamp, timezone: chrono_tz::Tz) -> St
     }
 }
 
+/// The day each day panel built here was asked for. The stream's are all
+/// today, the default.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PanelDays {
+    pub prices: DayQuery,
+    pub solar: DayQuery,
+}
+
 /// Everything the full page and every SSE fragment render from.
 pub fn dashboard_view(
     state: &DashboardState,
-    price_day: PriceDayQuery,
+    days: PanelDays,
     timezone: chrono_tz::Tz,
 ) -> DashboardView {
     let world = &state.engine.world;
@@ -528,8 +537,8 @@ pub fn dashboard_view(
         },
         battery,
         decision_log,
-        forecast: todays_forecast_panel(state, timezone),
-        prices: requested_price_panel(state, price_day, timezone),
+        forecast: requested_forecast_panel(state, days.solar, timezone),
+        prices: requested_price_panel(state, days.prices, timezone),
         energy_flows: energy_flows_view(&state.intervals, state.as_of, timezone),
     }
 }

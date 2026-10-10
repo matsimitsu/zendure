@@ -16,10 +16,9 @@ use tokio_stream::wrappers::WatchStream;
 
 use maud::Markup;
 
-use super::prices::PriceDayQuery;
 use super::state::DashboardStateReceiver;
 use super::templates::layout;
-use super::view::{DashboardView, dashboard_view};
+use super::view::{DashboardView, PanelDays, dashboard_view};
 
 /// One live section of the page: the `sse-swap` name its wrapper carries, and
 /// the renderer that produces that wrapper's contents.
@@ -76,7 +75,7 @@ pub fn fragment_stream(
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     let mut sent = SentFragments::default();
     WatchStream::new(rx).flat_map(move |state| {
-        let view = dashboard_view(&state, PriceDayQuery::default(), timezone);
+        let view = dashboard_view(&state, PanelDays::default(), timezone);
         let events: Vec<Event> = sent
             .changed(&view)
             .into_iter()

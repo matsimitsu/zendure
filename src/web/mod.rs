@@ -4,6 +4,7 @@
 
 mod axis;
 mod day_nav;
+mod day_panel;
 mod detail;
 mod entity;
 mod flows;

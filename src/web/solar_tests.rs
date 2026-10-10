@@ -63,28 +63,13 @@ fn last_sun_is_the_last_nonzero_slot() {
 
 // --- Panel ------------------------------------------------------------------
 
-use chrono::TimeZone;
+use chrono::{NaiveDate, TimeZone};
 
 use crate::clock::local_day_bounds;
-use crate::fixtures::journey;
+use crate::fixtures::{amsterdam, date, journey, local};
 use crate::units::SolarForecastPoint;
+use crate::web::plot::{CHART_WIDTH, testing};
 use crate::web::templates::forecast_panel;
-
-fn amsterdam() -> Tz {
-    chrono_tz::Europe::Amsterdam
-}
-
-fn date(month: u32, day: u32) -> NaiveDate {
-    NaiveDate::from_ymd_opt(2026, month, day).unwrap()
-}
-
-fn local(month: u32, day: u32, hour: u32, minute: u32) -> Timestamp {
-    Timestamp::from(
-        amsterdam()
-            .with_ymd_and_hms(2026, month, day, hour, minute, 0)
-            .unwrap(),
-    )
-}
 
 /// Every half-hour slot start of local `day`.
 fn slot_starts(day: NaiveDate) -> Vec<Timestamp> {
@@ -141,35 +126,31 @@ fn view(
         intervals,
         configured: true,
     };
-    forecast_panel_view(day, &context, now, amsterdam())
+    let query = day.map_or_else(DayQuery::default, DayQuery::on);
+    forecast_panel_view(query, &context, now, amsterdam())
 }
 
 fn shown(view: ForecastPanelView) -> ForecastDayView {
     match view {
-        ForecastPanelView::Forecast(day) => *day,
-        ForecastPanelView::Empty(reason) => panic!("empty: {reason:?}"),
+        DayPanel::Shown(day) => *day,
+        DayPanel::Empty(reason) => panic!("empty: {reason:?}"),
+        DayPanel::Blank(nav) => panic!("blank: {nav:?}"),
     }
 }
 
 fn empty(view: ForecastPanelView) -> EmptyReason {
     match view {
-        ForecastPanelView::Empty(reason) => reason,
-        ForecastPanelView::Forecast(_) => panic!("not empty"),
+        DayPanel::Empty(reason) => reason,
+        _ => panic!("not empty"),
     }
 }
 
 fn render(view: ForecastDayView) -> String {
-    forecast_panel::render(&ForecastPanelView::Forecast(Box::new(view))).into_string()
+    forecast_panel::render(&DayPanel::Shown(Box::new(view))).into_string()
 }
 
-/// Hits tile the chart left to right without overlapping or overrunning it.
 fn assert_tiled(hits: &[ForecastHitView]) {
-    let mut edge = 0.0;
-    for hit in hits {
-        assert!((hit.span.x - edge).abs() < 1e-6, "gap or overlap at {edge}");
-        edge = hit.span.x + hit.span.width;
-    }
-    assert!((edge - FORECAST_CHART_WIDTH).abs() < 1e-6);
+    testing::assert_tiled(hits.iter().map(|hit| hit.span));
 }
 
 #[test]
@@ -180,7 +161,12 @@ fn without_a_feed_the_panel_says_how_to_configure_one() {
         intervals: &journey::interval_ring(),
         configured: false,
     };
-    let view = forecast_panel_view(None, &context, local(6, 15, 12, 0), amsterdam());
+    let view = forecast_panel_view(
+        DayQuery::default(),
+        &context,
+        local(6, 15, 12, 0),
+        amsterdam(),
+    );
 
     assert_eq!(empty(view), EmptyReason::NotConfigured);
 }
@@ -222,6 +208,7 @@ fn a_dst_day_has_a_slot_per_half_hour_of_its_real_length() {
         assert_tiled(&view.chart.hits);
         let tick = view
             .chart
+            .plot
             .x_axis
             .iter()
             .find(|tick| tick.label == "03:00")
@@ -275,15 +262,15 @@ fn the_actual_line_stops_at_the_last_completed_slot() {
     let path = &view.chart.actual_path;
     assert_eq!(path.matches('M').count(), 1, "{path}");
     assert_eq!(path.matches('L').count(), 23, "{path}");
-    let slot = FORECAST_CHART_WIDTH / 48.0;
+    let slot = CHART_WIDTH / 48.0;
     // Slot 23 forecasts 1,400 W on a 2,000 W scale.
     let y = DAY_CHART_HEIGHT * 0.3;
     assert!(
         path.ends_with(&format!("L{:.1},{y:.1}", 23.5 * slot)),
         "{path}"
     );
-    assert!((view.chart.now_x.unwrap() - 24.5 * slot).abs() < 1e-6);
-    assert!((view.chart.highlight.unwrap().x - 24.0 * slot).abs() < 1e-6);
+    assert!((view.chart.plot.now_x.unwrap() - 24.5 * slot).abs() < 1e-6);
+    assert!((view.chart.plot.highlight.unwrap().x - 24.0 * slot).abs() < 1e-6);
 }
 
 #[test]
@@ -380,8 +367,8 @@ fn tomorrow_shows_its_total_and_peak_without_actuals_or_a_now() {
     assert_eq!(peak.value, "13:00–13:30");
     assert_eq!(peak.sub.as_ref().unwrap().text, "2,000 W");
     assert!(view.chart.actual_path.is_empty());
-    assert_eq!(view.chart.now_x, None);
-    assert_eq!(view.chart.highlight, None);
+    assert_eq!(view.chart.plot.now_x, None);
+    assert_eq!(view.chart.plot.highlight, None);
 
     let html = render(view);
     assert!(!html.contains("forecast-panel__read--actual"));
@@ -426,13 +413,19 @@ fn today_and_tomorrow_share_one_y_scale() {
 
     for day in [today, tomorrow] {
         let view = shown(view(Some(day), &forecast, &intervals, now));
-        let labels: Vec<&str> = view.chart.y_axis.iter().map(|t| t.label.as_str()).collect();
+        let labels: Vec<&str> = view
+            .chart
+            .plot
+            .y_axis
+            .iter()
+            .map(|t| t.label.as_str())
+            .collect();
         assert_eq!(
             labels,
             ["0", "500", "1000", "1500", "2000", "2500"],
             "{day}"
         );
-        assert_eq!(view.chart.grid_lines.len(), 6);
+        assert_eq!(view.chart.plot.grid_lines.len(), 6);
     }
 }
 
@@ -447,10 +440,15 @@ fn only_sunny_slots_have_a_bar_inset_from_its_slot() {
         local(6, 15, 12, 10),
     ));
 
-    let slot = FORECAST_CHART_WIDTH / 48.0;
+    let slot = CHART_WIDTH / 48.0;
     assert_eq!(view.chart.bars.len(), 19);
     let peak = view.chart.bars[26 - 17];
-    assert!((peak.span.x - (26.0 + BAR_INSET) * slot).abs() < 1e-6);
-    assert!((peak.span.width - slot * (1.0 - 2.0 * BAR_INSET)).abs() < 1e-6);
+    let inset = SlotSpan {
+        x: 26.0 * slot,
+        width: slot,
+    }
+    .bar();
+    assert!((peak.span.x - inset.x).abs() < 1e-6);
+    assert!((peak.span.width - inset.width).abs() < 1e-6);
     assert!(peak.y.abs() < 1e-6, "the peak fills the 2,000 W scale");
 }

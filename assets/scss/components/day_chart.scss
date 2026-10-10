@@ -1,0 +1,152 @@
+@use "../breakpoints" as *;
+@use "../surfaces" as *;
+
+// The block is a day panel's persistent host (`<price-panel>`,
+// `<forecast-panel>`), so whatever its script keeps on it survives the SSE
+// swaps of its contents. Each panel mixes in its own block for its series.
+.day-chart {
+  @include panel-surface;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  font-family: var(--font-ui);
+
+  &__head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+  }
+
+  &__titles {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  &__title {
+    @include panel-heading;
+  }
+
+  &__subtitle {
+    @include panel-caption;
+  }
+
+  // Wraps rather than overflows, so the figures never widen a 375px screen.
+  &__readout {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: var(--space-4) var(--space-7);
+  }
+
+  &__now {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  &__read-label {
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+  }
+
+  &__read-row {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+  }
+
+  &__read-value {
+    color: var(--color-text-primary);
+    font-family: var(--font-mono);
+    font-size: var(--text-2xl);
+    font-weight: var(--weight-medium);
+    line-height: var(--leading-tight);
+  }
+
+  &__read-unit {
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+  }
+
+  &__plot {
+    display: grid;
+    // `minmax(0, …)` so nothing in the plot can widen the panel.
+    grid-template-columns: var(--size-axis-gutter) minmax(0, 1fr);
+    grid-template-rows: var(--size-chart-day) auto;
+    gap: var(--space-2);
+  }
+
+  // A grid, so the vertical axis inside stretches to the plot's height.
+  &__y-axis {
+    display: grid;
+  }
+
+  &__chart {
+    display: block;
+    width: 100%;
+    height: 100%;
+    touch-action: pan-y;
+  }
+
+  &__x-axis {
+    grid-column: 2;
+  }
+
+  &__grid {
+    stroke: var(--color-grid-line);
+    stroke-width: var(--stroke-rule);
+  }
+
+  &__now-line {
+    stroke: var(--color-accent);
+    stroke-opacity: var(--opacity-now-line);
+    stroke-width: var(--stroke-now-line);
+    stroke-dasharray: var(--dash-now-line);
+  }
+
+  &__highlight {
+    fill: var(--color-hover-wash);
+  }
+
+  &__hit {
+    fill: transparent;
+  }
+
+  &__legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-5);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  &__legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+  }
+
+  &__legend-label {
+    color: var(--color-text-muted);
+  }
+
+  &__legend-range {
+    color: var(--color-text-faint);
+    font-family: var(--font-mono);
+  }
+}
+
+// The big figures take their own row, and the mini-stats share the next.
+@include narrow {
+  .day-chart__now {
+    flex-basis: 100%;
+  }
+}

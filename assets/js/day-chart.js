@@ -3,21 +3,17 @@
 // Light DOM and no framework, like <energy-flows>: the SSE stream replaces
 // the host's innerHTML every tick, but the host persists, so listeners and
 // the hovered slot live on it and are re-applied to each fresh fragment.
-// All formatting happens in Rust; subclasses only copy strings and move the
-// highlight.
+// All formatting happens in Rust; subclasses only say which strings their
+// readout shows.
 //
 // Published on `globalThis` because each app script is a module with its own
 // scope and the page's load check imports them as standalone data: URLs, so an
 // `import` between them cannot resolve. Module scripts run in document order
 // and `build.rs` sorts them by name, so a subclass file must sort after
 // `day-chart.js`.
-class DayChart extends HTMLElement {
-  // Subclasses return the CSS selector of their hit rects, whose
-  // `data-slot` names the slot they cover.
-  get hitSelector() {
-    throw new Error("DayChart subclasses must define hitSelector");
-  }
+const DAY_CHART = "day-chart";
 
+class DayChart extends HTMLElement {
   connectedCallback() {
     // The element can be re-attached; listeners must be added only once.
     if (this.bound) return;
@@ -56,14 +52,14 @@ class DayChart extends HTMLElement {
   }
 
   slotOf(e) {
-    return e.target.closest?.(this.hitSelector)?.dataset.slot ?? null;
+    return e.target.closest?.(`.${DAY_CHART}__hit`)?.dataset.slot ?? null;
   }
 
   // The hit rect for the remembered slot, or null once that slot is gone, so
-  // the subclass falls back to the server's default readout.
+  // the readout falls back to the server's default.
   hoveredHit() {
     if (this.hover === null) return null;
-    return this.querySelector(`${this.hitSelector}[data-slot="${this.hover}"]`);
+    return this.querySelector(`.${DAY_CHART}__hit[data-slot="${this.hover}"]`);
   }
 
   // The fragment says which day it shows and whether it is today; the host
@@ -86,9 +82,38 @@ class DayChart extends HTMLElement {
   }
 
   // Idempotent: derives everything from host state, so it is safe to call
-  // after any swap or interaction. Implementations start with `mirrorDay()`.
+  // after any swap or interaction.
   apply() {
-    throw new Error("DayChart subclasses must define apply");
+    this.mirrorDay();
+    const readout = this.querySelector(`.${DAY_CHART}__readout`);
+    if (!readout) return;
+    const hit = this.hoveredHit();
+    // The hit's `data-<key>`, or the readout's `data-default-<key>` with
+    // nothing hovered.
+    const read = (key) =>
+      hit ? hit.dataset[key] : readout.dataset[`default${key[0].toUpperCase()}${key.slice(1)}`];
+    this.setText(readout, `.${DAY_CHART}__read-label`, read("label"));
+    this.showReadout(readout, read);
+    this.moveHighlight(hit);
+  }
+
+  // Subclasses copy their figures into `readout`, reading each by its
+  // data key through `read`.
+  showReadout(_readout, _read) {
+    throw new Error("DayChart subclasses must define showReadout");
+  }
+
+  setText(root, selector, text) {
+    const el = root.querySelector(selector);
+    if (el) el.textContent = text ?? "";
+  }
+
+  // Onto the hovered hit, or back to where the server left it.
+  moveHighlight(hit) {
+    for (const h of this.querySelectorAll(`.${DAY_CHART}__highlight`)) {
+      h.setAttribute("x", hit ? hit.getAttribute("x") : h.dataset.defaultX);
+      h.setAttribute("width", hit ? hit.getAttribute("width") : h.dataset.defaultWidth);
+    }
   }
 }
 

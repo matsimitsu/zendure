@@ -211,7 +211,7 @@ async fn the_price_fragment_steps_to_a_past_day() {
     assert!(body.contains(r#"data-day="2025-09-01""#), "{body}");
     assert!(body.contains("Mon 1 Sep"));
     assert!(body.contains("Day average"));
-    assert!(!body.contains("price-panel__now-line"));
+    assert!(!body.contains("day-chart__now-line"));
 }
 
 #[tokio::test]
