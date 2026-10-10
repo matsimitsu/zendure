@@ -575,3 +575,92 @@ fn a_span_is_kept_only_forward_and_within_the_gap() {
     assert_eq!(start.span_within(later(31), gap), None, "an outage");
     assert_eq!(start.span_within(later(-1), gap), None, "a backwards step");
 }
+
+// --- Money ----------------------------------------------------------------
+
+#[test]
+fn cents_display_as_euros() {
+    assert_eq!(Cents(1234).to_string(), "€12.34");
+    assert_eq!(Cents(5).to_string(), "€0.05");
+    assert_eq!(Cents(-5).to_string(), "-€0.05");
+    assert_eq!(Cents(0).to_string(), "€0.00");
+}
+
+#[test]
+fn cents_arithmetic_and_serde() {
+    assert_eq!(Cents(5) + Cents(7) - Cents(2), Cents(10));
+    assert_eq!(-Cents(5), Cents(-5));
+    assert_eq!([Cents(1), Cents(2)].into_iter().sum::<Cents>(), Cents(3));
+    assert_eq!(serde_json::to_string(&Cents(42)).unwrap(), "42");
+    assert_eq!(serde_json::to_string(&CentsPerKwh(0.5)).unwrap(), "0.5");
+}
+
+#[test]
+fn vat_applies_to_negative_prices_too() {
+    let with = CentsPerKwh(10.0).with_vat(Percent(21.0));
+    assert!((with.0 - 12.1).abs() < 1e-9);
+    assert!((CentsPerKwh(-10.0).with_vat(Percent(21.0)).0 + 12.1).abs() < 1e-9);
+    assert_eq!(
+        CentsPerKwh(3.0) + CentsPerKwh(1.0) - CentsPerKwh(0.5),
+        CentsPerKwh(3.5)
+    );
+}
+
+#[test]
+fn tiny_intervals_accumulate_before_rounding() {
+    // 1000 intervals of 1 Wh at 40 ct/kWh is 0.04 ct each; rounding each would give 0.
+    let mut cost = Cost::default();
+    for _ in 0..1000 {
+        cost.add(WattHours(1.0), CentsPerKwh(40.0));
+    }
+    assert_eq!(cost.total(), Cents(40));
+}
+
+#[test]
+fn cost_rounds_half_away_from_zero() {
+    let mut charge = Cost::default();
+    charge.add(WattHours(1000.0), CentsPerKwh(0.5));
+    assert_eq!(charge.total(), Cents(1));
+    let mut credit = Cost::default();
+    credit.add(WattHours(1000.0), CentsPerKwh(-0.5));
+    assert_eq!(credit.total(), Cents(-1));
+    let mut negative_price = Cost::default();
+    negative_price.add(WattHours(2000.0), CentsPerKwh(-10.0));
+    assert_eq!(negative_price.total(), Cents(-20));
+}
+
+fn point(from: i64, until: i64, ct: f64) -> PricePoint {
+    PricePoint {
+        from: Timestamp(from),
+        until: Timestamp(until),
+        wholesale: CentsPerKwh(ct),
+    }
+}
+
+#[test]
+fn price_series_at_boundaries_and_gaps() {
+    let mut series = PriceSeries::default();
+    series.insert(point(100, 200, 1.0));
+    series.insert(point(200, 300, 2.0));
+    series.insert(point(400, 500, 3.0));
+    let ct = |ts| series.at(Timestamp(ts)).map(|p| p.wholesale);
+    assert_eq!(ct(100), Some(CentsPerKwh(1.0)));
+    assert_eq!(ct(199), Some(CentsPerKwh(1.0)));
+    assert_eq!(ct(200), Some(CentsPerKwh(2.0)));
+    assert_eq!(ct(99), None);
+    assert_eq!(ct(300), None);
+    assert_eq!(ct(399), None);
+    assert_eq!(ct(500), None);
+}
+
+#[test]
+fn price_series_insert_replaces_same_from() {
+    let mut series = PriceSeries::default();
+    series.insert(point(100, 200, 1.0));
+    series.insert(point(100, 160, 9.0));
+    assert_eq!(
+        series.at(Timestamp(150)).map(|p| p.wholesale),
+        Some(CentsPerKwh(9.0))
+    );
+    assert!(series.at(Timestamp(170)).is_none());
+}
