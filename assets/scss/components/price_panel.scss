@@ -110,18 +110,18 @@ $tiers: (
 
   &__grid {
     stroke: var(--color-grid-line);
-    stroke-width: 1;
+    stroke-width: var(--stroke-rule);
   }
 
   &__zero {
     stroke: var(--color-zero-line);
-    stroke-width: 1;
+    stroke-width: var(--stroke-rule);
   }
 
   &__now-line {
     stroke: var(--color-accent);
     stroke-opacity: var(--opacity-now-line);
-    stroke-width: 1.5;
+    stroke-width: var(--stroke-now-line);
     stroke-dasharray: var(--dash-now-line);
   }
 

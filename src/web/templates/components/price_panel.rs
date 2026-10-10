@@ -1,8 +1,9 @@
 use chrono::NaiveDate;
 use maud::{Markup, html};
 
+use crate::web::day_nav::DayNavView;
 use crate::web::prices::{
-    PRICE_CHART_HEIGHT, PRICE_CHART_WIDTH, PriceBarView, PriceChartView, PriceNavView,
+    PRICE_BAR_RADIUS, PRICE_CHART_HEIGHT, PRICE_CHART_WIDTH, PriceBarView, PriceChartView,
     PricePanelView, PricedDayView,
 };
 use crate::web::templates::day_nav::{self, DayNav, DayNavLink};
@@ -11,11 +12,11 @@ use crate::web::templates::{axis, mini_stat, price_tier};
 /// The panel's contents. The `<price-panel>` host around them persists
 /// across SSE swaps; everything here is re-rendered whole.
 pub fn render(view: &PricePanelView) -> Markup {
+    let data_day = view.data_day();
     match view {
-        // Only today is ever nav-less, so the marker the host mirrors still
-        // travels with the swap.
+        // Nav-less, so the marker the host mirrors travels on the header.
         PricePanelView::Empty(reason) => html! {
-            header class="price-panel__head" data-day="today" {
+            header class="price-panel__head" data-day=(data_day) {
                 div class="price-panel__titles" {
                     h2 class="price-panel__title" { "Electricity prices" }
                     p class="price-panel__subtitle" { (reason.text()) }
@@ -28,14 +29,14 @@ pub fn render(view: &PricePanelView) -> Markup {
                     h2 class="price-panel__title" { "Electricity prices" }
                     p class="price-panel__subtitle" { "No prices for this day" }
                 }
-                (day_nav_markup(nav))
+                (day_nav_markup(nav, data_day))
             }
         },
-        PricePanelView::Priced(day) => priced(day),
+        PricePanelView::Priced(day) => priced(day, data_day),
     }
 }
 
-fn priced(view: &PricedDayView) -> Markup {
+fn priced(view: &PricedDayView, data_day: String) -> Markup {
     let readout = &view.readout;
     let tier = readout.tier;
     html! {
@@ -44,7 +45,7 @@ fn priced(view: &PricedDayView) -> Markup {
                 h2 class="price-panel__title" { "Electricity prices" }
                 p class="price-panel__subtitle" { (view.subtitle) }
             }
-            (day_nav_markup(&view.nav))
+            (day_nav_markup(&view.nav, data_day))
         }
         div class="price-panel__readout"
             data-default-label=(readout.label)
@@ -80,7 +81,7 @@ fn priced(view: &PricedDayView) -> Markup {
 
 /// `data-day` travels on the nav, which every swap replaces, so the host can
 /// mirror it and drop the stream while another day is shown.
-fn day_nav_markup(nav: &PriceNavView) -> Markup {
+fn day_nav_markup(nav: &DayNavView, data_day: String) -> Markup {
     let link = |day: Option<NaiveDate>| DayNavLink {
         href: page_href(day),
         hx_get: fragment_href(day),
@@ -93,7 +94,7 @@ fn day_nav_markup(nav: &PriceNavView) -> Markup {
         // Only behind today: from tomorrow, › already leads back.
         today: (nav.shown < nav.today).then(|| link(None)),
         hx_target: "#price-panel",
-        data_day: Some(nav.data_day()),
+        data_day: Some(data_day),
         data_live: None,
     })
 }
@@ -140,7 +141,7 @@ fn plot(chart: &PriceChartView) -> Markup {
                         y=(format!("{:.2}", bar.y))
                         width=(format!("{:.2}", bar.span.width))
                         height=(format!("{:.2}", bar.height))
-                        rx="1" {}
+                        rx=(PRICE_BAR_RADIUS) {}
                 }
                 @if let Some(y) = chart.zero_y {
                     (rule("price-panel__zero", y))

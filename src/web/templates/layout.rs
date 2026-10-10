@@ -70,7 +70,7 @@ pub fn page(view: &DashboardView) -> Markup {
                     energy-flows id="energy-flows" class=(energy_flows::host_class(&view.energy_flows))
                         sse-swap="energy-flows"
                         data-day=(view.energy_flows.nav.shown)
-                        data-live=(view.energy_flows.nav.live()) {
+                        data-live=(view.energy_flows.nav.is_today()) {
                         (energy_flows_inner(view))
                     }
                     div id="decision-log" sse-swap="decision-log" {

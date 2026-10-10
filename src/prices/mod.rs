@@ -143,26 +143,27 @@ fn history_start(now: Timestamp, tz: Tz) -> Timestamp {
         .unwrap_or(fallback)
 }
 
-/// One local day as a renderer needs it: the day's bounds and one slot per
+/// One local hour of a day, `[start, end)`, and its wholesale price; `None`
+/// for an hour the feed has not priced.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HourPrice {
+    pub start: Timestamp,
+    pub end: Timestamp,
+    pub wholesale: Option<CentsPerKwh>,
+}
+
+/// One local day as a renderer needs it: the day's bounds and one hour per
 /// local hour, so 23, 24 or 25 of them across DST changes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DayPrices {
-    pub date: NaiveDate,
     pub start: Timestamp,
     pub end: Timestamp,
-    slots: Vec<Option<CentsPerKwh>>,
+    hours: Vec<HourPrice>,
 }
 
 impl DayPrices {
-    /// The wholesale price per local-hour slot, `None` for an hour the feed
-    /// has not priced. This is the shape `tiers` takes.
-    pub fn slots(&self) -> &[Option<CentsPerKwh>] {
-        &self.slots
-    }
-
-    /// Each slot's `[start, end)`, in the order of `slots`.
-    pub fn hours(&self) -> impl Iterator<Item = (Timestamp, Timestamp)> + '_ {
-        hour_starts(self.start, self.end).map(|at| (at, (at + Elapsed::HOUR).min(self.end)))
+    pub fn hours(&self) -> &[HourPrice] {
+        &self.hours
     }
 }
 
@@ -232,19 +233,22 @@ impl PriceSnapshot {
     /// as its hourly average; a coarser point prices every hour it covers.
     pub fn prices_for(&self, date: NaiveDate, tz: Tz) -> Option<DayPrices> {
         let (start, end) = local_day_bounds(date, tz)?;
-        let slots: Vec<Option<CentsPerKwh>> = hour_starts(start, end)
+        let hours: Vec<HourPrice> = hour_starts(start, end)
             .map(|at| {
                 let until = (at + Elapsed::HOUR).min(end);
                 let starting = self.points.starting_within(at, until).map(|p| p.wholesale);
-                CentsPerKwh::mean(starting).or_else(|| self.points.at(at).map(|p| p.wholesale))
+                HourPrice {
+                    start: at,
+                    end: until,
+                    wholesale: CentsPerKwh::mean(starting)
+                        .or_else(|| self.points.at(at).map(|p| p.wholesale)),
+                }
             })
             .collect();
-        slots.iter().any(Option::is_some).then_some(DayPrices {
-            date,
-            start,
-            end,
-            slots,
-        })
+        hours
+            .iter()
+            .any(|hour| hour.wholesale.is_some())
+            .then_some(DayPrices { start, end, hours })
     }
 
     /// Whether every hour of the day after `today` is priced.

@@ -16,6 +16,7 @@ use tokio_stream::wrappers::WatchStream;
 
 use maud::Markup;
 
+use super::prices::PriceDayQuery;
 use super::state::DashboardStateReceiver;
 use super::templates::layout;
 use super::view::{DashboardView, dashboard_view};
@@ -75,7 +76,7 @@ pub fn fragment_stream(
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     let mut sent = SentFragments::default();
     WatchStream::new(rx).flat_map(move |state| {
-        let view = dashboard_view(&state, timezone);
+        let view = dashboard_view(&state, PriceDayQuery::default(), timezone);
         let events: Vec<Event> = sent
             .changed(&view)
             .into_iter()

@@ -4,6 +4,7 @@
 
 use crate::device::PackStatus;
 use crate::models::ControlMode;
+use crate::prices::tiers::Tier;
 use crate::units::{
     Elapsed, KiloWattHours, Percent, Soc, SolarForecastPoint, SolarPower, Timestamp, Watts,
 };
@@ -79,7 +80,7 @@ pub struct MiniStatView {
 pub struct MiniStatSub {
     pub text: String,
     /// BEM modifier: "cheap" | "expensive".
-    pub tone: &'static str,
+    pub tone: Tier,
 }
 
 pub struct BatteryPanelView {
@@ -532,7 +533,11 @@ fn forecast_panel_view(
 }
 
 /// Everything the full page and every SSE fragment render from.
-pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> DashboardView {
+pub fn dashboard_view(
+    state: &DashboardState,
+    price_day: PriceDayQuery,
+    timezone: chrono_tz::Tz,
+) -> DashboardView {
     let world = &state.engine.world;
 
     let solar = stat_card(
@@ -655,7 +660,7 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
         battery,
         decision_log,
         forecast: forecast_panel_view(&state.forecast, &state.actual_solar, state.as_of, timezone),
-        prices: requested_price_panel(state, PriceDayQuery::default(), timezone),
+        prices: requested_price_panel(state, price_day, timezone),
         energy_flows: energy_flows_view(&state.intervals, state.as_of, timezone),
     }
 }

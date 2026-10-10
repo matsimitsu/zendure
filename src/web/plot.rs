@@ -17,6 +17,13 @@ pub(super) const CHART_WIDTH: f64 = 1000.0;
 
 const HOUR: Duration = Duration::from_secs(60 * 60);
 
+/// A rectangle's horizontal extent, in viewBox units.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SlotSpan {
+    pub x: f64,
+    pub width: f64,
+}
+
 /// The local day a chart spans, as an absolute window: 23 or 25 hours on a
 /// DST change.
 pub(super) struct Day {
@@ -94,6 +101,15 @@ impl Day {
 
     pub fn x(&self, at: Timestamp) -> f64 {
         self.width(at - self.start)
+    }
+
+    /// `[start, end)` along the x axis.
+    pub fn span(&self, start: Timestamp, end: Timestamp) -> SlotSpan {
+        let x = self.x(start);
+        SlotSpan {
+            x,
+            width: self.x(end) - x,
+        }
     }
 
     pub fn slot_starts(&self, span: Duration) -> impl Iterator<Item = Timestamp> {

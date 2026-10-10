@@ -3,6 +3,7 @@
 //! Grass-compiled, rust-embed'd CSS.
 
 mod axis;
+mod day_nav;
 mod detail;
 mod entity;
 mod flows;

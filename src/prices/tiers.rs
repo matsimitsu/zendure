@@ -14,6 +14,13 @@ const BLOCK_SLOTS: usize = 3;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Slot(pub usize);
 
+/// The prices a day's tiers split at: cheap below `lo`, expensive from `hi`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Thresholds {
+    pub lo: CentsPerKwh,
+    pub hi: CentsPerKwh,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
     Cheap,
@@ -43,7 +50,7 @@ impl Tier {
     /// import is cheap however the rest of the day ranks, and a day with no
     /// spread (`lo == hi`) has nothing to flag, so it reads as normal rather
     /// than wholly expensive.
-    pub fn of(price: CentsPerKwh, (lo, hi): (CentsPerKwh, CentsPerKwh)) -> Tier {
+    pub fn of(price: CentsPerKwh, Thresholds { lo, hi }: Thresholds) -> Tier {
         if price < lo || price < CentsPerKwh(0.0) {
             Tier::Cheap
         } else if price >= hi && lo < hi {
@@ -54,14 +61,17 @@ impl Tier {
     }
 }
 
-/// The `(lo, hi)` thresholds at the one-third and two-thirds ranks of the
-/// priced hours; `None` when there are none.
-pub fn tiers(prices: &[CentsPerKwh]) -> Option<(CentsPerKwh, CentsPerKwh)> {
+/// The thresholds at the one-third and two-thirds ranks of the priced hours;
+/// `None` when there are none.
+pub fn tiers(prices: &[CentsPerKwh]) -> Option<Thresholds> {
     let mut sorted = prices.to_vec();
     // total_cmp: a NaN must not panic the dashboard render.
     sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
     let n = sorted.len();
-    Some((*sorted.get(n / 3)?, *sorted.get(2 * n / 3)?))
+    Some(Thresholds {
+        lo: *sorted.get(n / 3)?,
+        hi: *sorted.get(2 * n / 3)?,
+    })
 }
 
 /// A 3-hour block and its mean price.

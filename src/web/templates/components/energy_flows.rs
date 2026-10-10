@@ -1,10 +1,10 @@
 use chrono::NaiveDate;
 use maud::{Markup, html};
 
+use crate::web::day_nav::DayNavView;
 use crate::web::entity::Entity;
 use crate::web::flows::{
-    DayNavView, EnergyFlowsView, FLOWS_CHART_HEIGHT, FLOWS_CHART_WIDTH, FlowPlotView,
-    FlowResolution,
+    EnergyFlowsView, FLOWS_CHART_HEIGHT, FLOWS_CHART_WIDTH, FlowPlotView, FlowResolution,
 };
 use crate::web::templates::axis;
 use crate::web::templates::day_nav::{self, DayNav, DayNavLink};
@@ -90,10 +90,10 @@ fn day_nav_markup(nav: &DayNavView, interval: FlowResolution) -> Markup {
         date: &nav.date,
         prev: nav.previous.map(|day| link(Some(day))),
         next: nav.next.map(|day| link(Some(day))),
-        today: (!nav.live()).then(|| link(None)),
+        today: (!nav.is_today()).then(|| link(None)),
         hx_target: "closest energy-flows",
         data_day: Some(nav.shown.to_string()),
-        data_live: Some(nav.live()),
+        data_live: Some(nav.is_today()),
     })
 }
 

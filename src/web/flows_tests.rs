@@ -279,7 +279,7 @@ fn a_past_day_is_finished_and_not_live() {
 
     assert!(hours.now_x.is_none() && quarters.now_x.is_none());
     assert_eq!(view.readout.label, "23:00–00:00");
-    assert!(!view.nav.live());
+    assert!(!view.nav.is_today());
     assert_eq!(view.nav.label, "Yesterday");
     assert_eq!(view.interval, FlowResolution::Quarter);
 
@@ -296,7 +296,7 @@ fn today_cannot_step_forward() {
     let view = energy_flows_view(&interval_ring(), utc(8, 10, 0), tz());
 
     assert_eq!(view.nav.next, None);
-    assert!(view.nav.live());
+    assert!(view.nav.is_today());
     let html = crate::web::templates::energy_flows::render(&view).into_string();
     assert!(html.contains(r#"aria-disabled="true""#));
     assert!(!html.contains("day-nav__today"));

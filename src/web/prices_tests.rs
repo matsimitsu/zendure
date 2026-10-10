@@ -56,7 +56,11 @@ fn view_at(day: NaiveDate, snapshot: &PriceSnapshot, now: Timestamp) -> PricePan
         tariff: None,
         configured: true,
     };
-    price_panel_view(day, &context, now, tz())
+    price_panel_view(on(day), &context, now, tz())
+}
+
+fn on(day: NaiveDate) -> PriceDayQuery {
+    PriceDayQuery { day: Some(day) }
 }
 
 fn priced(view: PricePanelView) -> PricedDayView {
@@ -74,7 +78,7 @@ fn empty(view: PricePanelView) -> EmptyReason {
     }
 }
 
-fn unpriced(view: PricePanelView) -> PriceNavView {
+fn unpriced(view: PricePanelView) -> DayNavView {
     match view {
         PricePanelView::Unpriced(nav) => nav,
         _ => panic!("not unpriced"),
@@ -91,7 +95,7 @@ fn without_a_feed_the_panel_says_how_to_configure_prices() {
         tariff: None,
         configured: false,
     };
-    let view = price_panel_view(date(0), &context, local(0, 12, 0), tz());
+    let view = price_panel_view(on(date(0)), &context, local(0, 12, 0), tz());
 
     assert_eq!(empty(view), EmptyReason::NotConfigured);
 }
@@ -106,11 +110,11 @@ fn a_feed_with_nothing_for_today_is_waiting() {
 #[test]
 fn another_day_without_prices_keeps_its_nav_to_step_on() {
     let view = view_at(date(2), &snapshot(&whole_day(4, rising)), local(4, 12, 0));
+    assert_eq!(view.data_day(), "2025-09-06");
     let nav = unpriced(view);
 
     assert_eq!(nav.previous, Some(date(1)));
     assert_eq!(nav.next, Some(date(3)));
-    assert_eq!(nav.data_day(), "2025-09-06");
 
     let html = price_panel::render(&view_at(
         date(2),
@@ -396,7 +400,7 @@ fn today_looks_ahead_for_its_windows() {
     assert_eq!(cheapest.sub.unwrap().text, "15.0 ct avg");
     assert_eq!(priciest.label, "Priciest 3 h ahead");
     assert_eq!(priciest.value, "21:00–24:00");
-    assert_eq!(priciest.sub.unwrap().tone, "expensive");
+    assert_eq!(priciest.sub.unwrap().tone, Tier::Expensive);
 }
 
 #[test]
@@ -465,7 +469,7 @@ fn today_steps_back_to_yesterday_and_not_ahead_before_tomorrow_is_published() {
     assert_eq!(view.nav.label, "Today");
     assert_eq!(view.nav.previous, Some(date(0).pred_opt().unwrap()));
     assert_eq!(view.nav.next, None, "tomorrow is only partly priced");
-    assert_eq!(view.nav.data_day(), "today");
+    assert_eq!(day_marker(&view.nav), "today");
 }
 
 #[test]
@@ -486,7 +490,7 @@ fn the_nav_stops_six_days_back_and_at_tomorrow() {
 
     assert_eq!(oldest.nav.previous, None);
     assert_eq!(oldest.nav.label, "Thu 4 Sep");
-    assert_eq!(oldest.nav.data_day(), "2025-09-04");
+    assert_eq!(day_marker(&oldest.nav), "2025-09-04");
     assert_eq!(tomorrow.nav.label, "Tomorrow");
     assert_eq!(tomorrow.nav.next, None);
 }
@@ -508,7 +512,12 @@ fn the_subtitle_names_the_price_shown_and_when_it_was_fetched() {
         tariff: Some(&tariff),
         configured: true,
     };
-    let all_in = priced(price_panel_view(date(0), &context, local(0, 11, 30), tz()));
+    let all_in = priced(price_panel_view(
+        on(date(0)),
+        &context,
+        local(0, 11, 30),
+        tz(),
+    ));
 
     assert_eq!(wholesale.subtitle, "Wholesale price · fetched 13:02");
     assert_eq!(
@@ -581,7 +590,7 @@ fn an_unparsable_day_is_refused() {
 fn resolved(day: NaiveDate, points: &[PricePoint]) -> NaiveDate {
     let today = date(6);
     let range = NavRange::of(today, &snapshot(points), tz());
-    PriceDayQuery { day: Some(day) }.resolve(today, range)
+    on(day).resolve(today, range)
 }
 
 #[test]
@@ -651,4 +660,10 @@ fn next_is_disabled_at_the_end_of_the_range() {
     let tomorrow = nav_html(7, now, &with_tomorrow);
     assert!(tomorrow.contains(NEXT_DISABLED));
     assert!(tomorrow.contains(r#"data-day="2025-09-11""#));
+}
+
+#[test]
+fn the_viewbox_is_as_tall_as_the_token_it_is_shown_at() {
+    let tokens = include_str!("../../assets/scss/tokens.scss");
+    assert!(tokens.contains(&format!("--size-chart-price: {PRICE_CHART_HEIGHT:.0}px;")));
 }
