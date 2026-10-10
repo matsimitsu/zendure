@@ -23,7 +23,7 @@ use crate::clock::Clock;
 use crate::config::{DynamicTariff, FixedTariff};
 use crate::event::Event;
 use crate::units::{
-    Cents, CentsPerKwh, Cost, GridPower, PricePoint, PriceSeries, Soc, Timestamp, WattHours, Watts,
+    Cents, Cost, GridPower, PricePoint, PriceSeries, Soc, Timestamp, WattHours, Watts,
 };
 use crate::world::{Measurement, MeterReading};
 
@@ -183,16 +183,6 @@ pub struct Tariffs {
     pub fixed: FixedTariff,
 }
 
-impl Tariffs {
-    fn dynamic_import(&self, point: &PricePoint) -> CentsPerKwh {
-        self.dynamic.import_price(point.wholesale)
-    }
-
-    fn dynamic_export(&self, point: &PricePoint) -> CentsPerKwh {
-        self.dynamic.export_price(point.wholesale)
-    }
-}
-
 /// Whether a run gets a cost table, and if not, the one line that says why.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pricing {
@@ -224,10 +214,8 @@ pub struct DayCosts {
     /// Integrated time with no price in force — a feed outage, or a range
     /// older than the backfill reached.
     pub unpriced: Duration,
-    pub dynamic_import: Cost,
-    pub dynamic_export: Cost,
-    pub fixed_import: Cost,
-    pub fixed_export: Cost,
+    pub dynamic: ContractCost<Cost>,
+    pub fixed: ContractCost<Cost>,
 }
 
 impl DayCosts {
@@ -239,10 +227,40 @@ impl DayCosts {
 
     pub fn rounded(&self) -> RoundedCosts {
         RoundedCosts {
-            dynamic_import: self.dynamic_import.total(),
-            dynamic_export: self.dynamic_export.total(),
-            fixed_import: self.fixed_import.total(),
-            fixed_export: self.fixed_export.total(),
+            dynamic: self.dynamic.map(Cost::total),
+            fixed: self.fixed.map(Cost::total),
+        }
+    }
+}
+
+/// What one contract charges for energy taken and credits for energy given
+/// back. Generic over the money representation so a day's fractional
+/// [`Cost`]s and its settled [`Cents`] share one shape.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ContractCost<T> {
+    pub import: T,
+    pub export: T,
+}
+
+impl<T> ContractCost<T> {
+    fn map<U>(self, f: impl Fn(T) -> U) -> ContractCost<U> {
+        ContractCost {
+            import: f(self.import),
+            export: f(self.export),
+        }
+    }
+}
+
+impl ContractCost<Cents> {
+    /// Import paid less export credited: what the household is out of pocket.
+    pub fn net(&self) -> Cents {
+        self.import - self.export
+    }
+
+    fn plus(self, other: Self) -> Self {
+        ContractCost {
+            import: self.import + other.import,
+            export: self.export + other.export,
         }
     }
 }
@@ -251,33 +269,20 @@ impl DayCosts {
 /// the total is exactly the sum of the rows above it.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct RoundedCosts {
-    pub dynamic_import: Cents,
-    pub dynamic_export: Cents,
-    pub fixed_import: Cents,
-    pub fixed_export: Cents,
+    pub dynamic: ContractCost<Cents>,
+    pub fixed: ContractCost<Cents>,
 }
 
 impl RoundedCosts {
-    /// Import paid less export credited: what the household is out of pocket.
-    pub fn dynamic_net(&self) -> Cents {
-        self.dynamic_import - self.dynamic_export
-    }
-
-    pub fn fixed_net(&self) -> Cents {
-        self.fixed_import - self.fixed_export
-    }
-
     /// Negative when the dynamic contract would have been cheaper.
     pub fn delta(&self) -> Cents {
-        self.dynamic_net() - self.fixed_net()
+        self.dynamic.net() - self.fixed.net()
     }
 
     fn plus(self, other: RoundedCosts) -> RoundedCosts {
         RoundedCosts {
-            dynamic_import: self.dynamic_import + other.dynamic_import,
-            dynamic_export: self.dynamic_export + other.dynamic_export,
-            fixed_import: self.fixed_import + other.fixed_import,
-            fixed_export: self.fixed_export + other.fixed_export,
+            dynamic: self.dynamic.plus(other.dynamic),
+            fixed: self.fixed.plus(other.fixed),
         }
     }
 }
@@ -382,13 +387,15 @@ fn accumulate(
             Some(point) => {
                 costs.priced += dt;
                 costs
-                    .dynamic_import
-                    .add(import, tariffs.dynamic_import(point));
+                    .dynamic
+                    .import
+                    .add(import, tariffs.dynamic.import_price(point.wholesale));
                 costs
-                    .dynamic_export
-                    .add(export, tariffs.dynamic_export(point));
-                costs.fixed_import.add(import, tariffs.fixed.import);
-                costs.fixed_export.add(export, tariffs.fixed.export);
+                    .dynamic
+                    .export
+                    .add(export, tariffs.dynamic.export_price(point.wholesale));
+                costs.fixed.import.add(import, tariffs.fixed.import);
+                costs.fixed.export.add(export, tariffs.fixed.export);
             }
             None => costs.unpriced += dt,
         }
@@ -544,12 +551,12 @@ fn cost_row(label: &str, priced: f64, costs: &RoundedCosts) -> String {
     format!(
         "{label}   {:>4.0}%  {:>10}  {:>10}  {:>8}  {:>10}  {:>10}  {:>8}  {:>8}\n",
         priced * 100.0,
-        costs.dynamic_import.to_string(),
-        costs.dynamic_export.to_string(),
-        costs.dynamic_net().to_string(),
-        costs.fixed_import.to_string(),
-        costs.fixed_export.to_string(),
-        costs.fixed_net().to_string(),
+        costs.dynamic.import.to_string(),
+        costs.dynamic.export.to_string(),
+        costs.dynamic.net().to_string(),
+        costs.fixed.import.to_string(),
+        costs.fixed.export.to_string(),
+        costs.fixed.net().to_string(),
         costs.delta().to_string(),
     )
 }
