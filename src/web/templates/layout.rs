@@ -79,7 +79,9 @@ pub fn page(view: &DashboardView) -> Markup {
                     div id="forecast-panel" sse-swap="forecast-panel" {
                         (forecast_panel_inner(view))
                     }
-                    div id="price-panel" sse-swap="price-panel" {
+                    // A persistent host like `<energy-flows>`: the readout
+                    // script's handlers live on it and outlast every swap.
+                    price-panel id="price-panel" class="price-panel" sse-swap="price-panel" data-day="today" {
                         (price_panel_inner(view))
                     }
                     (callout::render())

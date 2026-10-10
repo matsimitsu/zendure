@@ -1,0 +1,20 @@
+@use "../surfaces" as *;
+
+.price-tier {
+  @include pill;
+
+  &--cheap {
+    background: var(--color-info-bg);
+    color: var(--color-price-cheap-text);
+  }
+
+  &--normal {
+    background: var(--color-idle-bg);
+    color: var(--color-idle-text);
+  }
+
+  &--expensive {
+    background: var(--color-price-high-bg);
+    color: var(--color-price-high-text);
+  }
+}

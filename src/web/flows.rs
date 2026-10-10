@@ -6,22 +6,23 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::time::Duration;
 
-use chrono::{NaiveDate, NaiveTime, TimeZone};
+use chrono::NaiveDate;
 use chrono_tz::Tz;
 
-use crate::clock::{local_date, local_day_bounds};
+use crate::clock::local_date;
 use crate::units::{BatteryPower, Elapsed, GridPower, SolarPower, Timestamp, Watts};
 
-use super::axis::{AxisDensity, AxisPosition, AxisTick, day_axis, power_step};
+use super::axis::{AxisDensity, AxisPosition, AxisTick, power_step};
 use super::entity::Entity;
 use super::intervals::{
     HOUR, INTERVAL, IntervalAverages, IntervalHistory, IntervalIndex, IntervalSlot, merged,
 };
+use super::plot::{CHART_WIDTH, Day, YScale};
 use super::view::{MISSING, SignStyle, format_kw, format_time};
 
 /// The plots' viewBox. Stretched to the panel (`preserveAspectRatio="none"`),
 /// so these are proportions rather than pixels.
-pub(super) const FLOWS_CHART_WIDTH: f64 = 1000.0;
+pub(super) const FLOWS_CHART_WIDTH: f64 = CHART_WIDTH;
 pub(super) const FLOWS_CHART_HEIGHT: f64 = 260.0;
 
 /// Keeps a non-zero flow visible on a scale sized for kilowatts.
@@ -94,92 +95,6 @@ impl FromStr for FlowResolution {
     }
 }
 
-/// The local day the chart spans, as an absolute window: 23 or 25 hours on
-/// a DST change.
-struct Day {
-    start: Timestamp,
-    length: Elapsed,
-}
-
-impl Day {
-    /// Falls back to the UTC day for a date `tz` cannot place, so the chart
-    /// still has a frame to draw its gaps in.
-    fn of(date: NaiveDate, tz: Tz) -> Self {
-        match local_day_bounds(date, tz) {
-            Some((start, end)) => Day {
-                start,
-                length: end - start,
-            },
-            None => Day {
-                start: Timestamp::from(date.and_time(NaiveTime::MIN).and_utc()),
-                length: Elapsed::of(24 * HOUR),
-            },
-        }
-    }
-
-    fn end(&self) -> Timestamp {
-        self.start + self.length
-    }
-
-    /// The slot of `span` that `at` falls in; `None` outside the day.
-    fn slot_containing(&self, span: Duration, at: Timestamp) -> Option<Timestamp> {
-        (at >= self.start && at < self.end())
-            .then(|| {
-                self.slot_starts(span)
-                    .take_while(|&start| start <= at)
-                    .last()
-            })
-            .flatten()
-    }
-
-    /// A tick every three local hours, each placed where that hour really
-    /// falls, so a 23- or 25-hour day's labels stay over their bars. On a
-    /// narrow screen only `00:00 · 12:00 · 23:59` remain.
-    fn axis(&self, tz: Tz) -> Vec<AxisTick> {
-        let Some(date) = local_date(self.start, tz) else {
-            return day_axis();
-        };
-        let hours = (0..24).step_by(3).filter_map(|hour| {
-            // A local hour a DST change skips has no tick.
-            let at = tz
-                .from_local_datetime(&date.and_hms_opt(hour, 0, 0)?)
-                .earliest()?;
-            let density = if hour % 12 == 0 {
-                AxisDensity::Always
-            } else {
-                AxisDensity::WideOnly
-            };
-            Some(AxisTick::new(
-                AxisPosition::new(self.x(Timestamp::from(at)) / FLOWS_CHART_WIDTH),
-                format!("{hour:02}:00"),
-                density,
-            ))
-        });
-        let end = AxisTick::new(AxisPosition::END, "23:59".to_string(), AxisDensity::Always);
-        hours.chain(std::iter::once(end)).collect()
-    }
-
-    /// `span` as a share of the viewBox's width.
-    fn width(&self, span: Elapsed) -> f64 {
-        let length = self.length.as_secs_f64();
-        if length <= 0.0 {
-            return 0.0;
-        }
-        span.as_secs_f64() / length * FLOWS_CHART_WIDTH
-    }
-
-    fn x(&self, at: Timestamp) -> f64 {
-        self.width(at - self.start)
-    }
-
-    fn slot_starts(&self, span: Duration) -> impl Iterator<Item = Timestamp> {
-        let span = Elapsed::of(span);
-        let count = self.length.as_millis() / span.as_millis().max(1);
-        std::iter::successors(Some(self.start), move |&start| Some(start + span))
-            .take(usize::try_from(count).unwrap_or(0))
-    }
-}
-
 /// One signed y-scale, shared by both plots so switching resolution never
 /// rescales, stepped in round watts so its gridlines read as whole kW.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -213,24 +128,18 @@ impl FlowScale {
         }
     }
 
-    fn range(&self) -> f64 {
-        (self.top - self.bottom).as_f64()
+    fn plot(&self) -> YScale {
+        YScale::new(self.top.as_f64(), self.bottom.as_f64(), FLOWS_CHART_HEIGHT)
     }
 
     fn y(&self, watts: Watts) -> f64 {
-        (self.top - watts).as_f64() / self.range() * FLOWS_CHART_HEIGHT
+        self.plot().y(watts.as_f64())
     }
 
     /// A bar's `(y, height)`: up from the zero line for a positive flow,
     /// down from it for a negative one.
     fn bar(&self, watts: Watts) -> (f64, f64) {
-        let zero = self.y(Watts::ZERO);
-        let height = (zero - self.y(watts)).abs().max(MIN_BAR_HEIGHT);
-        if watts > Watts::ZERO {
-            (zero - height, height)
-        } else {
-            (zero, height)
-        }
+        self.plot().bar(watts.as_f64(), MIN_BAR_HEIGHT)
     }
 
     /// Every step from the top down to the bottom, inclusive.
@@ -581,7 +490,7 @@ pub fn requested_flows_view(
                 )
             })
             .collect(),
-        x_axis: day.axis(tz),
+        x_axis: day.axis(tz, 12),
         grid_lines: ticks
             .iter()
             .filter(|&&tick| tick != Watts::ZERO)

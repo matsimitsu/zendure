@@ -5,9 +5,6 @@
 //! length is the day's real slot count (23, 24 or 25), so DST days need no
 //! special case, and a block can never cross midnight because the slice ends.
 
-// The price panel that consumes these lands in ticket E4.
-#![allow(dead_code)]
-
 use crate::units::CentsPerKwh;
 
 /// Hours in a cheapest/priciest block.

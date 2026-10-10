@@ -953,20 +953,14 @@ impl CentsPerKwh {
         CentsPerKwh(self.0 * (1.0 + vat.fraction()))
     }
 
-    // The price panel (E4) is the consumer; until it lands only tests call this.
-    #[allow(dead_code)]
     pub fn min(self, other: Self) -> Self {
         CentsPerKwh(self.0.min(other.0))
     }
 
-    // The price panel (E4) is the consumer; until it lands only tests call this.
-    #[allow(dead_code)]
     pub fn max(self, other: Self) -> Self {
         CentsPerKwh(self.0.max(other.0))
     }
 
-    // The price panel (E4) is the consumer; until it lands only tests call this.
-    #[allow(dead_code)]
     pub fn abs(self) -> Self {
         CentsPerKwh(self.0.abs())
     }

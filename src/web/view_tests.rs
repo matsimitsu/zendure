@@ -1026,270 +1026,29 @@ fn each_card_is_live_inside_its_shell() {
 
 // --- Price panel -------------------------------------------------------------
 
-/// Amsterdam wall-clock time, `day` days after 4 September 2025.
-fn local(day: u64, hour: u32, minute: u32) -> Timestamp {
-    use chrono::TimeZone;
-    let date = chrono::NaiveDate::from_ymd_opt(2025, 9, 4).unwrap() + chrono::Days::new(day);
-    let local = date.and_hms_opt(hour, minute, 0).unwrap();
-    Timestamp::from(tz().from_local_datetime(&local).single().unwrap())
-}
-
-/// An hourly price from `hour` on local `day`.
-fn price(day: u64, hour: u32, cents: f64) -> PricePoint {
-    PricePoint {
-        from: local(day, hour, 0),
-        until: local(day, hour, 0) + Elapsed::of(std::time::Duration::from_secs(3600)),
-        wholesale: CentsPerKwh(cents),
-    }
-}
-
-fn snapshot(points: &[PricePoint]) -> PriceSnapshot {
-    let mut series = PriceSeries::default();
-    for point in points {
-        series.insert(*point);
-    }
-    PriceSnapshot {
-        points: series,
-        as_of: Some(local(0, 15, 2)),
-    }
-}
-
-fn tariff() -> DynamicTariff {
-    DynamicTariff {
-        markup: CentsPerKwh(2.0),
-        energy_tax: CentsPerKwh(10.0),
-        export_markup: CentsPerKwh(1.0),
-        vat: Percent(21.0),
-    }
-}
-
 #[test]
-fn price_panel_view_without_a_feed_says_how_to_configure_prices() {
-    let view = price_panel_view(
-        &PriceSnapshot::default(),
-        None,
-        false,
-        local(0, 12, 0),
-        tz(),
-    );
-
-    assert!(!view.has_data);
-    assert_eq!(
-        view.as_of,
-        "No prices configured — add [prices] to config.toml"
-    );
-    assert!(view.days.is_empty());
-}
-
-#[test]
-fn price_panel_view_with_a_feed_but_no_prices_yet_is_waiting() {
-    let view = price_panel_view(&PriceSnapshot::default(), None, true, local(0, 12, 0), tz());
-
-    assert!(!view.has_data);
-    assert_eq!(view.as_of, "Waiting for prices…");
-}
-
-/// Every UTC hour of a local day, starting at its local midnight.
-fn utc_hours(first: &str, count: usize) -> Vec<PricePoint> {
-    let start = Timestamp::from(chrono::DateTime::parse_from_rfc3339(first).unwrap());
-    std::iter::successors(Some(start), |from| Some(*from + Elapsed::HOUR))
-        .take(count)
-        .map(|from| PricePoint {
+fn the_price_panel_renders_todays_chart_from_the_dashboard_state() {
+    let start = crate::clock::local_day_start(crate::clock::local_date(at(0), tz()).unwrap(), tz())
+        .unwrap();
+    let mut series = crate::prices::PriceSeries::default();
+    let hours = std::iter::successors(Some(start), |from| Some(*from + Elapsed::HOUR));
+    for (from, cents) in hours.zip([5.0, 20.0, 12.0].into_iter().cycle()).take(24) {
+        series.insert(crate::prices::PricePoint {
             from,
             until: from + Elapsed::HOUR,
-            wholesale: CentsPerKwh(10.0),
-        })
-        .collect()
-}
-
-fn bar_starts(view: &PricePanelView) -> Vec<f64> {
-    view.days[0]
-        .bars
-        .iter()
-        .map(|bar| (bar.x * 24.0 / PRICE_CHART_WIDTH * 1000.0).round() / 1000.0)
-        .collect()
-}
-
-/// The axis ticks at clock hours, so a bar sits on its clock hour: the
-/// repeated 02:00 draws twice in one slot.
-#[test]
-fn price_bars_on_a_25_hour_day_sit_on_their_clock_hours() {
-    let points = utc_hours("2026-10-24T22:00:00Z", 25);
-    let noon =
-        Timestamp::from(chrono::DateTime::parse_from_rfc3339("2026-10-25T11:00:00Z").unwrap());
-    let view = price_panel_view(&snapshot(&points), None, true, noon, tz());
-
-    let starts = bar_starts(&view);
-    assert_eq!(starts.len(), 25);
-    assert_eq!(&starts[..5], [0.0, 1.0, 2.0, 2.0, 3.0]);
-    assert_eq!(starts[24], 23.0);
-    let last = view.days[0].bars[24];
-    assert!(last.x + last.width <= PRICE_CHART_WIDTH);
-}
-
-/// The skipped 02:00 has no bar, and no neighbour stretches across it.
-#[test]
-fn price_bars_on_a_23_hour_day_leave_the_skipped_hour_empty() {
-    let points = utc_hours("2026-03-28T23:00:00Z", 23);
-    let noon =
-        Timestamp::from(chrono::DateTime::parse_from_rfc3339("2026-03-29T10:00:00Z").unwrap());
-    let view = price_panel_view(&snapshot(&points), None, true, noon, tz());
-
-    let starts = bar_starts(&view);
-    assert_eq!(starts.len(), 23);
-    assert_eq!(&starts[..3], [0.0, 1.0, 3.0]);
-    assert_eq!(starts[22], 23.0);
-    let one_oclock = view.days[0].bars[1];
-    assert!(one_oclock.x + one_oclock.width <= 2.0 * PRICE_CHART_WIDTH / 24.0);
-}
-
-#[test]
-fn price_panel_view_with_only_past_days_is_empty() {
-    let view = price_panel_view(
-        &snapshot(&[price(0, 10, 5.0)]),
-        None,
-        true,
-        local(1, 12, 0),
-        tz(),
-    );
-
-    assert!(!view.has_data);
-}
-
-/// Bucketing is by local date: local midnight is 22:00 UTC the day before,
-/// and still lands on the local day it starts.
-#[test]
-fn price_panel_view_buckets_today_and_tomorrow_by_local_date() {
-    let points = [
-        price(0, 0, 5.0),
-        price(0, 23, 6.0),
-        price(1, 0, 7.0),
-        price(2, 0, 8.0),
-    ];
-    let view = price_panel_view(&snapshot(&points), None, true, local(0, 12, 0), tz());
-
-    let labels: Vec<_> = view.days.iter().map(|day| day.label).collect();
-    assert_eq!(labels, ["Today", "Tomorrow"]);
-    assert_eq!(view.days[0].bars.len(), 2);
-    assert_eq!(view.days[1].bars.len(), 1);
-    assert_eq!(
-        view.days[0].bars[0].x, 0.0,
-        "local midnight starts the axis"
-    );
-    assert!(
-        view.days[0].bars[1].x > 950.0,
-        "23:00 sits at the axis's end"
-    );
-}
-
-#[test]
-fn price_panel_view_has_no_tomorrow_before_it_is_published() {
-    let view = price_panel_view(
-        &snapshot(&[price(0, 10, 5.0)]),
-        None,
-        true,
-        local(0, 12, 0),
-        tz(),
-    );
-
-    assert_eq!(view.days.len(), 1);
-    assert_eq!(view.days[0].label, "Today");
-}
-
-#[test]
-fn price_panel_view_without_a_tariff_shows_wholesale() {
-    let view = price_panel_view(
-        &snapshot(&[price(0, 12, 10.0)]),
-        None,
-        true,
-        local(0, 12, 30),
-        tz(),
-    );
-
-    assert_eq!(view.chart_label, "Wholesale price, ct/kWh");
-    assert_eq!(view.current.value, "10.0 ct/kWh");
-}
-
-#[test]
-fn price_panel_view_with_a_tariff_shows_the_all_in_price() {
-    let tariff = tariff();
-    let view = price_panel_view(
-        &snapshot(&[price(0, 12, 10.0)]),
-        Some(&tariff),
-        true,
-        local(0, 12, 30),
-        tz(),
-    );
-
-    assert_eq!(view.chart_label, "All-in import price incl. VAT, ct/kWh");
-    // (10 + 2 + 10) × 1.21
-    assert_eq!(view.current.value, "26.6 ct/kWh");
-}
-
-#[test]
-fn price_panel_view_marks_only_the_current_interval() {
-    let points = [price(0, 11, 5.0), price(0, 12, 6.0), price(0, 13, 7.0)];
-    let view = price_panel_view(&snapshot(&points), None, true, local(0, 12, 0), tz());
-
-    let current: Vec<_> = view.days[0].bars.iter().map(|bar| bar.current).collect();
-    assert_eq!(
-        current,
-        [false, true, false],
-        "12:00 starts the noon interval"
-    );
-}
-
-#[test]
-fn price_panel_view_reads_a_gap_as_no_current_price() {
-    let view = price_panel_view(
-        &snapshot(&[price(0, 10, 5.0)]),
-        None,
-        true,
-        local(0, 12, 0),
-        tz(),
-    );
-
-    assert_eq!(view.current.value, "—");
-    assert!(view.days[0].bars.iter().all(|bar| !bar.current));
-}
-
-#[test]
-fn price_panel_view_draws_negative_prices_below_the_zero_line() {
-    let points = [price(0, 12, 10.0), price(0, 13, -5.0), price(1, 12, 20.0)];
-    let view = price_panel_view(&snapshot(&points), None, true, local(0, 9, 0), tz());
-
-    let today = &view.days[0];
-    let (positive, negative) = (today.bars[0], today.bars[1]);
-    assert!(!positive.negative);
-    assert!((positive.y + positive.height - today.zero_y).abs() < 1e-9);
-    assert!(negative.negative);
-    assert_eq!(negative.y, today.zero_y, "hangs from the zero line");
-    assert!(negative.height > 0.0);
-    assert_eq!(
-        today.zero_y, view.days[1].zero_y,
-        "both days share one scale"
-    );
-    assert!(
-        view.days[1].bars[0].height > positive.height,
-        "tomorrow's 20 ct towers over today's 10 ct"
-    );
-
-    assert_eq!(view.today_min.value, "−5.0 ct/kWh");
-    assert_eq!(view.today_max.value, "10.0 ct/kWh", "tomorrow is not today");
-}
-
-#[test]
-fn the_price_panel_renders_a_bar_per_interval_and_marks_the_current_one() {
+            wholesale: crate::units::CentsPerKwh(cents),
+        });
+    }
     let mut s = state(vec![]);
-    s.prices = snapshot(&[price(0, 12, 10.0), price(0, 13, -2.0)]);
-    s.as_of = local(0, 12, 30);
+    s.price_feed = true;
+    s.prices = crate::prices::PriceSnapshot {
+        points: series,
+        as_of: Some(at(0)),
+    };
     let html = layout::price_panel_inner(&dashboard_view(&s, tz())).into_string();
 
-    assert_eq!(html.matches("<rect class=\"price-panel__bar").count(), 2);
-    assert!(html.contains("price-panel__bar price-panel__bar--current"));
-    assert!(html.contains("price-panel__bar price-panel__bar--negative"));
-    assert!(html.contains("price-panel__zero"));
-    assert!(html.contains("Wholesale price, ct/kWh"));
+    assert!(html.contains("price-panel__chart"));
+    assert!(html.contains("data-day=\"today\""));
 }
 
 #[test]

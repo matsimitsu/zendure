@@ -2,15 +2,11 @@
 //! structs. Newtypes mostly stop here: a template renders strings, never a
 //! `Watts`, and a `Soc` only where it also places something by it.
 
-use chrono::NaiveDate;
-
-use crate::config::DynamicTariff;
+use crate::clock::local_date;
 use crate::device::PackStatus;
 use crate::models::ControlMode;
-use crate::prices::{PricePoint, PriceSeries, PriceSnapshot};
 use crate::units::{
-    CentsPerKwh, Elapsed, KiloWattHours, Percent, Soc, SolarForecastPoint, SolarPower, Timestamp,
-    Watts,
+    Elapsed, KiloWattHours, Percent, Soc, SolarForecastPoint, SolarPower, Timestamp, Watts,
 };
 
 use super::axis::{AxisTick, day_axis};
@@ -18,6 +14,7 @@ use super::detail::detail_body;
 use super::entity::Entity;
 use super::flows::{EnergyFlowsView, energy_flows_view};
 use super::line_chart::LineChartView;
+use super::prices::{PriceContext, PricePanelView, price_panel_view};
 use super::soc_bar::SocBarView;
 use super::state::{
     ActualSolarHistory, DashboardState, ForecastSnapshot, Plottable, SOLAR_BUCKET_MS,
@@ -76,6 +73,14 @@ pub fn detail_view(state: &DashboardState, entity: Entity, timezone: chrono_tz::
 pub struct MiniStatView {
     pub label: &'static str,
     pub value: String,
+    pub sub: Option<MiniStatSub>,
+}
+
+/// A third line under a mini stat's value, tinted by what it qualifies.
+pub struct MiniStatSub {
+    pub text: String,
+    /// BEM modifier: "cheap" | "expensive".
+    pub tone: &'static str,
 }
 
 pub struct BatteryPanelView {
@@ -120,41 +125,6 @@ pub struct ForecastPanelView {
     /// subpaths where a slot has no recorded sample.
     pub line_path: String,
     pub axis: Vec<AxisTick>,
-}
-
-/// The price panel's contents: one bar chart per local day the poller has
-/// prices for (today, and tomorrow once published), on one shared scale.
-pub struct PricePanelView {
-    pub has_data: bool,
-    /// When the prices were fetched, or the empty state's text.
-    pub as_of: String,
-    /// Says whether the bars are the all-in import price or wholesale.
-    pub chart_label: &'static str,
-    pub current: MiniStatView,
-    pub today_min: MiniStatView,
-    pub today_max: MiniStatView,
-    pub days: Vec<PriceDayView>,
-}
-
-pub struct PriceDayView {
-    pub label: &'static str,
-    pub bars: Vec<PriceBarView>,
-    /// The zero line's `y` within the `1000x110` viewBox: bars rise above it
-    /// and negative prices hang below it.
-    pub zero_y: f64,
-    pub axis: Vec<AxisTick>,
-}
-
-/// One price interval, in viewBox units.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PriceBarView {
-    pub x: f64,
-    pub width: f64,
-    pub y: f64,
-    pub height: f64,
-    pub negative: bool,
-    /// The interval `now` falls in.
-    pub current: bool,
 }
 
 pub struct DecisionLogRowView {
@@ -562,188 +532,6 @@ fn forecast_panel_view(
     }
 }
 
-// --- Price panel: a bar per price interval, today and tomorrow --------------
-
-pub(super) const PRICE_CHART_WIDTH: f64 = 1000.0;
-pub(super) const PRICE_CHART_HEIGHT: f64 = 110.0;
-const PRICE_CHART_MARGIN: f64 = 4.0;
-/// The gap between neighbouring bars, in viewBox units.
-const PRICE_BAR_GAP: f64 = 1.0;
-
-/// The price a consumer is shown: the all-in import price under a dynamic
-/// contract, the bare wholesale price without one.
-fn shown_price(point: &PricePoint, tariff: Option<&DynamicTariff>) -> CentsPerKwh {
-    tariff.map_or(point.wholesale, |tariff| {
-        tariff.import_price(point.wholesale)
-    })
-}
-
-/// `23.4 ct/kWh`, with the typographic minus a negative price wears.
-pub(super) fn format_price(price: CentsPerKwh) -> String {
-    let shown = (price.0 * 10.0).round() / 10.0;
-    format!(
-        "{}{:.1} ct/kWh",
-        SignStyle::Negative.sign(shown < 0.0),
-        shown.abs()
-    )
-}
-
-/// Each local day's intervals with the price shown for them, keyed by the
-/// date their interval starts on. Only today and tomorrow are kept.
-fn prices_by_day(
-    prices: &PriceSeries,
-    tariff: Option<&DynamicTariff>,
-    today: NaiveDate,
-    timezone: chrono_tz::Tz,
-) -> [Vec<(PricePoint, CentsPerKwh)>; 2] {
-    let tomorrow = today.succ_opt();
-    let mut days: [Vec<_>; 2] = [Vec::new(), Vec::new()];
-    for point in prices.iter() {
-        let date = crate::clock::local_date(point.from, timezone);
-        let slot = if date == Some(today) {
-            0
-        } else if date.is_some() && date == tomorrow {
-            1
-        } else {
-            continue;
-        };
-        days[slot].push((*point, shown_price(point, tariff)));
-    }
-    days
-}
-
-/// The chart spans one 24-hour wall-clock day, like `day_axis` beneath it.
-const PRICE_CHART_DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
-
-/// How far through its local wall-clock day `at` falls, so a bar lines up
-/// with the hour tick it is labelled by. On a DST day the repeated hour's two
-/// bars overlap and the skipped hour stays empty: the axis has one slot per
-/// clock hour, not per elapsed hour.
-fn wall_clock_fraction(at: Timestamp, timezone: chrono_tz::Tz) -> f64 {
-    use chrono::Timelike;
-    chrono::DateTime::from_timestamp_millis(at.as_millis()).map_or(0.0, |utc| {
-        f64::from(utc.with_timezone(&timezone).num_seconds_from_midnight())
-            / PRICE_CHART_DAY.as_secs_f64()
-    })
-}
-
-/// The bars of one local day on a shared scale: `top` is the highest price
-/// the chart has to fit (at least zero), `bottom` the lowest (at most zero).
-fn price_bars(
-    points: &[(PricePoint, CentsPerKwh)],
-    (bottom, top): (CentsPerKwh, CentsPerKwh),
-    now: Timestamp,
-    timezone: chrono_tz::Tz,
-) -> (Vec<PriceBarView>, f64) {
-    let plot_height = PRICE_CHART_HEIGHT - 2.0 * PRICE_CHART_MARGIN;
-    let per_cent = plot_height / (top.0 - bottom.0).max(f64::EPSILON);
-    let zero_y = PRICE_CHART_MARGIN + top.0 * per_cent;
-
-    let bars = points
-        .iter()
-        .map(|(point, price)| {
-            let x = wall_clock_fraction(point.from, timezone) * PRICE_CHART_WIDTH;
-            let span = (point.until - point.from).as_secs_f64() / PRICE_CHART_DAY.as_secs_f64();
-            let end = (x + span * PRICE_CHART_WIDTH).min(PRICE_CHART_WIDTH);
-            let height = price.0.abs() * per_cent;
-            let negative = price.0 < 0.0;
-            PriceBarView {
-                x,
-                width: (end - x - PRICE_BAR_GAP).max(PRICE_BAR_GAP),
-                y: if negative { zero_y } else { zero_y - height },
-                height,
-                negative,
-                current: point.from <= now && now < point.until,
-            }
-        })
-        .collect();
-    (bars, zero_y)
-}
-
-fn price_panel_view(
-    prices: &PriceSnapshot,
-    tariff: Option<&DynamicTariff>,
-    configured: bool,
-    now: Timestamp,
-    timezone: chrono_tz::Tz,
-) -> PricePanelView {
-    let chart_label = if tariff.is_some() {
-        "All-in import price incl. VAT, ct/kWh"
-    } else {
-        "Wholesale price, ct/kWh"
-    };
-    let days = crate::clock::local_date(now, timezone)
-        .map(|today| prices_by_day(&prices.points, tariff, today, timezone));
-    let Some(days) = days.filter(|days| days.iter().any(|day| !day.is_empty())) else {
-        return PricePanelView {
-            has_data: false,
-            as_of: if configured {
-                "Waiting for prices…"
-            } else {
-                "No prices configured — add [prices] to config.toml"
-            }
-            .to_string(),
-            chart_label,
-            current: MiniStatView {
-                label: "Now",
-                value: MISSING.to_string(),
-            },
-            today_min: MiniStatView {
-                label: "Today min",
-                value: MISSING.to_string(),
-            },
-            today_max: MiniStatView {
-                label: "Today max",
-                value: MISSING.to_string(),
-            },
-            days: Vec::new(),
-        };
-    };
-
-    let shown = || days.iter().flatten().map(|(_, price)| *price);
-    let top = shown().fold(CentsPerKwh(0.0), |a, b| if b > a { b } else { a });
-    let bottom = shown().fold(CentsPerKwh(0.0), |a, b| if b < a { b } else { a });
-    let today_prices = || days[0].iter().map(|(_, price)| *price);
-    let today_min = today_prices().reduce(|a, b| if b < a { b } else { a });
-    let today_max = today_prices().reduce(|a, b| if b > a { b } else { a });
-    let current = prices
-        .points
-        .at(now)
-        .map(|point| shown_price(point, tariff));
-    let stat = |label, price: Option<CentsPerKwh>| MiniStatView {
-        label,
-        value: price.map_or_else(|| MISSING.to_string(), format_price),
-    };
-
-    let day_views = ["Today", "Tomorrow"]
-        .into_iter()
-        .zip(days.iter())
-        .filter(|(_, points)| !points.is_empty())
-        .map(|(label, points)| {
-            let (bars, zero_y) = price_bars(points, (bottom, top), now, timezone);
-            PriceDayView {
-                label,
-                bars,
-                zero_y,
-                axis: day_axis(),
-            }
-        })
-        .collect();
-
-    PricePanelView {
-        has_data: true,
-        as_of: prices
-            .as_of
-            .map(|at| format!("Prices last fetched {}", format_time(at, timezone)))
-            .unwrap_or_else(|| "Price fetch pending".to_string()),
-        chart_label,
-        current: stat("Now", current),
-        today_min: stat("Today min", today_min),
-        today_max: stat("Today max", today_max),
-        days: day_views,
-    }
-}
-
 /// Everything the full page and every SSE fragment render from.
 pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> DashboardView {
     let world = &state.engine.world;
@@ -789,6 +577,7 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
                     "{} W",
                     format_watts(battery.current_power.into_watts(), SignStyle::Explicit)
                 ),
+                sub: None,
             },
             usable_energy: MiniStatView {
                 label: "Usable energy",
@@ -797,14 +586,17 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
                     energy_string(state.usable_energy),
                     energy_string(state.usable_max())
                 ),
+                sub: None,
             },
             capacity: MiniStatView {
                 label: "Capacity",
                 value: energy_string(state.pack_capacity),
+                sub: None,
             },
             round_trip_efficiency: MiniStatView {
                 label: "Round-trip eff.",
                 value: efficiency_string(state.rte_percent),
+                sub: None,
             },
             packs: state
                 .packs
@@ -865,9 +657,12 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
         decision_log,
         forecast: forecast_panel_view(&state.forecast, &state.actual_solar, state.as_of, timezone),
         prices: price_panel_view(
-            &state.prices,
-            state.tariff.as_ref(),
-            state.price_feed,
+            local_date(state.as_of, timezone).unwrap_or_default(),
+            &PriceContext {
+                snapshot: &state.prices,
+                tariff: state.tariff.as_ref(),
+                configured: state.price_feed,
+            },
             state.as_of,
             timezone,
         ),

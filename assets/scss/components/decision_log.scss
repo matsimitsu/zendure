@@ -38,12 +38,7 @@
   }
 
   &__badge {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    font-weight: var(--weight-semibold);
-    padding: var(--space-1) var(--space-2);
-    border-radius: var(--radius-sm);
-    width: fit-content;
+    @include pill;
 
     &--charge {
       background: var(--color-accent-bg);

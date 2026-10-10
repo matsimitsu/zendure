@@ -82,7 +82,11 @@ pub(crate) fn average<T: Averaged>(
 }
 
 fn stat(label: &'static str, value: String) -> MiniStatView {
-    MiniStatView { label, value }
+    MiniStatView {
+        label,
+        value,
+        sub: None,
+    }
 }
 
 fn watts_or_missing(watts: Option<Watts>) -> String {

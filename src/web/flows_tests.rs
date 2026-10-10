@@ -3,6 +3,8 @@
 
 use super::*;
 
+use chrono::TimeZone;
+
 use crate::fixtures::journey::{battery_event, interval_ring, meter_event};
 use crate::fixtures::utc;
 use crate::units::{BatteryPower, Soc};
