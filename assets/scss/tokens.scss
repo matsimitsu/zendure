@@ -113,6 +113,7 @@
   --width-border: 1px;
   --stroke-rule: 1;
   --stroke-now-line: 1.5;
+  --stroke-series: 2;
 
   // Elevation
   --shadow-modal: 0 24px 64px oklch(0 0 0 / 0.5);
@@ -143,7 +144,11 @@
   --size-chart-day: 160px;
   --size-readout: 240px;
   --size-readout-value: 4ch;
+  // One of a pair of side-by-side readout figures, e.g. `1,410 W`.
+  --size-readout-figure: 128px;
   --size-swatch: 10px;
+  // A line series' legend swatch: as wide as a swatch, as thick as its line.
+  --size-swatch-line: 2px;
   --size-day-label: 118px;
   --space-modal-top: 56px;
 

@@ -642,7 +642,11 @@ configured — one bar per half-hour of the local day (Solcast's own
 resolution; 46 or 50 on a DST change) for the forecast, a line for today's
 actual measured production drawn over the same axis, so the two are directly
 comparable as the day unfolds. The line is each half-hour's mean power, read
-from the same 15-minute averages as the flows chart, so a restart keeps it.
+from the same 15-minute averages as the flows chart, so a restart keeps it,
+and it stops at the last finished half-hour. A readout above the chart shows
+the current half-hour's forecast and actual; beside it, *So far* compares
+today's measured production with the forecast for the same half-hours, and
+*Still expected* sums the forecast from now to the last sunny half-hour.
 `kind = "solcast"` fetches 48 hours of two Solcast rooftop forecasts
 (east/west-facing panels on one array) and sums them; Solcast's free tier caps usage at 10 requests/day
 account-wide, so by default the poller spends exactly 5 requests/site at

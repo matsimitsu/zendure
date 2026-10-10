@@ -76,7 +76,10 @@ pub fn page(view: &DashboardView) -> Markup {
                     div id="decision-log" sse-swap="decision-log" {
                         (decision_log_inner(view))
                     }
-                    div id="forecast-panel" sse-swap="forecast-panel" {
+                    // A persistent host like `<price-panel>`.
+                    forecast-panel id="forecast-panel" class="forecast-panel" sse-swap="forecast-panel"
+                        data-day=[view.forecast.data_day()]
+                        data-live=(view.forecast.data_live()) {
                         (forecast_panel_inner(view))
                     }
                     // A persistent host like `<energy-flows>`: the readout

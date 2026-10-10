@@ -281,7 +281,7 @@ fn repeated(at: &DateTime<Tz>, tz: Tz) -> bool {
 /// the repeated hour reads `02:00–03:00 CEST` then `02:00–03:00 CET` rather
 /// than seeming to end where it began. A range across the change names both
 /// offsets, so a 3-hour block over the repeated hour never reads as 2 hours.
-fn range_label(start: Timestamp, end: Timestamp, day_end: Timestamp, tz: Tz) -> String {
+pub(super) fn range_label(start: Timestamp, end: Timestamp, day_end: Timestamp, tz: Tz) -> String {
     let local = |at: Timestamp| tz.timestamp_millis_opt(at.as_millis()).single();
     let (Some(from), Some(to)) = (local(start), local(end)) else {
         return MISSING.to_string();
@@ -482,7 +482,7 @@ fn windows(day: &PricedDay) -> Option<[MiniStatView; 2]> {
         value: block_range(day, block),
         sub: Some(MiniStatSub {
             text: format!("{} ct avg", format_cents(block.mean)),
-            tone,
+            tone: Some(tone),
         }),
     };
     let (cheap_label, pricey_label) = if day.is_today() {

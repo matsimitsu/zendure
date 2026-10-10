@@ -20,8 +20,10 @@
   color: var(--color-text-primary);
 }
 
-// An optional third line qualifying the value, tinted by what it qualifies.
+// An optional third line qualifying the value, tinted by what it qualifies,
+// and neutral when it qualifies nothing in particular.
 .mini-stat__sub {
+  color: var(--color-text-muted);
   font-family: var(--font-mono);
   font-size: var(--text-sm);
 

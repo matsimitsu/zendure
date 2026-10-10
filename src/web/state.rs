@@ -208,6 +208,9 @@ pub struct DashboardState {
     /// Whether `[prices]` is configured, so an empty price panel can tell
     /// "not set up" from "not fetched yet".
     pub price_feed: bool,
+    /// Whether `[prediction]` is configured, so an empty forecast panel can
+    /// tell "not set up" from "not fetched yet".
+    pub forecast_feed: bool,
     /// The car's last-known state of charge and when it was read — see
     /// `crate::car_battery`. `None` until `[car_battery]` is configured and
     /// its first successful poll lands; updated only by `car_soc_tick`, on
@@ -249,6 +252,7 @@ impl DashboardState {
             prices: PriceSnapshot::default(),
             tariff: None,
             price_feed: false,
+            forecast_feed: false,
             car_soc: None,
             as_of,
         };
@@ -268,6 +272,11 @@ impl DashboardState {
     pub fn with_prices(mut self, prices: Option<&PricesConfig>) -> Self {
         self.price_feed = prices.is_some();
         self.tariff = prices.and_then(|prices| prices.dynamic);
+        self
+    }
+
+    pub fn with_forecast(mut self, configured: bool) -> Self {
+        self.forecast_feed = configured;
         self
     }
 
