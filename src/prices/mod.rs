@@ -29,6 +29,7 @@ use crate::web::{DashboardStateSender, PriceSnapshot};
 
 pub mod energyzero;
 pub mod simulated;
+pub mod tiers;
 
 #[cfg(test)]
 #[path = "mod_tests.rs"]
