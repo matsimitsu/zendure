@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::units::{BatteryPower, GridPower, PowerCap};
+use crate::units::{BatteryPower, GridPower, Percent, PowerCap};
 use crate::world::DeviceId;
 
 /// 2026-09-13T10:00:00Z, whose local day-of-year in Amsterdam is 256.
@@ -56,7 +56,7 @@ fn assert_wh(actual: WattHours, expected: f64) {
 /// Watts times hours: 1 kW held across two 30 s steps is 1000 * (60/3600) Wh.
 #[test]
 fn constant_power_integrates_to_energy() {
-    let days = daily(&[meter(0, 1000.0), meter(30, 1000.0), meter(60, 1000.0)]);
+    let days = unpriced(&[meter(0, 1000.0), meter(30, 1000.0), meter(60, 1000.0)]);
 
     assert_eq!(days.len(), 1);
     assert_wh(days[0].import, 1000.0 * 60.0 / 3600.0);
@@ -68,7 +68,7 @@ fn constant_power_integrates_to_energy() {
 /// both run: a reading is one or the other.
 #[test]
 fn export_is_counted_separately_from_import() {
-    let days = daily(&[meter(0, -600.0), meter(30, -600.0)]);
+    let days = unpriced(&[meter(0, -600.0), meter(30, -600.0)]);
 
     assert_wh(days[0].export, 600.0 * 30.0 / 3600.0);
     assert_eq!(days[0].import, WattHours::ZERO);
@@ -80,7 +80,7 @@ fn export_is_counted_separately_from_import() {
 #[test]
 fn a_gap_is_skipped_rather_than_integrated_across() {
     let hour = 3600;
-    let days = daily(&[
+    let days = unpriced(&[
         meter(0, 1000.0),
         meter(30, 1000.0),
         // Nothing for an hour, then the same power again.
@@ -102,7 +102,7 @@ fn a_gap_is_skipped_rather_than_integrated_across() {
 /// subtract energy from a day.
 #[test]
 fn a_backwards_step_contributes_nothing() {
-    let days = daily(&[meter(60, 1000.0), meter(0, 1000.0)]);
+    let days = unpriced(&[meter(60, 1000.0), meter(0, 1000.0)]);
 
     assert_eq!(days[0].import, WattHours::ZERO);
     assert_eq!(days[0].covered, Duration::ZERO);
@@ -113,7 +113,7 @@ fn a_backwards_step_contributes_nothing() {
 /// unstored, however much of it there is.
 #[test]
 fn export_while_charging_is_not_unstored() {
-    let days = daily(&[battery(0, -500, 50), meter(0, -900.0), meter(30, -900.0)]);
+    let days = unpriced(&[battery(0, -500, 50), meter(0, -900.0), meter(30, -900.0)]);
 
     assert_wh(days[0].export, 900.0 * 30.0 / 3600.0);
     assert_eq!(days[0].unstored_export, WattHours::ZERO);
@@ -121,7 +121,7 @@ fn export_while_charging_is_not_unstored() {
 
 #[test]
 fn export_while_idle_is_unstored() {
-    let days = daily(&[battery(0, 0, 80), meter(0, -900.0), meter(30, -900.0)]);
+    let days = unpriced(&[battery(0, 0, 80), meter(0, -900.0), meter(30, -900.0)]);
 
     assert_wh(days[0].unstored_export, 900.0 * 30.0 / 3600.0);
 }
@@ -131,7 +131,7 @@ fn export_while_idle_is_unstored() {
 /// battery as an idle one.
 #[test]
 fn readings_before_the_first_poll_contribute_no_battery_figures() {
-    let days = daily(&[meter(0, -900.0), meter(30, -900.0)]);
+    let days = unpriced(&[meter(0, -900.0), meter(30, -900.0)]);
 
     assert_wh(days[0].export, 900.0 * 30.0 / 3600.0);
     assert_eq!(days[0].unstored_export, WattHours::ZERO);
@@ -144,7 +144,7 @@ fn readings_before_the_first_poll_contribute_no_battery_figures() {
 /// already supplies 800 leaves 700 above an 800 W cap.
 #[test]
 fn above_cap_measures_underlying_demand_against_the_reported_limit() {
-    let days = daily(&[
+    let days = unpriced(&[
         battery(0, 800, 50),
         // Meter shows 700 W still coming from the grid; underlying demand is
         // 700 + 800 = 1500 W, which is 700 W above the 800 W cap.
@@ -157,7 +157,7 @@ fn above_cap_measures_underlying_demand_against_the_reported_limit() {
 
 #[test]
 fn demand_within_the_cap_is_not_counted_above_it() {
-    let days = daily(&[battery(0, 300, 50), meter(0, 100.0), meter(30, 100.0)]);
+    let days = unpriced(&[battery(0, 300, 50), meter(0, 100.0), meter(30, 100.0)]);
 
     assert_eq!(days[0].above_cap, WattHours::ZERO);
 }
@@ -168,7 +168,7 @@ fn demand_within_the_cap_is_not_counted_above_it() {
 /// discharge ramps 0 → 600.
 #[test]
 fn charge_and_discharge_are_integrated_from_the_polled_flow() {
-    let days = daily(&[
+    let days = unpriced(&[
         battery(0, -1200, 40),
         meter(0, 0.0),
         meter(30, 0.0),
@@ -183,7 +183,7 @@ fn charge_and_discharge_are_integrated_from_the_polled_flow() {
 
 #[test]
 fn soc_range_spans_what_was_observed() {
-    let days = daily(&[
+    let days = unpriced(&[
         battery(0, 0, 40),
         meter(0, 0.0),
         battery(30, 0, 80),
@@ -198,7 +198,7 @@ fn soc_range_spans_what_was_observed() {
 
 #[test]
 fn phases_are_integrated_independently() {
-    let days = daily(&[
+    let days = unpriced(&[
         meter_at(0, ORDINAL, 0.0, [-900.0, 500.0, 400.0]),
         meter_at(30, ORDINAL, 0.0, [-900.0, 500.0, 400.0]),
     ]);
@@ -212,7 +212,7 @@ fn phases_are_integrated_independently() {
 
 #[test]
 fn each_local_day_gets_its_own_row() {
-    let days = daily(&[
+    let days = unpriced(&[
         meter_at(0, ORDINAL, 1000.0, [0.0; 3]),
         meter_at(30, ORDINAL, 1000.0, [0.0; 3]),
         meter_at(86_400, ORDINAL + 1, 1000.0, [0.0; 3]),
@@ -245,18 +245,204 @@ fn a_local_new_year_is_dated_in_the_year_it_is_local_to() {
 
 #[test]
 fn an_empty_range_renders_as_such() {
-    assert!(render(&[]).contains("no meter readings"));
+    assert!(render(&[], &skipped()).contains("no meter readings"));
 }
 
 /// The rendered table is what a human actually reads, so the numbers have to
 /// survive the trip through it.
 #[test]
 fn the_table_carries_the_figures_it_computed() {
-    let days = daily(&[battery(0, 0, 80), meter(0, -3600.0), meter(30, -3600.0)]);
-    let table = render(&days);
+    let days = unpriced(&[battery(0, 0, 80), meter(0, -3600.0), meter(30, -3600.0)]);
+    let table = render(&days, &skipped());
 
     assert!(table.contains("2026-09-13"), "{table}");
     // 3600 W for 30 s is 30 Wh, i.e. 0.03 kWh, in both export and unstored.
     assert!(table.contains("0.03"), "{table}");
     assert!(table.contains("80-80%"), "{table}");
+}
+
+fn unpriced(events: &[Event]) -> Vec<DayTotals> {
+    daily(events, &skipped())
+}
+
+fn skipped() -> Pricing {
+    Pricing::Skipped("no tariffs in this test".to_string())
+}
+
+fn tariffs() -> Tariffs {
+    Tariffs {
+        dynamic: DynamicTariff {
+            markup: CentsPerKwh(2.0),
+            energy_tax: CentsPerKwh(8.0),
+            export_markup: CentsPerKwh(1.0),
+            vat: Percent(21.0),
+        },
+        fixed: FixedTariff {
+            import: CentsPerKwh(30.0),
+            export: CentsPerKwh(5.0),
+        },
+    }
+}
+
+fn point(wholesale: f64, from_secs: i64, until_secs: i64) -> PricePoint {
+    PricePoint {
+        from: Timestamp::from_millis(BASE_MS + from_secs * 1000),
+        until: Timestamp::from_millis(BASE_MS + until_secs * 1000),
+        wholesale: CentsPerKwh(wholesale),
+    }
+}
+
+fn priced(points: &[PricePoint]) -> Pricing {
+    let mut series = PriceSeries::default();
+    points.iter().for_each(|p| series.insert(*p));
+    Pricing::Priced {
+        series,
+        tariffs: tariffs(),
+    }
+}
+
+/// 120 kW for 30 s is exactly 1 kWh, so every rate below reads straight off
+/// as cents.
+const ONE_KWH_W: f64 = 120_000.0;
+
+/// Import at a 10 ct wholesale: dynamic is (10 + 2 + 8) × 1.21 = 24.2 ct,
+/// fixed is the flat 30 ct.
+#[test]
+fn two_samples_are_priced_under_both_contracts() {
+    let pricing = priced(&[point(10.0, 0, 3600)]);
+    let days = daily(&[meter(0, ONE_KWH_W), meter(30, ONE_KWH_W)], &pricing);
+
+    let costs = days[0].costs.expect("priced run carries costs").rounded();
+    assert_eq!(costs.dynamic_import, Cents(24));
+    assert_eq!(costs.fixed_import, Cents(30));
+    assert_eq!(costs.dynamic_export, Cents::ZERO);
+    assert_eq!(costs.delta(), Cents(-6), "dynamic was 6 ct cheaper");
+}
+
+/// Export at a 10 ct wholesale is credited 10 − 1 = 9 ct, VAT-free, against
+/// the fixed contract's 5 ct.
+#[test]
+fn export_is_credited_at_wholesale_less_the_export_markup() {
+    let pricing = priced(&[point(10.0, 0, 3600)]);
+    let days = daily(&[meter(0, -ONE_KWH_W), meter(30, -ONE_KWH_W)], &pricing);
+
+    let costs = days[0].costs.unwrap().rounded();
+    assert_eq!(costs.dynamic_export, Cents(9));
+    assert_eq!(costs.fixed_export, Cents(5));
+    assert_eq!(costs.dynamic_net(), Cents(-9));
+    assert_eq!(costs.fixed_net(), Cents(-5));
+    assert_eq!(costs.delta(), Cents(-4));
+}
+
+/// Below zero, importing earns and exporting costs: (−50 + 2 + 8) × 1.21 is
+/// −48.4 ct per kWh taken, and −50 − 1 is −51 ct per kWh given.
+#[test]
+fn a_negative_price_pays_for_import_and_charges_for_export() {
+    let pricing = priced(&[point(-50.0, 0, 3600)]);
+
+    let import = daily(&[meter(0, ONE_KWH_W), meter(30, ONE_KWH_W)], &pricing);
+    assert_eq!(
+        import[0].costs.unwrap().rounded().dynamic_import,
+        Cents(-48)
+    );
+
+    let export = daily(&[meter(0, -ONE_KWH_W), meter(30, -ONE_KWH_W)], &pricing);
+    let costs = export[0].costs.unwrap().rounded();
+    assert_eq!(costs.dynamic_export, Cents(-51));
+    assert_eq!(costs.dynamic_net(), Cents(51), "exporting cost money");
+}
+
+/// An interval with no price is counted as unpriced and costed under neither
+/// contract, so both columns still describe the same energy.
+#[test]
+fn an_interval_without_a_price_is_left_out_of_both_contracts() {
+    // The price ends at 30 s, exclusive, so the second interval has none.
+    let pricing = priced(&[point(10.0, 0, 30)]);
+    let days = daily(
+        &[
+            meter(0, ONE_KWH_W),
+            meter(30, ONE_KWH_W),
+            meter(60, ONE_KWH_W),
+        ],
+        &pricing,
+    );
+
+    let costs = days[0].costs.unwrap();
+    assert_eq!(costs.priced, Duration::from_secs(30));
+    assert_eq!(costs.unpriced, Duration::from_secs(30));
+    assert!((costs.priced_share() - 0.5).abs() < 1e-9);
+    assert_eq!(costs.rounded().dynamic_import, Cents(24));
+    assert_eq!(costs.rounded().fixed_import, Cents(30));
+    // Energy is integrated regardless: only the costing is partial.
+    assert_wh(days[0].import, 2000.0);
+}
+
+#[test]
+fn without_tariffs_the_cost_table_is_skipped_with_a_note() {
+    let days = unpriced(&[meter(0, ONE_KWH_W), meter(30, ONE_KWH_W)]);
+    assert_eq!(days[0].costs, None);
+
+    let table = render(
+        &days,
+        &Pricing::Skipped("pass --config to compare tariffs".to_string()),
+    );
+    assert!(
+        table.contains("no cost table: pass --config to compare tariffs"),
+        "{table}"
+    );
+    assert!(!table.contains("dyn.import"), "{table}");
+}
+
+/// The period row sums the rounded days, so it agrees with them to the cent.
+#[test]
+fn the_cost_table_carries_each_day_and_the_period_total() {
+    let pricing = priced(&[point(10.0, 0, 3600), point(10.0, 86_400, 86_400 + 3600)]);
+    let days = daily(
+        &[
+            meter_at(0, ORDINAL, ONE_KWH_W, [0.0; 3]),
+            meter_at(30, ORDINAL, ONE_KWH_W, [0.0; 3]),
+            meter_at(86_400, ORDINAL + 1, ONE_KWH_W, [0.0; 3]),
+            meter_at(86_430, ORDINAL + 1, ONE_KWH_W, [0.0; 3]),
+        ],
+        &pricing,
+    );
+    let table = render(&days, &pricing);
+    println!("{table}");
+
+    assert!(table.contains("dyn.import"), "{table}");
+    let total = table
+        .lines()
+        .find(|l| l.starts_with("total"))
+        .expect("a period total row");
+    // Two days of 24 ct dynamic against 30 ct fixed.
+    assert!(total.contains("€0.48"), "{total}");
+    assert!(total.contains("€0.60"), "{total}");
+    assert!(total.contains("-€0.12"), "{total}");
+    assert!(table.contains("salderingsregeling"), "{table}");
+}
+
+/// A later fetch of the same interval is a revision and wins; a row that does
+/// not decode is counted, not fatal.
+#[test]
+fn price_rows_fold_newest_wins_and_count_what_does_not_decode() {
+    let row = |wholesale: f64| {
+        (
+            Timestamp::from_millis(0),
+            serde_json::to_string(&vec![point(wholesale, 0, 3600)]).unwrap(),
+        )
+    };
+    let rows = vec![
+        row(10.0),
+        (Timestamp::from_millis(0), "not json".to_string()),
+        row(12.0),
+    ];
+
+    let (series, undecodable) = price_series(&rows);
+    assert_eq!(undecodable, 1);
+    assert_eq!(
+        series
+            .at(Timestamp::from_millis(BASE_MS))
+            .map(|p| p.wholesale),
+        Some(CentsPerKwh(12.0))
+    );
 }

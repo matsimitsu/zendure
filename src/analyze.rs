@@ -6,9 +6,12 @@
 //! grid while the battery had nowhere to put it; how much demand sat above the
 //! inverter's ceiling) have to be re-integrated from the rows every time.
 //!
-//! Power in, energy out, and nothing else: no configuration, no clock, no
-//! network, the same hermeticity `replay` promises. What a reading *means*
-//! lives here; `journal::read` only hands over rows it could decode.
+//! Power in, energy out — and, when the caller hands over prices and both
+//! tariffs, what that energy would have cost under each contract. No clock, no
+//! network, the same hermeticity `replay` promises: prices come from the
+//! journal's own rows and the tariffs from the caller, never from here. What a
+//! reading *means* lives here; `journal::read` only hands over rows it could
+//! decode.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -17,8 +20,11 @@ use chrono::{DateTime, Datelike, NaiveDate};
 
 use crate::battery::BatteryState;
 use crate::clock::Clock;
+use crate::config::{DynamicTariff, FixedTariff};
 use crate::event::Event;
-use crate::units::{GridPower, Soc, Timestamp, WattHours, Watts};
+use crate::units::{
+    Cents, CentsPerKwh, Cost, GridPower, PricePoint, PriceSeries, Soc, Timestamp, WattHours, Watts,
+};
 use crate::world::{Measurement, MeterReading};
 
 /// Longer than this between meter readings is a gap, not a measurement.
@@ -134,10 +140,13 @@ pub struct DayTotals {
     pub soc_min: Option<Soc>,
     pub soc_max: Option<Soc>,
     pub phases: [PhaseTotals; 3],
+    /// `None` when the run was not priced at all, so a day with no cost table
+    /// cannot be mistaken for one that cost nothing.
+    pub costs: Option<DayCosts>,
 }
 
 impl DayTotals {
-    fn new(day: NaiveDate) -> Self {
+    fn new(day: NaiveDate, pricing: &Pricing) -> Self {
         DayTotals {
             day,
             covered: Duration::ZERO,
@@ -150,6 +159,7 @@ impl DayTotals {
             soc_min: None,
             soc_max: None,
             phases: [PhaseTotals::default(); 3],
+            costs: pricing.tariffs().map(|_| DayCosts::default()),
         }
     }
 
@@ -165,8 +175,139 @@ impl DayTotals {
     }
 }
 
+/// The `events` row kind the price poller journals a fetched batch under.
+pub const PRICE_KIND: &str = "energy_price";
+
+/// Both contracts being compared. Only both together make a comparison; one
+/// alone would be a price list, which the supplier already publishes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tariffs {
+    pub dynamic: DynamicTariff,
+    pub fixed: FixedTariff,
+}
+
+impl Tariffs {
+    /// What a dynamic contract charges per imported kWh: VAT applies to the
+    /// whole sum, surcharges included, as on the invoice.
+    fn dynamic_import(&self, point: &PricePoint) -> CentsPerKwh {
+        (point.wholesale + self.dynamic.markup + self.dynamic.energy_tax).with_vat(self.dynamic.vat)
+    }
+
+    /// What a dynamic contract credits per exported kWh. VAT-free: a household
+    /// is not a VAT-registered seller, so nothing is added on the way out.
+    fn dynamic_export(&self, point: &PricePoint) -> CentsPerKwh {
+        point.wholesale - self.dynamic.export_markup
+    }
+}
+
+/// Whether a run gets a cost table, and if not, the one line that says why.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pricing {
+    Priced {
+        series: PriceSeries,
+        tariffs: Tariffs,
+    },
+    Skipped(String),
+}
+
+impl Pricing {
+    fn tariffs(&self) -> Option<&Tariffs> {
+        match self {
+            Pricing::Priced { tariffs, .. } => Some(tariffs),
+            Pricing::Skipped(_) => None,
+        }
+    }
+}
+
+/// One local day's energy priced under both contracts. Kept as fractional
+/// [`Cost`]s and rounded to [`Cents`] only when read, once per day — one
+/// interval is worth a sliver of a cent, and rounding each would floor the
+/// day to nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct DayCosts {
+    /// Integrated time that had a price. Only this time is costed, under
+    /// either contract, so the two columns always cover the same energy.
+    pub priced: Duration,
+    /// Integrated time with no price in force — a feed outage, or a range
+    /// older than the backfill reached.
+    pub unpriced: Duration,
+    pub dynamic_import: Cost,
+    pub dynamic_export: Cost,
+    pub fixed_import: Cost,
+    pub fixed_export: Cost,
+}
+
+impl DayCosts {
+    /// Share of the integrated time that had a price, 0.0 when none was
+    /// integrated at all.
+    pub fn priced_share(&self) -> f64 {
+        share(self.priced, self.priced + self.unpriced)
+    }
+
+    pub fn rounded(&self) -> RoundedCosts {
+        RoundedCosts {
+            dynamic_import: self.dynamic_import.total(),
+            dynamic_export: self.dynamic_export.total(),
+            fixed_import: self.fixed_import.total(),
+            fixed_export: self.fixed_export.total(),
+        }
+    }
+}
+
+/// A day's costs as settled money. Summed across days for the period row, so
+/// the total is exactly the sum of the rows above it.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct RoundedCosts {
+    pub dynamic_import: Cents,
+    pub dynamic_export: Cents,
+    pub fixed_import: Cents,
+    pub fixed_export: Cents,
+}
+
+impl RoundedCosts {
+    /// Import paid less export credited: what the household is out of pocket.
+    pub fn dynamic_net(&self) -> Cents {
+        self.dynamic_import - self.dynamic_export
+    }
+
+    pub fn fixed_net(&self) -> Cents {
+        self.fixed_import - self.fixed_export
+    }
+
+    /// Negative when the dynamic contract would have been cheaper.
+    pub fn delta(&self) -> Cents {
+        self.dynamic_net() - self.fixed_net()
+    }
+
+    fn plus(self, other: RoundedCosts) -> RoundedCosts {
+        RoundedCosts {
+            dynamic_import: self.dynamic_import + other.dynamic_import,
+            dynamic_export: self.dynamic_export + other.dynamic_export,
+            fixed_import: self.fixed_import + other.fixed_import,
+            fixed_export: self.fixed_export + other.fixed_export,
+        }
+    }
+}
+
+/// Every journalled price batch folded into one series. Rows arrive in the
+/// order they were written, so a later fetch of the same interval — a revised
+/// day-ahead price — replaces the earlier one. A row that does not decode is
+/// counted and skipped rather than failing the run: one corrupt batch should
+/// cost its own hours, not the whole table.
+pub fn price_series(rows: &[(Timestamp, String)]) -> (PriceSeries, usize) {
+    let mut series = PriceSeries::default();
+    let mut undecodable = 0;
+    for (_, payload) in rows {
+        match serde_json::from_str::<Vec<PricePoint>>(payload) {
+            Ok(points) => points.into_iter().for_each(|p| series.insert(p)),
+            Err(_) => undecodable += 1,
+        }
+    }
+    (series, undecodable)
+}
+
 /// Fold a range of events into one entry per local day, oldest first.
-pub fn daily(events: &[Event]) -> Vec<DayTotals> {
+pub fn daily(events: &[Event], pricing: &Pricing) -> Vec<DayTotals> {
     let mut days: BTreeMap<NaiveDate, DayTotals> = BTreeMap::new();
     let mut battery: Option<BatteryState> = None;
     let mut previous: Option<Sample> = None;
@@ -191,14 +332,16 @@ pub fn daily(events: &[Event]) -> Vec<DayTotals> {
                 };
 
                 if let Some(previous) = previous.as_ref() {
-                    accumulate(&mut days, previous, &sample);
+                    accumulate(&mut days, pricing, previous, &sample);
                 }
 
                 // Entered on sight of a reading, not on a successful
                 // integration: a day whose intervals were all gaps still
                 // happened, and a row saying 0% coverage is the point. SoC goes
                 // the same way, since it is observed rather than integrated.
-                let totals = days.entry(day).or_insert_with(|| DayTotals::new(day));
+                let totals = days
+                    .entry(day)
+                    .or_insert_with(|| DayTotals::new(day, pricing));
                 if let Some(state) = sample.battery.as_ref() {
                     totals.observe_soc(state.soc);
                 }
@@ -217,18 +360,46 @@ pub fn daily(events: &[Event]) -> Vec<DayTotals> {
 /// spanning midnight is attributed whole to the day it started in: that
 /// misplaces at most one scan tick of energy, and splitting it would buy precision
 /// this is nowhere near accurate enough to carry.
-fn accumulate(days: &mut BTreeMap<NaiveDate, DayTotals>, previous: &Sample, current: &Sample) {
+fn accumulate(
+    days: &mut BTreeMap<NaiveDate, DayTotals>,
+    pricing: &Pricing,
+    previous: &Sample,
+    current: &Sample,
+) {
     let Some(dt) = previous.at.span_within(current.at, MAX_SAMPLE_GAP) else {
         return;
     };
 
     let day = days
         .entry(previous.day)
-        .or_insert_with(|| DayTotals::new(previous.day));
+        .or_insert_with(|| DayTotals::new(previous.day, pricing));
+
+    let import = WattHours::integrate(previous.import(), current.import(), dt);
+    let export = WattHours::integrate(previous.export(), current.export(), dt);
 
     day.covered += dt;
-    day.import = day.import + WattHours::integrate(previous.import(), current.import(), dt);
-    day.export = day.export + WattHours::integrate(previous.export(), current.export(), dt);
+    day.import = day.import + import;
+    day.export = day.export + export;
+
+    // Priced at the interval's start, the same end the day attribution uses: an
+    // interval straddling a price boundary is one scan tick at the old price,
+    // which is noise against a day's bill.
+    if let (Pricing::Priced { series, tariffs }, Some(costs)) = (pricing, day.costs.as_mut()) {
+        match series.at(previous.at) {
+            Some(point) => {
+                costs.priced += dt;
+                costs
+                    .dynamic_import
+                    .add(import, tariffs.dynamic_import(point));
+                costs
+                    .dynamic_export
+                    .add(export, tariffs.dynamic_export(point));
+                costs.fixed_import.add(import, tariffs.fixed.import);
+                costs.fixed_export.add(export, tariffs.fixed.export);
+            }
+            None => costs.unpriced += dt,
+        }
+    }
     day.unstored_export = day.unstored_export
         + WattHours::integrate(previous.unstored_export(), current.unstored_export(), dt);
     // Trapezoidal over polled data, so a poll that changes direction is blended
@@ -264,8 +435,8 @@ fn accumulate(days: &mut BTreeMap<NaiveDate, DayTotals>, previous: &Sample, curr
 /// the two disagree — 00:30 on 1 January in Amsterdam is still 31 December in
 /// UTC, so pairing ordinal 1 with the UTC year is off by one. Of the three
 /// years the ordinal could belong to, the real one is whichever lands nearest
-/// the UTC date; that needs no timezone, which is good, because `analyze` reads
-/// no configuration and so has none.
+/// the UTC date; that needs no timezone, which is good, because `analyze` runs
+/// without a configuration as often as with one.
 fn local_date(clock: &Clock) -> Option<NaiveDate> {
     let utc = DateTime::from_timestamp_millis(clock.now.as_millis())?.date_naive();
     let year = utc.year();
@@ -275,9 +446,10 @@ fn local_date(clock: &Clock) -> Option<NaiveDate> {
         .min_by_key(|date| (*date - utc).num_days().abs())
 }
 
-/// Both tables, ready to print. kWh throughout — the journal's watts are a
-/// detail of how this was measured, not of what it says.
-pub fn render(days: &[DayTotals]) -> String {
+/// The tables, ready to print. kWh throughout — the journal's watts are a
+/// detail of how this was measured, not of what it says — and euros for the
+/// cost table, which `pricing` either earns or explains the absence of.
+pub fn render(days: &[DayTotals], pricing: &Pricing) -> String {
     if days.is_empty() {
         return "no meter readings in that range\n".to_string();
     }
@@ -321,6 +493,11 @@ pub fn render(days: &[DayTotals]) -> String {
          discharge limit — what a second inverter would buy.\n",
     );
 
+    match pricing {
+        Pricing::Priced { .. } => render_costs(&mut out, days),
+        Pricing::Skipped(reason) => out.push_str(&format!("\nno cost table: {reason}\n")),
+    }
+
     let thin: Vec<&DayTotals> = days.iter().filter(|d| d.coverage() < 0.95).collect();
     if !thin.is_empty() {
         let names: Vec<String> = thin.iter().map(|d| d.day.to_string()).collect();
@@ -332,6 +509,65 @@ pub fn render(days: &[DayTotals]) -> String {
     }
 
     out
+}
+
+/// Dynamic against fixed, per day and for the whole period. The period row
+/// sums the already-rounded days, so it agrees with the column above it to the
+/// cent.
+fn render_costs(out: &mut String, days: &[DayTotals]) {
+    out.push_str(
+        "\nday          priced  dyn.import  dyn.export   dyn.net  fix.import  fix.export   fix.net         Δ\n",
+    );
+
+    let mut total = RoundedCosts::default();
+    let mut priced = Duration::ZERO;
+    let mut integrated = Duration::ZERO;
+    for day in days {
+        let Some(costs) = day.costs.as_ref() else {
+            continue;
+        };
+        let rounded = costs.rounded();
+        out.push_str(&cost_row(
+            &day.day.to_string(),
+            costs.priced_share(),
+            &rounded,
+        ));
+        total = total.plus(rounded);
+        priced += costs.priced;
+        integrated += costs.priced + costs.unpriced;
+    }
+    out.push_str(&cost_row("total     ", share(priced, integrated), &total));
+
+    out.push_str(
+        "\n`priced` is the share of measured time with a known price; only that time is \
+         costed, under both contracts.\nnet is import paid less export credited. Δ is \
+         dyn.net − fix.net: negative means dynamic was cheaper.\nIgnores net metering \
+         (salderingsregeling, ends 2027-01-01), so for 2026 this understates the fixed \
+         contract.\n",
+    );
+}
+
+fn cost_row(label: &str, priced: f64, costs: &RoundedCosts) -> String {
+    format!(
+        "{label}   {:>4.0}%  {:>10}  {:>10}  {:>8}  {:>10}  {:>10}  {:>8}  {:>8}\n",
+        priced * 100.0,
+        costs.dynamic_import.to_string(),
+        costs.dynamic_export.to_string(),
+        costs.dynamic_net().to_string(),
+        costs.fixed_import.to_string(),
+        costs.fixed_export.to_string(),
+        costs.fixed_net().to_string(),
+        costs.delta().to_string(),
+    )
+}
+
+/// `part` as a fraction of `whole`, 0.0 rather than NaN when `whole` is empty.
+fn share(part: Duration, whole: Duration) -> f64 {
+    if whole.is_zero() {
+        0.0
+    } else {
+        part.as_secs_f64() / whole.as_secs_f64()
+    }
 }
 
 fn kwh(wh: WattHours) -> f64 {

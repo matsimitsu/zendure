@@ -157,10 +157,11 @@ fn analyze_fails_on_missing_db_with_file_error() {
     );
 }
 
-/// `analyze` rejects `--config` too. `Invocation::Analyze` carries no config
-/// field, so this is structural rather than a check someone has to remember.
+/// `analyze --config` names the tariffs to price with, so a config that is not
+/// there fails the run rather than quietly dropping the cost table that was
+/// asked for.
 #[test]
-fn analyze_rejects_config_flag() {
+fn analyze_fails_on_a_missing_config_it_was_given() {
     let output = Command::new(offline_binary())
         .arg("analyze")
         .arg("--from")
@@ -168,13 +169,15 @@ fn analyze_rejects_config_flag() {
         .arg("--to")
         .arg("1")
         .arg("--config")
-        .arg("/tmp/x.toml")
+        .arg("/nonexistent/zendure.toml")
         .env_clear()
         .output()
         .expect("failed to run analyze");
 
     assert!(
         !output.status.success(),
-        "analyze --config should exit non-zero"
+        "analyze with a missing --config should exit non-zero"
     );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("/nonexistent/zendure.toml"), "{stderr}");
 }
