@@ -156,10 +156,13 @@ pub struct DayPrices {
 impl DayPrices {
     /// The wholesale price per local-hour slot, `None` for an hour the feed
     /// has not priced. This is the shape `tiers` takes.
-    // Consumed by the price panel (E4) and the day navigation (E5).
-    #[allow(dead_code)]
     pub fn slots(&self) -> &[Option<CentsPerKwh>] {
         &self.slots
+    }
+
+    /// Each slot's `[start, end)`, in the order of `slots`.
+    pub fn hours(&self) -> impl Iterator<Item = (Timestamp, Timestamp)> + '_ {
+        hour_starts(self.start, self.end).map(|at| (at, (at + Elapsed::HOUR).min(self.end)))
     }
 }
 
@@ -210,13 +213,17 @@ impl PriceSnapshot {
         self.as_of = Some(self.as_of.map_or(at, |prev| prev.max(at)));
     }
 
-    /// `date`'s local hours, `None` when none of them is priced.
-    // Consumed by the price panel (E4) and the day navigation (E5).
-    #[allow(dead_code)]
+    /// `date`'s local hours, `None` when none of them is priced. An hour is
+    /// the mean of the points starting in it, so a quarter-hourly feed reads
+    /// as its hourly average; a coarser point prices every hour it covers.
     pub fn prices_for(&self, date: NaiveDate, tz: Tz) -> Option<DayPrices> {
         let (start, end) = local_day_bounds(date, tz)?;
         let slots: Vec<Option<CentsPerKwh>> = hour_starts(start, end)
-            .map(|at| self.points.at(at).map(|p| p.wholesale))
+            .map(|at| {
+                let until = (at + Elapsed::HOUR).min(end);
+                let starting = self.points.starting_within(at, until).map(|p| p.wholesale);
+                CentsPerKwh::mean(starting).or_else(|| self.points.at(at).map(|p| p.wholesale))
+            })
             .collect();
         slots.iter().any(Option::is_some).then_some(DayPrices {
             date,
@@ -227,8 +234,6 @@ impl PriceSnapshot {
     }
 
     /// Whether every hour of the day after `today` is priced.
-    // Consumed by the price panel (E4).
-    #[allow(dead_code)]
     pub fn tomorrow_published(&self, today: NaiveDate, tz: Tz) -> bool {
         today
             .succ_opt()

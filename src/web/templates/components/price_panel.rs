@@ -12,12 +12,23 @@ use crate::web::templates::{axis, mini_stat, price_tier};
 /// across SSE swaps; everything here is re-rendered whole.
 pub fn render(view: &PricePanelView) -> Markup {
     match view {
+        // Only today is ever nav-less, so the marker the host mirrors still
+        // travels with the swap.
         PricePanelView::Empty(reason) => html! {
-            header class="price-panel__head" {
+            header class="price-panel__head" data-day="today" {
                 div class="price-panel__titles" {
                     h2 class="price-panel__title" { "Electricity prices" }
                     p class="price-panel__subtitle" { (reason.text()) }
                 }
+            }
+        },
+        PricePanelView::Unpriced(nav) => html! {
+            header class="price-panel__head" {
+                div class="price-panel__titles" {
+                    h2 class="price-panel__title" { "Electricity prices" }
+                    p class="price-panel__subtitle" { "No prices for this day" }
+                }
+                (day_nav_markup(nav))
             }
         },
         PricePanelView::Priced(day) => priced(day),

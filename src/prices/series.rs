@@ -39,6 +39,15 @@ impl PriceSeries {
         self.0.retain(|_, point| point.until > cutoff);
     }
 
+    /// The points starting in `[from, until)`, in order of `from`.
+    pub fn starting_within(
+        &self,
+        from: Timestamp,
+        until: Timestamp,
+    ) -> impl Iterator<Item = &PricePoint> {
+        self.0.range(from..until).map(|(_, point)| point)
+    }
+
     /// The point whose interval contains `ts`, `until` being exclusive so
     /// adjacent intervals never both match. `None` in a gap.
     pub fn at(&self, ts: Timestamp) -> Option<&PricePoint> {
