@@ -90,6 +90,13 @@ vat = 21.0
 import = 28.0
 export = 5.0
 
+[prediction]
+# A deterministic clear-sky curve (`src/prediction/simulated.rs`) rather than
+# Solcast, so the solar forecast panel has bars to draw, and a complete
+# tomorrow to step to, with no API key.
+kind = "simulated"
+state_path = "./local/prediction_state.json"
+
 [clock]
 timezone = "Europe/Amsterdam"
 
