@@ -940,6 +940,37 @@ impl CentsPerKwh {
     pub fn with_vat(self, vat: Percent) -> Self {
         CentsPerKwh(self.0 * (1.0 + vat.fraction()))
     }
+
+    pub fn min(self, other: Self) -> Self {
+        CentsPerKwh(self.0.min(other.0))
+    }
+
+    pub fn max(self, other: Self) -> Self {
+        CentsPerKwh(self.0.max(other.0))
+    }
+
+    pub fn abs(self) -> Self {
+        CentsPerKwh(self.0.abs())
+    }
+
+    /// `None` for an empty input, so a day with no prices has no average
+    /// rather than a NaN.
+    pub fn mean(prices: impl IntoIterator<Item = CentsPerKwh>) -> Option<Self> {
+        let (sum, n) = prices
+            .into_iter()
+            .fold((0.0, 0u32), |(sum, n), p| (sum + p.0, n + 1));
+        (n > 0).then(|| CentsPerKwh(sum / f64::from(n)))
+    }
+}
+
+/// One decimal, as the dashboard shows it. Values that round to zero print
+/// as `0.0`, never `-0.0`.
+impl fmt::Display for CentsPerKwh {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let tenths = (self.0 * 10.0).round();
+        let shown = if tenths == 0.0 { 0.0 } else { tenths / 10.0 };
+        write!(f, "{shown:.1}")
+    }
 }
 
 impl Add for CentsPerKwh {

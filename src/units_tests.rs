@@ -664,3 +664,20 @@ fn price_series_insert_replaces_same_from() {
     );
     assert!(series.at(Timestamp(170)).is_none());
 }
+
+#[test]
+fn cents_per_kwh_min_max_abs_mean() {
+    let (a, b) = (CentsPerKwh(-2.0), CentsPerKwh(3.0));
+    assert_eq!(a.min(b), a);
+    assert_eq!(a.max(b), b);
+    assert_eq!(a.abs(), CentsPerKwh(2.0));
+    assert_eq!(CentsPerKwh::mean([a, b]), Some(CentsPerKwh(0.5)));
+    assert_eq!(CentsPerKwh::mean([]), None);
+}
+
+#[test]
+fn cents_per_kwh_displays_one_decimal_without_negative_zero() {
+    assert_eq!(CentsPerKwh(13.14).to_string(), "13.1");
+    assert_eq!(CentsPerKwh(-2.55).to_string(), "-2.6");
+    assert_eq!(CentsPerKwh(-0.04).to_string(), "0.0");
+}
