@@ -125,13 +125,15 @@ fn plot(chart: &PriceChartView) -> Markup {
                     (rule("price-panel__grid", y))
                 }
                 // Behind the bars, so the hovered hour washes rather than veils.
-                @match chart.highlight {
-                    Some(span) => rect class="price-panel__highlight"
-                        x=(format!("{:.2}", span.x)) y="0"
-                        width=(format!("{:.2}", span.width)) height=(height) {},
-                    None => rect class="price-panel__highlight"
-                        x="0" y="0" width="0" height=(height) {},
-                }
+                // The data-default pair is where the script returns it when
+                // nothing is hovered, so the current hour stays marked.
+                @let (x, width) = chart.highlight.map_or(
+                    ("0".to_owned(), "0".to_owned()),
+                    |span| (format!("{:.2}", span.x), format!("{:.2}", span.width)),
+                );
+                rect class="price-panel__highlight"
+                    x=(x) y="0" width=(width) height=(height)
+                    data-default-x=(x) data-default-width=(width) {}
                 @for bar in &chart.bars {
                     rect class=(bar_class(bar))
                         x=(format!("{:.2}", bar.span.x))

@@ -290,6 +290,21 @@ fn merging_keeps_backfilled_days_inside_the_window() {
 }
 
 #[test]
+fn a_backfilled_day_keeps_as_of_and_reports_whether_it_was_kept() {
+    let today = date(2026, 3, 10);
+    let now = local_hour(today, 12);
+    let fetched = local_hour(today, 0);
+    let mut snapshot = PriceSnapshot::default();
+    snapshot.merge(&whole_day(today, 24), fetched, AMSTERDAM);
+
+    assert!(snapshot.backfill(&whole_day(date(2026, 3, 5), 24), now, AMSTERDAM));
+    assert!(!snapshot.backfill(&whole_day(date(2026, 1, 20), 24), now, AMSTERDAM));
+    assert!(snapshot.prices_for(date(2026, 3, 5), AMSTERDAM).is_some());
+    assert!(snapshot.prices_for(date(2026, 1, 20), AMSTERDAM).is_none());
+    assert_eq!(snapshot.as_of, Some(fetched));
+}
+
+#[test]
 fn a_day_has_one_slot_per_local_hour_whatever_dst_does() {
     let mut snapshot = PriceSnapshot::default();
     for (day, hours) in [

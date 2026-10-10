@@ -340,6 +340,24 @@ fn a_negative_price_extends_the_scale_below_zero_and_draws_the_zero_line() {
 // --- Today ----------------------------------------------------------------------
 
 #[test]
+fn the_highlight_carries_its_resting_place_for_the_script() {
+    let html = price_panel::render(&view_at(
+        date(0),
+        &snapshot(&whole_day(0, rising)),
+        local(0, 13, 20),
+    ))
+    .into_string();
+    let rect = html
+        .split("<rect")
+        .find(|r| r.contains("price-panel__highlight"))
+        .expect("a highlight rect");
+    // Without this pair the script has nowhere to return the wash to after a
+    // hover, and the current hour loses its mark on the first swap.
+    assert!(rect.contains("data-default-x=\""));
+    assert!(!rect.contains("data-default-width=\"0\""));
+}
+
+#[test]
 fn today_reads_the_current_hour_and_dims_the_hours_before_it() {
     let view = priced(view_at(
         date(0),

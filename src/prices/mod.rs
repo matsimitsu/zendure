@@ -213,6 +213,20 @@ impl PriceSnapshot {
         self.as_of = Some(self.as_of.map_or(at, |prev| prev.max(at)));
     }
 
+    /// A past day the backfill fetched: kept only when it falls inside the
+    /// shown window, and without moving `as_of`, which says when today's
+    /// prices were last refreshed. `false` when nothing was kept, so the
+    /// caller can skip a publish that would change nothing.
+    pub fn backfill(&mut self, points: &[PricePoint], now: Timestamp, tz: Tz) -> bool {
+        let oldest = history_start(now, tz);
+        let mut kept = false;
+        for point in points.iter().filter(|point| point.until > oldest) {
+            self.points.insert(*point);
+            kept = true;
+        }
+        kept
+    }
+
     /// `date`'s local hours, `None` when none of them is priced. An hour is
     /// the mean of the points starting in it, so a quarter-hourly feed reads
     /// as its hourly average; a coarser point prices every hour it covers.
@@ -461,9 +475,10 @@ impl Poller {
         let snapshot = &mut self.snapshot;
         let dashboard_tx = &self.dashboard_tx;
         let mut merge_and_publish = |points: &[PricePoint]| {
-            snapshot.merge(points, Timestamp::from(chrono::Utc::now()), timezone);
-            let current = snapshot.clone();
-            dashboard_tx.send_modify(|s| s.prices_tick(current));
+            if snapshot.backfill(points, Timestamp::from(chrono::Utc::now()), timezone) {
+                let current = snapshot.clone();
+                dashboard_tx.send_modify(|s| s.prices_tick(current));
+            }
         };
         let Some(summary) = backfill(
             &self.feed,

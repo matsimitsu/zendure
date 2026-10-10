@@ -95,8 +95,8 @@ class PricePanel extends HTMLElement {
     }
 
     for (const h of this.querySelectorAll(`.${B}__highlight`)) {
-      h.setAttribute("x", hit ? hit.getAttribute("x") : "0");
-      h.setAttribute("width", hit ? hit.getAttribute("width") : "0");
+      h.setAttribute("x", hit ? hit.getAttribute("x") : h.dataset.defaultX);
+      h.setAttribute("width", hit ? hit.getAttribute("width") : h.dataset.defaultWidth);
     }
   }
 }
