@@ -16,14 +16,12 @@ use crate::units::{CentsPerKwh, Timestamp};
 
 use super::axis::{AxisDensity, AxisPosition, AxisTick};
 use super::day_nav::{BadQuery, DayNavView, parse_day_param};
-use super::plot::{Day, SlotSpan, YScale};
+use super::plot::{DAY_CHART_HEIGHT, Day, SlotSpan, YScale};
 use super::state::DashboardState;
 use super::view::{MISSING, MiniStatSub, MiniStatView};
 
-/// The chart's viewBox. The height matches `--size-chart-price`, so the bars
-/// are drawn at the proportions they are shown at.
+/// The chart's viewBox width; the height is the shared [`DAY_CHART_HEIGHT`].
 pub(super) const PRICE_CHART_WIDTH: f64 = super::plot::CHART_WIDTH;
-pub(super) const PRICE_CHART_HEIGHT: f64 = 160.0;
 
 /// The bars' corner radius, in viewBox units.
 pub(super) const PRICE_BAR_RADIUS: f64 = 1.0;
@@ -410,7 +408,7 @@ fn chart(
     tariff: Option<&DynamicTariff>,
 ) -> PriceChartView {
     let (top, bottom) = price_scale(snapshot, tariff);
-    let scale = YScale::new(top.0, bottom.0, PRICE_CHART_HEIGHT);
+    let scale = YScale::new(top.0, bottom.0, DAY_CHART_HEIGHT);
     let ticks = scale_ticks(top, bottom);
     let span_of = |hour: &HourPrice| frame.span(hour.start, hour.end);
 
@@ -450,7 +448,7 @@ fn chart(
             .iter()
             .map(|tick| {
                 AxisTick::new(
-                    AxisPosition::new(scale.y(tick.0) / PRICE_CHART_HEIGHT),
+                    AxisPosition::new(scale.y(tick.0) / DAY_CHART_HEIGHT),
                     tick_label(*tick),
                     AxisDensity::Always,
                 )

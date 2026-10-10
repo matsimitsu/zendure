@@ -128,6 +128,11 @@
   --opacity-now-line: 0.7;
   --dash-now-line: 4 4;
 
+  // Solar forecast panel: the forecast bars are the accent at 0.38 alpha; the
+  // actual line is near text-primary so amber keeps meaning "now".
+  --color-solar-forecast: oklch(0.75 0.15 75 / 0.38);
+  --color-solar-actual: oklch(0.93 0.01 250);
+
   // Sizes
   --size-modal: 880px;
   --size-icon-button: 32px;
@@ -135,7 +140,7 @@
   --size-chart: 260px;
   --size-axis-gutter: 40px;
   --size-step: 30px;
-  --size-chart-price: 160px;
+  --size-chart-day: 160px;
   --size-readout: 240px;
   --size-readout-value: 4ch;
   --size-swatch: 10px;

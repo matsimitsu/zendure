@@ -15,6 +15,10 @@ use super::axis::{AxisDensity, AxisPosition, AxisTick, day_axis};
 /// Every day chart's viewBox width.
 pub(super) const CHART_WIDTH: f64 = 1000.0;
 
+/// The viewBox height every day chart shares. It matches `--size-chart-day`, so
+/// the bars are drawn at the proportions they are shown at.
+pub(super) const DAY_CHART_HEIGHT: f64 = 160.0;
+
 const HOUR: Duration = Duration::from_secs(60 * 60);
 
 /// A rectangle's horizontal extent, in viewBox units.
