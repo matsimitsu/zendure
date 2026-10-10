@@ -561,14 +561,16 @@ Add `[web]` to run a live browser dashboard (`src/web/`) — solar/home/grid
 stat cards, the battery panel (SOC, mode, RTE, usable energy, capacity, and
 a row per pack with its model, serial, SOC, flow, temperature and capacity),
 and a decision log, all real data, updating every scan tick over
-server-sent events. Five routes: `GET /` (the full page), `GET /events`
+server-sent events. Six routes: `GET /` (the full page), `GET /events`
 (the SSE stream fragments it swaps in via htmx), `GET
 /fragments/energy-flows?day=YYYY-MM-DD&interval=1h|15m` (the energy flows
 panel alone, for one day), `GET /fragments/price-panel?day=YYYY-MM-DD` (the
-price panel alone, for one day) and `GET /detail/{entity}`
+price panel alone, for one day), `GET /fragments/forecast-panel?day=YYYY-MM-DD`
+(the solar forecast panel alone, today or tomorrow, tomorrow only once its
+forecast is complete) and `GET /detail/{entity}`
 (`solar`, `home`, `grid` or `battery`; anything else is a 404). `GET /` takes
 the same `day` and `interval` parameters, plus `price_day` for the price
-panel, so the two panels' days are chosen independently. Every parameter is
+panel and `solar_day` for the solar panel, so the three panels' days are chosen independently. Every parameter is
 optional: a missing `day` means today, a day after today shows today, and a
 value that isn't a date (or an interval other than `1h`/`15m`) is a 400. The solar,
 home and grid cards and the battery panel open `/detail/{entity}` in a modal
