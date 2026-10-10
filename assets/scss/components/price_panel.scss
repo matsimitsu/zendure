@@ -51,7 +51,10 @@ $tiers: (
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
-    min-width: var(--size-readout-min);
+    // A fixed width, not a minimum: hovering swaps the label, the value and
+    // the tier pill for ones of a different length, and a block that grew
+    // with them would shove the mini-stats beside it on every bar.
+    width: var(--size-readout);
   }
 
   &__read-label {
@@ -72,6 +75,8 @@ $tiers: (
     font-size: var(--text-2xl);
     font-weight: var(--weight-medium);
     line-height: var(--leading-tight);
+    // Keeps the unit and pill from sliding as the digit count changes.
+    min-width: var(--size-readout-value);
   }
 
   &__read-unit {
