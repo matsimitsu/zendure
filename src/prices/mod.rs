@@ -409,10 +409,16 @@ struct Poller {
     journal: Arc<Journal>,
 }
 
+/// A free function rather than a method, so the backfill can publish while
+/// the poller's feed and journal are borrowed for the fetch.
+fn publish(dashboard_tx: &DashboardStateSender, snapshot: &PriceSnapshot) {
+    let snapshot = snapshot.clone();
+    dashboard_tx.send_modify(|s| s.prices_tick(snapshot));
+}
+
 impl Poller {
     fn publish(&self) {
-        let snapshot = self.snapshot.clone();
-        self.dashboard_tx.send_modify(|s| s.prices_tick(snapshot));
+        publish(&self.dashboard_tx, &self.snapshot);
     }
 
     /// Fetches local today and tomorrow if an anchor is due. `None` when
@@ -456,7 +462,10 @@ impl Poller {
             _ = &mut shutdown => return,
             rows = recorded_payloads(journal_path) => rows,
         };
-        let (series, _) = decode_rows(&rows);
+        let (series, undecodable) = decode_rows(&rows);
+        if undecodable > 0 {
+            tracing::warn!("Skipped {undecodable} recorded price rows that did not decode");
+        }
         let covered = covered_days(&series, self.timezone);
         self.snapshot = PriceSnapshot::restore(
             series,
@@ -480,8 +489,7 @@ impl Poller {
         let dashboard_tx = &self.dashboard_tx;
         let mut merge_and_publish = |points: &[PricePoint]| {
             if snapshot.backfill(points, Timestamp::from(chrono::Utc::now()), timezone) {
-                let current = snapshot.clone();
-                dashboard_tx.send_modify(|s| s.prices_tick(current));
+                publish(dashboard_tx, snapshot);
             }
         };
         let Some(summary) = backfill(

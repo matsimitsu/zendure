@@ -255,8 +255,12 @@ impl ContractCost<Cents> {
     pub fn net(&self) -> Cents {
         self.import - self.export
     }
+}
 
-    fn plus(self, other: Self) -> Self {
+impl std::ops::Add for ContractCost<Cents> {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
         ContractCost {
             import: self.import + other.import,
             export: self.export + other.export,
@@ -277,11 +281,15 @@ impl RoundedCosts {
     pub fn delta(&self) -> Cents {
         self.dynamic.net() - self.fixed.net()
     }
+}
 
-    fn plus(self, other: RoundedCosts) -> RoundedCosts {
+impl std::ops::Add for RoundedCosts {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
         RoundedCosts {
-            dynamic: self.dynamic.plus(other.dynamic),
-            fixed: self.fixed.plus(other.fixed),
+            dynamic: self.dynamic + other.dynamic,
+            fixed: self.fixed + other.fixed,
         }
     }
 }
@@ -514,7 +522,7 @@ fn render_costs(out: &mut String, days: &[DayTotals]) {
             costs.priced_share(),
             &rounded,
         ));
-        total = total.plus(rounded);
+        total = total + rounded;
         priced += costs.priced;
         integrated += costs.priced + costs.unpriced;
     }
