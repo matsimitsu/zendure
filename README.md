@@ -113,16 +113,16 @@ publish_prefix = "zendure"
 # [prices]
 # kind = "energyzero"          # or "simulated"; required
 # poll_times = ["00:05", "15:00", "17:00"]   # default
-# backfill_days = 60           # default
+# backfill_days = 60           # default; no point exceeding [journal] retention_days
 #
 # A dynamic contract: wholesale price plus these, then VAT.
 # [prices.dynamic]
 # markup = 1.5                 # supplier surcharge on import, excl. VAT
-# energy_tax = 10.85           # excl. VAT; verify for the current year, it changes every January
+# energy_tax = 9.161           # excl. VAT, 2026 rate; it changes every January
 # export_markup = 0.0          # deducted from the wholesale price on export, excl. VAT
 # vat = 21.0                   # percent
 #
-# A fixed contract instead: flat rates, already incl. VAT.
+# The fixed contract to compare against: flat rates, already incl. VAT.
 # [prices.fixed]
 # import = 28.0
 # export = 5.0
