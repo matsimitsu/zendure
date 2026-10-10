@@ -665,17 +665,19 @@ by default) the poller fetches local today and tomorrow: day-ahead prices are
 published around 14:00–15:00, so the 17:00 anchor is the retry for a late
 publication. Anchors missed while the process was down collapse into one
 fetch, and a failed fetch forfeits its anchor, the same as the forecast
-poller. Every successful fetch is recorded to the journal as an
+poller. Every fetch that returns prices is recorded to the journal as an
 `energy_price` event whose payload is a JSON array of
-`{"from", "until", "wholesale"}` points (epoch milliseconds, ct/kWh). On
-startup, before the first poll, the poller backfills: for each of the last
-`prices.backfill_days` local days (today excluded) that no recorded
-`energy_price` payload has a price for, it fetches that day — one request
-per day, in sequence — and journals it, then logs how many days were
-fetched, already present or failed. A row's timestamp is when it was
+`{"from", "until", "wholesale"}` points (epoch milliseconds, ct/kWh); an
+empty answer is logged and not recorded. Each EnergyZero point lasts one
+hour, so an hour missing from the feed stays unpriced. On startup, after
+the first due anchor's fetch, the poller backfills: for each of the last
+`prices.backfill_days` local days (today excluded) that the recorded
+`energy_price` payloads do not price every hour of, it fetches that day —
+one request per day, in sequence — and journals it, then logs how many days
+were fetched, already present or failed. A row's timestamp is when it was
 fetched, so coverage is decided from the prices inside the payloads. The
-dashboard is seeded from the journal's prices for today onwards. Nothing here
-reaches `src/controller.rs`.
+dashboard is seeded from the journal's prices for today onwards, stamped
+with the newest row's fetch time. Nothing here reaches `src/controller.rs`.
 
 The price panel draws one bar per price interval for local today, and a
 second chart for tomorrow once its prices are published (around 15:00). With
@@ -684,8 +686,11 @@ second chart for tomorrow once its prices are published (around 15:00). With
 charges — and the chart says so; without it they are the bare wholesale
 price. Both days share one scale, negative prices hang below a zero line, and
 the interval in progress is highlighted. Above the charts sit the current
-price and today's minimum and maximum, in ct/kWh. Without `[prices]` (or
-before its first fetch lands) the panel shows an empty state.
+price and today's minimum and maximum, in ct/kWh. Bars sit on the local
+clock hour they start at, matching the hour axis: on the autumn DST day the
+repeated hour's two bars overlap, and on the spring one the skipped hour is
+empty. Without `[prices]` the panel says how to configure it; with it, but
+before the first fetch lands, it says it is waiting for prices.
 
 The EV card shows a car's battery state of charge when `[car_battery]` is
 configured. `kind = "vw_portal"` reads it from the VW Group EU Data Act

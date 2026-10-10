@@ -657,7 +657,7 @@ pub async fn run(
             startup_soc,
             engine.soc_limits(startup_clock.weekday, telemetry.min_soc),
         ))
-        .with_tariff(config.prices.as_ref().and_then(|prices| prices.dynamic));
+        .with_prices(config.prices.as_ref());
         let (tx, rx) = tokio::sync::watch::channel(seed);
         let past_days = web::PastDays::new(config.journal_path.clone(), configured);
         web_task = web::spawn(web_cfg, rx, config.timezone, past_days, async move {
@@ -908,6 +908,14 @@ pub async fn run(
     let _ = car_battery_stop_tx.send(());
     drop(dashboard_tx);
 
+    // Both pollers hold a journal sender, so they are stopped before
+    // `shut_down` waits for the writer: one still mid-fetch would hold the
+    // drain to its deadline. Each journals a fetch as it lands, and
+    // `ForecastTracker` saves synchronously after every fetch, so an abort
+    // loses nothing.
+    stop_within_deadline(forecast_task, "Forecast poller").await;
+    stop_within_deadline(prices_task, "Price poller").await;
+
     shut_down(
         mqtt_drain
             .as_mut()
@@ -918,69 +926,34 @@ pub async fn run(
     )
     .await;
 
-    // Holds no journal-writer sender, so it has no bearing on `shut_down`'s ordering —
-    // awaited
-    // after, once its own shutdown signal fires. Bounded like the MQTT drain: an SSE
-    // body is a
-    // stream that runs as long as the dashboard channel does, so
-    // `with_graceful_shutdown` alone
-    // would wait forever for a connection that never ends on its own.
-    if let Some(mut handle) = web_task
-        && tokio::time::timeout(DRAIN_DEADLINE, &mut handle)
-            .await
-            .is_err()
-    {
-        handle.abort();
-        tracing::warn!(
-            "Dashboard did not stop within {}s — aborted",
-            DRAIN_DEADLINE.as_secs(),
-        );
-    }
+    // Bounded because an SSE body is a stream that runs as long as the
+    // dashboard channel does, so `with_graceful_shutdown` alone would wait
+    // forever for a connection that never ends on its own.
+    stop_within_deadline(web_task, "Dashboard").await;
 
-    // No careful drain sequence needed, unlike the journal/MQTT halves above:
-    // `ForecastTracker` saves synchronously after every fetch, so there is
-    // nothing queued for this task to lose by being aborted.
-    if let Some(mut handle) = forecast_task
-        && tokio::time::timeout(DRAIN_DEADLINE, &mut handle)
-            .await
-            .is_err()
-    {
-        handle.abort();
-        tracing::warn!(
-            "Forecast poller did not stop within {}s — aborted",
-            DRAIN_DEADLINE.as_secs(),
-        );
-    }
-
-    // Every fetch is journalled as it lands, so an abort loses nothing.
-    if let Some(mut handle) = prices_task
-        && tokio::time::timeout(DRAIN_DEADLINE, &mut handle)
-            .await
-            .is_err()
-    {
-        handle.abort();
-        tracing::warn!(
-            "Price poller did not stop within {}s — aborted",
-            DRAIN_DEADLINE.as_secs(),
-        );
-    }
-
-    // No careful drain sequence needed, same reason as the forecast poller:
-    // nothing here queues state that an abort would lose — a failed poll
+    // Nothing here queues state that an abort would lose — a failed poll
     // just logs and leaves the dashboard's last reading as it was.
-    if let Some(mut handle) = car_battery_task
-        && tokio::time::timeout(DRAIN_DEADLINE, &mut handle)
-            .await
-            .is_err()
-    {
-        handle.abort();
-        tracing::warn!(
-            "Car battery poller did not stop within {}s — aborted",
-            DRAIN_DEADLINE.as_secs(),
-        );
-    }
+    stop_within_deadline(car_battery_task, "Car battery poller").await;
 
     Ok(())
+}
+
+/// Waits up to `DRAIN_DEADLINE` for a task that has been told to stop, then
+/// aborts it. The abort is awaited too: `abort` only schedules cancellation,
+/// and whatever the task captured is dropped only once it lands.
+async fn stop_within_deadline(task: Option<tokio::task::JoinHandle<()>>, what: &str) {
+    if let Some(mut handle) = task
+        && tokio::time::timeout(DRAIN_DEADLINE, &mut handle)
+            .await
+            .is_err()
+    {
+        handle.abort();
+        let _ = handle.await;
+        tracing::warn!(
+            "{what} did not stop within {}s — aborted",
+            DRAIN_DEADLINE.as_secs(),
+        );
+    }
 }
 
 /// Stops everything in the order that avoids losing rows or stalling — not the order it
@@ -989,7 +962,8 @@ pub async fn run(
 /// connection owns the eventloop moving bytes to the broker; stopping it first would
 /// stall the drain for the full deadline. Skipped in brokerless mode.
 /// Then the journal, unconditionally: its writer stops only once every sender is gone,
-/// each sampler holds one so the source tasks must finish first, and since `shutdown`
+/// so the caller has already stopped every poller holding one; each sampler holds one
+/// too, so the source tasks must finish first, and since `shutdown`
 /// only schedules cancellation, awaiting it is what guarantees a captured clone is
 /// actually gone. Both drains are bounded — an unbounded wait would otherwise run to
 /// systemd's `TimeoutStopSec` and SIGKILL, losing the rows being protected.

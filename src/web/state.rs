@@ -10,7 +10,7 @@ use chrono_tz::Tz;
 
 use crate::clock::Clock;
 use crate::command::Command;
-use crate::config::DynamicTariff;
+use crate::config::{DynamicTariff, PricesConfig};
 use crate::controller::SocLimits;
 use crate::device::PackStatus;
 use crate::engine::EngineState;
@@ -276,6 +276,9 @@ pub struct DashboardState {
     /// `[prices.dynamic]`, when configured: the price panel shows the all-in
     /// import price through it, and the bare wholesale price without it.
     pub tariff: Option<DynamicTariff>,
+    /// Whether `[prices]` is configured, so an empty price panel can tell
+    /// "not set up" from "not fetched yet".
+    pub price_feed: bool,
     /// The car's last-known state of charge and when it was read — see
     /// `crate::car_battery`. `None` until `[car_battery]` is configured and
     /// its first successful poll lands; updated only by `car_soc_tick`, on
@@ -320,6 +323,7 @@ impl DashboardState {
             forecast: ForecastSnapshot::default(),
             prices: PriceSnapshot::default(),
             tariff: None,
+            price_feed: false,
             car_soc: None,
             as_of,
         };
@@ -336,8 +340,9 @@ impl DashboardState {
         self
     }
 
-    pub fn with_tariff(mut self, tariff: Option<DynamicTariff>) -> Self {
-        self.tariff = tariff;
+    pub fn with_prices(mut self, prices: Option<&PricesConfig>) -> Self {
+        self.price_feed = prices.is_some();
+        self.tariff = prices.and_then(|prices| prices.dynamic);
         self
     }
 

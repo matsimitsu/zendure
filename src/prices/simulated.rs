@@ -2,9 +2,8 @@
 //! Lets the dashboard and analysis be exercised locally without a real feed.
 
 use super::{PriceError, PriceSource};
-use crate::units::{CentsPerKwh, PricePoint, Timestamp};
+use crate::units::{CentsPerKwh, Elapsed, PricePoint, Timestamp};
 
-const HOUR_MS: i64 = 3_600_000;
 const DAY_HOURS: i64 = 24;
 
 pub struct SimulatedPrices;
@@ -50,13 +49,17 @@ fn wholesale_for_hour(hour: i64) -> CentsPerKwh {
 /// hour containing the last instant before `until`, so the range is covered
 /// even when its ends fall mid-hour.
 fn hourly_curve(from: Timestamp, until: Timestamp) -> Vec<PricePoint> {
-    let first = from.as_millis().div_euclid(HOUR_MS);
-    let end = (until.as_millis() + HOUR_MS - 1).div_euclid(HOUR_MS);
+    let hour = Elapsed::HOUR.as_millis();
+    let first = from.as_millis().div_euclid(hour);
+    let end = (until.as_millis() + hour - 1).div_euclid(hour);
     (first..end)
-        .map(|h| PricePoint {
-            from: Timestamp::from_millis(h * HOUR_MS),
-            until: Timestamp::from_millis((h + 1) * HOUR_MS),
-            wholesale: wholesale_for_hour(h.rem_euclid(DAY_HOURS)),
+        .map(|h| {
+            let from = Timestamp::from_millis(h * hour);
+            PricePoint {
+                from,
+                until: from + Elapsed::HOUR,
+                wholesale: wholesale_for_hour(h.rem_euclid(DAY_HOURS)),
+            }
         })
         .collect()
 }
