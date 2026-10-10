@@ -89,7 +89,7 @@ $tiers: (
     display: grid;
     // `minmax(0, …)` so nothing in the plot can widen the panel.
     grid-template-columns: var(--size-axis-gutter) minmax(0, 1fr);
-    grid-template-rows: var(--size-chart-price) auto;
+    grid-template-rows: var(--size-chart-day) auto;
     gap: var(--space-2);
   }
 

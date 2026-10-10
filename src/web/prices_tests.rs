@@ -727,5 +727,5 @@ fn next_is_disabled_at_the_end_of_the_range() {
 #[test]
 fn the_viewbox_is_as_tall_as_the_token_it_is_shown_at() {
     let tokens = include_str!("../../assets/scss/tokens.scss");
-    assert!(tokens.contains(&format!("--size-chart-price: {PRICE_CHART_HEIGHT:.0}px;")));
+    assert!(tokens.contains(&format!("--size-chart-day: {DAY_CHART_HEIGHT:.0}px;")));
 }

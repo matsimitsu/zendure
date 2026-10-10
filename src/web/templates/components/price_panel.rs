@@ -2,9 +2,10 @@ use chrono::NaiveDate;
 use maud::{Markup, html};
 
 use crate::web::day_nav::DayNavView;
+use crate::web::plot::DAY_CHART_HEIGHT;
 use crate::web::prices::{
-    EmptyReason, PRICE_BAR_RADIUS, PRICE_CHART_HEIGHT, PRICE_CHART_WIDTH, PriceBarView,
-    PriceChartView, PricePanelView, PricedDayView,
+    EmptyReason, PRICE_BAR_RADIUS, PRICE_CHART_WIDTH, PriceBarView, PriceChartView, PricePanelView,
+    PricedDayView,
 };
 use crate::web::templates::day_nav::{self, DayNav, DayNavLink};
 use crate::web::templates::{axis, mini_stat, price_tier};
@@ -119,12 +120,12 @@ fn fragment_href(day: Option<NaiveDate>) -> String {
 }
 
 fn plot(chart: &PriceChartView) -> Markup {
-    let height = format!("{PRICE_CHART_HEIGHT:.0}");
+    let height = format!("{DAY_CHART_HEIGHT:.0}");
     html! {
         div class="price-panel__plot" {
             div class="price-panel__y-axis" { (axis::render_vertical(&chart.y_axis)) }
             svg class="price-panel__chart"
-                viewBox=(format!("0 0 {PRICE_CHART_WIDTH:.0} {PRICE_CHART_HEIGHT:.0}"))
+                viewBox=(format!("0 0 {PRICE_CHART_WIDTH:.0} {DAY_CHART_HEIGHT:.0}"))
                 preserveAspectRatio="none"
                 aria-hidden="true" {
                 @for &y in &chart.grid_lines {

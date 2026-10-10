@@ -16,6 +16,7 @@ mod prices;
 mod routes;
 mod server;
 mod soc_bar;
+mod solar;
 mod sse;
 mod state;
 mod templates;
