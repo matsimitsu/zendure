@@ -762,6 +762,10 @@ impl<Tz: chrono::TimeZone> From<chrono::DateTime<Tz>> for Timestamp {
 pub struct Elapsed(i64);
 
 impl Elapsed {
+    /// The smallest step a `Timestamp` can take.
+    pub const MILLISECOND: Elapsed = Elapsed(1);
+    pub const HOUR: Elapsed = Elapsed(3_600_000);
+
     /// A `Duration` as whole milliseconds, saturating. Config durations are
     /// lenient and unbounded, and a wrapping cast turns an absurd window
     /// negative — already elapsed, so every source reads `Down`. Saturating
@@ -774,7 +778,7 @@ impl Elapsed {
         self.0 as f64 / 1000.0
     }
 
-    pub fn as_millis(self) -> i64 {
+    pub const fn as_millis(self) -> i64 {
         self.0
     }
 }

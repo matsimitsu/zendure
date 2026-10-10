@@ -611,32 +611,44 @@ fn prices_by_day(
     days
 }
 
+/// The chart spans one 24-hour wall-clock day, like `day_axis` beneath it.
+const PRICE_CHART_DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// How far through its local wall-clock day `at` falls, so a bar lines up
+/// with the hour tick it is labelled by. On a DST day the repeated hour's two
+/// bars overlap and the skipped hour stays empty: the axis has one slot per
+/// clock hour, not per elapsed hour.
+fn wall_clock_fraction(at: Timestamp, timezone: chrono_tz::Tz) -> f64 {
+    use chrono::Timelike;
+    chrono::DateTime::from_timestamp_millis(at.as_millis()).map_or(0.0, |utc| {
+        f64::from(utc.with_timezone(&timezone).num_seconds_from_midnight())
+            / PRICE_CHART_DAY.as_secs_f64()
+    })
+}
+
 /// The bars of one local day on a shared scale: `top` is the highest price
 /// the chart has to fit (at least zero), `bottom` the lowest (at most zero).
 fn price_bars(
     points: &[(PricePoint, CentsPerKwh)],
-    (day_start, day_end): (Timestamp, Timestamp),
     (bottom, top): (CentsPerKwh, CentsPerKwh),
     now: Timestamp,
+    timezone: chrono_tz::Tz,
 ) -> (Vec<PriceBarView>, f64) {
     let plot_height = PRICE_CHART_HEIGHT - 2.0 * PRICE_CHART_MARGIN;
     let per_cent = plot_height / (top.0 - bottom.0).max(f64::EPSILON);
     let zero_y = PRICE_CHART_MARGIN + top.0 * per_cent;
-    let day_ms = (day_end - day_start).as_millis().max(1) as f64;
-    let along = |at: Timestamp| {
-        let ms = (at.max(day_start).min(day_end) - day_start).as_millis() as f64;
-        ms / day_ms * PRICE_CHART_WIDTH
-    };
 
     let bars = points
         .iter()
         .map(|(point, price)| {
-            let x = along(point.from);
+            let x = wall_clock_fraction(point.from, timezone) * PRICE_CHART_WIDTH;
+            let span = (point.until - point.from).as_secs_f64() / PRICE_CHART_DAY.as_secs_f64();
+            let end = (x + span * PRICE_CHART_WIDTH).min(PRICE_CHART_WIDTH);
             let height = price.0.abs() * per_cent;
             let negative = price.0 < 0.0;
             PriceBarView {
                 x,
-                width: (along(point.until) - x - PRICE_BAR_GAP).max(PRICE_BAR_GAP),
+                width: (end - x - PRICE_BAR_GAP).max(PRICE_BAR_GAP),
                 y: if negative { zero_y } else { zero_y - height },
                 height,
                 negative,
@@ -650,6 +662,7 @@ fn price_bars(
 fn price_panel_view(
     prices: &PriceSnapshot,
     tariff: Option<&DynamicTariff>,
+    configured: bool,
     now: Timestamp,
     timezone: chrono_tz::Tz,
 ) -> PricePanelView {
@@ -658,18 +671,17 @@ fn price_panel_view(
     } else {
         "Wholesale price, ct/kWh"
     };
-    let today = crate::clock::local_date(now, timezone);
-    let days = today.map(|today| {
-        (
-            today,
-            prices_by_day(&prices.points, tariff, today, timezone),
-        )
-    });
-    let Some((today, days)) = days.filter(|(_, days)| days.iter().any(|day| !day.is_empty()))
-    else {
+    let days = crate::clock::local_date(now, timezone)
+        .map(|today| prices_by_day(&prices.points, tariff, today, timezone));
+    let Some(days) = days.filter(|days| days.iter().any(|day| !day.is_empty())) else {
         return PricePanelView {
             has_data: false,
-            as_of: "No prices configured — add [prices] to config.toml".to_string(),
+            as_of: if configured {
+                "Waiting for prices…"
+            } else {
+                "No prices configured — add [prices] to config.toml"
+            }
+            .to_string(),
             chart_label,
             current: MiniStatView {
                 label: "Now",
@@ -702,24 +714,20 @@ fn price_panel_view(
         value: price.map_or_else(|| MISSING.to_string(), format_price),
     };
 
-    let day_views = [
-        (today, "Today"),
-        (today.succ_opt().unwrap_or(today), "Tomorrow"),
-    ]
-    .into_iter()
-    .zip(days.iter())
-    .filter(|(_, points)| !points.is_empty())
-    .filter_map(|((date, label), points)| {
-        let bounds = crate::clock::local_day_bounds(date, timezone)?;
-        let (bars, zero_y) = price_bars(points, bounds, (bottom, top), now);
-        Some(PriceDayView {
-            label,
-            bars,
-            zero_y,
-            axis: day_axis(),
+    let day_views = ["Today", "Tomorrow"]
+        .into_iter()
+        .zip(days.iter())
+        .filter(|(_, points)| !points.is_empty())
+        .map(|(label, points)| {
+            let (bars, zero_y) = price_bars(points, (bottom, top), now, timezone);
+            PriceDayView {
+                label,
+                bars,
+                zero_y,
+                axis: day_axis(),
+            }
         })
-    })
-    .collect();
+        .collect();
 
     PricePanelView {
         has_data: true,
@@ -855,7 +863,13 @@ pub fn dashboard_view(state: &DashboardState, timezone: chrono_tz::Tz) -> Dashbo
         battery,
         decision_log,
         forecast: forecast_panel_view(&state.forecast, &state.actual_solar, state.as_of, timezone),
-        prices: price_panel_view(&state.prices, state.tariff.as_ref(), state.as_of, timezone),
+        prices: price_panel_view(
+            &state.prices,
+            state.tariff.as_ref(),
+            state.price_feed,
+            state.as_of,
+            timezone,
+        ),
         energy_flows: energy_flows_view(&state.intervals, state.as_of, timezone),
     }
 }

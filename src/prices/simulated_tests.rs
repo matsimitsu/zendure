@@ -1,5 +1,7 @@
 use super::*;
 
+const HOUR_MS: i64 = Elapsed::HOUR.as_millis();
+
 const DAY_START: i64 = 1_800_000_000_000 / (24 * HOUR_MS) * (24 * HOUR_MS);
 
 fn at_hour(h: i64) -> Timestamp {

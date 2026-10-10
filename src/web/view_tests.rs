@@ -1064,8 +1064,14 @@ fn tariff() -> DynamicTariff {
 }
 
 #[test]
-fn price_panel_view_of_an_empty_snapshot_says_how_to_configure_prices() {
-    let view = price_panel_view(&PriceSnapshot::default(), None, local(0, 12, 0), tz());
+fn price_panel_view_without_a_feed_says_how_to_configure_prices() {
+    let view = price_panel_view(
+        &PriceSnapshot::default(),
+        None,
+        false,
+        local(0, 12, 0),
+        tz(),
+    );
 
     assert!(!view.has_data);
     assert_eq!(
@@ -1076,8 +1082,76 @@ fn price_panel_view_of_an_empty_snapshot_says_how_to_configure_prices() {
 }
 
 #[test]
+fn price_panel_view_with_a_feed_but_no_prices_yet_is_waiting() {
+    let view = price_panel_view(&PriceSnapshot::default(), None, true, local(0, 12, 0), tz());
+
+    assert!(!view.has_data);
+    assert_eq!(view.as_of, "Waiting for prices…");
+}
+
+/// Every UTC hour of a local day, starting at its local midnight.
+fn utc_hours(first: &str, count: usize) -> Vec<PricePoint> {
+    let start = Timestamp::from(chrono::DateTime::parse_from_rfc3339(first).unwrap());
+    std::iter::successors(Some(start), |from| Some(*from + Elapsed::HOUR))
+        .take(count)
+        .map(|from| PricePoint {
+            from,
+            until: from + Elapsed::HOUR,
+            wholesale: CentsPerKwh(10.0),
+        })
+        .collect()
+}
+
+fn bar_starts(view: &PricePanelView) -> Vec<f64> {
+    view.days[0]
+        .bars
+        .iter()
+        .map(|bar| (bar.x * 24.0 / PRICE_CHART_WIDTH * 1000.0).round() / 1000.0)
+        .collect()
+}
+
+/// The axis ticks at clock hours, so a bar sits on its clock hour: the
+/// repeated 02:00 draws twice in one slot.
+#[test]
+fn price_bars_on_a_25_hour_day_sit_on_their_clock_hours() {
+    let points = utc_hours("2026-10-24T22:00:00Z", 25);
+    let noon =
+        Timestamp::from(chrono::DateTime::parse_from_rfc3339("2026-10-25T11:00:00Z").unwrap());
+    let view = price_panel_view(&snapshot(&points), None, true, noon, tz());
+
+    let starts = bar_starts(&view);
+    assert_eq!(starts.len(), 25);
+    assert_eq!(&starts[..5], [0.0, 1.0, 2.0, 2.0, 3.0]);
+    assert_eq!(starts[24], 23.0);
+    let last = view.days[0].bars[24];
+    assert!(last.x + last.width <= PRICE_CHART_WIDTH);
+}
+
+/// The skipped 02:00 has no bar, and no neighbour stretches across it.
+#[test]
+fn price_bars_on_a_23_hour_day_leave_the_skipped_hour_empty() {
+    let points = utc_hours("2026-03-28T23:00:00Z", 23);
+    let noon =
+        Timestamp::from(chrono::DateTime::parse_from_rfc3339("2026-03-29T10:00:00Z").unwrap());
+    let view = price_panel_view(&snapshot(&points), None, true, noon, tz());
+
+    let starts = bar_starts(&view);
+    assert_eq!(starts.len(), 23);
+    assert_eq!(&starts[..3], [0.0, 1.0, 3.0]);
+    assert_eq!(starts[22], 23.0);
+    let one_oclock = view.days[0].bars[1];
+    assert!(one_oclock.x + one_oclock.width <= 2.0 * PRICE_CHART_WIDTH / 24.0);
+}
+
+#[test]
 fn price_panel_view_with_only_past_days_is_empty() {
-    let view = price_panel_view(&snapshot(&[price(0, 10, 5.0)]), None, local(1, 12, 0), tz());
+    let view = price_panel_view(
+        &snapshot(&[price(0, 10, 5.0)]),
+        None,
+        true,
+        local(1, 12, 0),
+        tz(),
+    );
 
     assert!(!view.has_data);
 }
@@ -1092,7 +1166,7 @@ fn price_panel_view_buckets_today_and_tomorrow_by_local_date() {
         price(1, 0, 7.0),
         price(2, 0, 8.0),
     ];
-    let view = price_panel_view(&snapshot(&points), None, local(0, 12, 0), tz());
+    let view = price_panel_view(&snapshot(&points), None, true, local(0, 12, 0), tz());
 
     let labels: Vec<_> = view.days.iter().map(|day| day.label).collect();
     assert_eq!(labels, ["Today", "Tomorrow"]);
@@ -1110,7 +1184,13 @@ fn price_panel_view_buckets_today_and_tomorrow_by_local_date() {
 
 #[test]
 fn price_panel_view_has_no_tomorrow_before_it_is_published() {
-    let view = price_panel_view(&snapshot(&[price(0, 10, 5.0)]), None, local(0, 12, 0), tz());
+    let view = price_panel_view(
+        &snapshot(&[price(0, 10, 5.0)]),
+        None,
+        true,
+        local(0, 12, 0),
+        tz(),
+    );
 
     assert_eq!(view.days.len(), 1);
     assert_eq!(view.days[0].label, "Today");
@@ -1121,6 +1201,7 @@ fn price_panel_view_without_a_tariff_shows_wholesale() {
     let view = price_panel_view(
         &snapshot(&[price(0, 12, 10.0)]),
         None,
+        true,
         local(0, 12, 30),
         tz(),
     );
@@ -1135,6 +1216,7 @@ fn price_panel_view_with_a_tariff_shows_the_all_in_price() {
     let view = price_panel_view(
         &snapshot(&[price(0, 12, 10.0)]),
         Some(&tariff),
+        true,
         local(0, 12, 30),
         tz(),
     );
@@ -1147,7 +1229,7 @@ fn price_panel_view_with_a_tariff_shows_the_all_in_price() {
 #[test]
 fn price_panel_view_marks_only_the_current_interval() {
     let points = [price(0, 11, 5.0), price(0, 12, 6.0), price(0, 13, 7.0)];
-    let view = price_panel_view(&snapshot(&points), None, local(0, 12, 0), tz());
+    let view = price_panel_view(&snapshot(&points), None, true, local(0, 12, 0), tz());
 
     let current: Vec<_> = view.days[0].bars.iter().map(|bar| bar.current).collect();
     assert_eq!(
@@ -1159,7 +1241,13 @@ fn price_panel_view_marks_only_the_current_interval() {
 
 #[test]
 fn price_panel_view_reads_a_gap_as_no_current_price() {
-    let view = price_panel_view(&snapshot(&[price(0, 10, 5.0)]), None, local(0, 12, 0), tz());
+    let view = price_panel_view(
+        &snapshot(&[price(0, 10, 5.0)]),
+        None,
+        true,
+        local(0, 12, 0),
+        tz(),
+    );
 
     assert_eq!(view.current.value, "—");
     assert!(view.days[0].bars.iter().all(|bar| !bar.current));
@@ -1168,7 +1256,7 @@ fn price_panel_view_reads_a_gap_as_no_current_price() {
 #[test]
 fn price_panel_view_draws_negative_prices_below_the_zero_line() {
     let points = [price(0, 12, 10.0), price(0, 13, -5.0), price(1, 12, 20.0)];
-    let view = price_panel_view(&snapshot(&points), None, local(0, 9, 0), tz());
+    let view = price_panel_view(&snapshot(&points), None, true, local(0, 9, 0), tz());
 
     let today = &view.days[0];
     let (positive, negative) = (today.bars[0], today.bars[1]);
