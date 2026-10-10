@@ -19,6 +19,7 @@ mod journal;
 mod models;
 mod mqtt;
 mod prediction;
+mod prices;
 mod publish;
 mod registry;
 mod replay;
