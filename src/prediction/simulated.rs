@@ -7,16 +7,14 @@
 use chrono::{DateTime, Timelike, Utc};
 use chrono_tz::Tz;
 
-use super::Prediction;
+use super::{FORECAST_PERIOD, Prediction};
 use crate::clock::{local_date, local_day_start};
 use crate::fetch::FetchError;
-use crate::units::{SolarForecastPoint, SolarPower, Timestamp, Watts};
+use crate::units::{Elapsed, SolarForecastPoint, SolarPower, Timestamp, Watts};
 
 /// A rooftop array's rough peak output — enough to draw a plausible curve,
 /// not a claim about any real installation.
 const PEAK: Watts = Watts(4000);
-
-const SLOT: chrono::Duration = chrono::Duration::minutes(30);
 
 pub struct SimulatedForecaster {
     timezone: Tz,
@@ -48,27 +46,25 @@ fn clear_sky_curve(now: DateTime<Utc>, tz: Tz, peak: Watts) -> Vec<SolarForecast
     let Some((start, end)) = bounds else {
         return Vec::new();
     };
-    std::iter::successors(DateTime::from_timestamp_millis(start.as_millis()), |at| {
-        Some(*at + SLOT)
-    })
-    .take_while(|&at| Timestamp::from(at) < end)
-    .map(|at| {
-        let local = at.with_timezone(&tz);
-        let hour = f64::from(local.hour()) + f64::from(local.minute()) / 60.0;
-        let watts = if (6.0..=20.0).contains(&hour) {
-            let fraction = ((hour - 13.0) / 7.0 * std::f64::consts::FRAC_PI_2)
-                .cos()
-                .max(0.0);
-            peak.as_f64() * fraction
-        } else {
-            0.0
-        };
-        SolarForecastPoint {
-            at: Timestamp::from(at),
-            estimate: SolarPower::new(watts),
-        }
-    })
-    .collect()
+    std::iter::successors(Some(start), |&at| Some(at + Elapsed::of(FORECAST_PERIOD)))
+        .take_while(|&at| at < end)
+        .filter_map(|at| {
+            let local = DateTime::from_timestamp_millis(at.as_millis())?.with_timezone(&tz);
+            let hour = f64::from(local.hour()) + f64::from(local.minute()) / 60.0;
+            let watts = if (6.0..=20.0).contains(&hour) {
+                let fraction = ((hour - 13.0) / 7.0 * std::f64::consts::FRAC_PI_2)
+                    .cos()
+                    .max(0.0);
+                peak.as_f64() * fraction
+            } else {
+                0.0
+            };
+            Some(SolarForecastPoint {
+                at,
+                estimate: SolarPower::new(watts),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

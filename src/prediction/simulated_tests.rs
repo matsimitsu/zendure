@@ -16,7 +16,10 @@ fn covers_today_and_tomorrow_in_half_hours() {
 
     assert_eq!(points.len(), 96);
     assert_eq!(points[0].at, Timestamp::from(midnight(2026, 6, 1)));
-    assert_eq!(points[95].at, Timestamp::from(midnight(2026, 6, 3) - SLOT));
+    assert_eq!(
+        points[95].at,
+        Timestamp::from(midnight(2026, 6, 3)) - Elapsed::of(FORECAST_PERIOD)
+    );
 }
 
 /// Amsterdam falls back on 25 October 2026, so tomorrow has 50 half-hours.

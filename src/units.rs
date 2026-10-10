@@ -768,10 +768,6 @@ impl Elapsed {
     pub const MILLISECOND: Elapsed = Elapsed(1);
     pub const HOUR: Elapsed = Elapsed(3_600_000);
 
-    pub const fn of_minutes(minutes: i64) -> Self {
-        Elapsed(minutes * 60_000)
-    }
-
     /// A `Duration` as whole milliseconds, saturating. Config durations are
     /// lenient and unbounded, and a wrapping cast turns an absurd window
     /// negative — already elapsed, so every source reads `Down`. Saturating

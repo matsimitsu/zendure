@@ -4,10 +4,12 @@
 //! rescales the bars. A day is 46, 48 or 50 slots long (DST days), so nothing
 //! here assumes 48.
 
+use std::time::Duration;
+
 use chrono_tz::Tz;
 
 use crate::clock::local_date;
-use crate::units::{Elapsed, KiloWattHours, SolarPower, Timestamp, Watts};
+use crate::units::{Elapsed, KiloWattHours, Percent, SolarPower, Timestamp, WattHours, Watts};
 
 use super::axis::{AxisDensity, AxisPosition, AxisTick};
 use super::day_nav::{DayNavView, DayQuery};
@@ -15,39 +17,52 @@ use super::day_panel::{ChartedDay, DayPanel, DayPlotView, EmptyReason};
 use super::intervals::IntervalHistory;
 use super::plot::{DAY_CHART_HEIGHT, Day, SlotSpan, YScale};
 use super::prices::range_label;
-use super::solar_day::{SOLAR_SLOT, SolarDay, SolarSlot, solar_for, tomorrow_complete};
+use super::solar_day::{SOLAR_SLOT, SolarDay, SolarSlot, solar_days};
 use super::state::{DashboardState, ForecastSnapshot};
-use super::view::{MISSING, MiniStatSub, MiniStatView, SignStyle, format_time, format_watts};
+use super::view::{
+    MISSING, MiniStatSub, MiniStatView, SignStyle, energy_figure, energy_string, format_time,
+    format_watts,
+};
 
 /// The y axis steps, and its grid lines fall, every half kilowatt.
 const SCALE_STEP: Watts = Watts(500);
 
-/// A slot's power is its mean over the slot, so it is held for this long.
-const SLOT_HOURS: f64 = 0.5;
-
-/// Energy over the slots: each slot's mean power held for half an hour.
-pub(super) fn kwh(slots: &[SolarPower]) -> KiloWattHours {
-    // A fold from +0.0, as `sum` starts at −0.0 and an empty day would read `-0.0`.
-    let watts = slots.iter().fold(0.0, |total, p| total + p.get());
-    KiloWattHours(watts * SLOT_HOURS / 1000.0)
+/// A slot's mean power held for `over`.
+fn energy(power: SolarPower, over: Duration) -> WattHours {
+    let watts = power.into_watts();
+    WattHours::integrate(watts, watts, over)
 }
 
-/// Actual against forecast as a whole percent. `None` when the forecast is
-/// zero, where a ratio says nothing.
-pub(super) fn delta_pct(actual: KiloWattHours, forecast: KiloWattHours) -> Option<i32> {
+/// Energy over whole slots.
+pub(super) fn kwh(slots: &[SolarPower]) -> KiloWattHours {
+    slots
+        .iter()
+        .map(|&power| energy(power, SOLAR_SLOT))
+        .sum::<WattHours>()
+        .to_kwh()
+}
+
+/// Actual against forecast, rounded to a whole percent. `None` when the
+/// forecast is zero, where a ratio says nothing.
+pub(super) fn delta_pct(actual: KiloWattHours, forecast: KiloWattHours) -> Option<Percent> {
     if forecast.get() == 0.0 {
         return None;
     }
-    Some(((actual.get() - forecast.get()) / forecast.get() * 100.0).round() as i32)
+    Some(Percent(
+        ((actual.get() - forecast.get()) / forecast.get() * 100.0).round(),
+    ))
 }
 
 /// `+N%`, `−N%` or `±0%`. The minus is U+2212 so it lines up with the plus in
 /// the mono readout.
-pub(super) fn format_delta(pct: i32) -> String {
-    match pct {
-        0 => "±0%".to_owned(),
-        p if p > 0 => format!("+{p}%"),
-        p => format!("\u{2212}{}%", p.unsigned_abs()),
+pub(super) fn format_delta(delta: Percent) -> String {
+    let pct = delta.get();
+    if pct == 0.0 {
+        "±0%".to_owned()
+    } else if pct > 0.0 {
+        format!("+{pct:.0}%")
+    } else {
+        format!("\u{2212}{:.0}%", pct.abs())
     }
 }
 
@@ -133,7 +148,7 @@ impl SolarFigure {
 
     fn kwh(energy: KiloWattHours) -> Self {
         SolarFigure {
-            value: format_kwh(energy),
+            value: energy_figure(energy),
             unit: "kWh",
         }
     }
@@ -176,11 +191,6 @@ pub struct ForecastChartView {
     pub hits: Vec<ForecastHitView>,
 }
 
-/// kWh to one decimal.
-fn format_kwh(energy: KiloWattHours) -> String {
-    format!("{:.1}", energy.get())
-}
-
 /// The slots' powers, a missing one counted as nothing.
 fn powers(slots: impl Iterator<Item = Option<SolarPower>>) -> Vec<SolarPower> {
     slots
@@ -206,18 +216,31 @@ fn scale_top<'a>(days: impl IntoIterator<Item = &'a SolarDay>) -> Watts {
     Watts::rounded(steps * f64::from(SCALE_STEP.get()))
 }
 
+/// Where the shown day stands against the clock.
+#[derive(Debug, Clone, Copy)]
+enum Moment {
+    /// `current` is the slot `now` falls in.
+    Today {
+        now: Timestamp,
+        current: usize,
+    },
+    Other,
+}
+
 /// The shown day with what the readout, chart and stats all read.
 struct ShownDay<'a> {
     day: &'a SolarDay,
     frame: Day,
-    /// Today only: when `now` is, and which slot it falls in.
-    now: Option<(Timestamp, Option<usize>)>,
+    moment: Moment,
     tz: Tz,
 }
 
 impl ShownDay<'_> {
     fn current(&self) -> Option<usize> {
-        self.now.and_then(|(_, current)| current)
+        match self.moment {
+            Moment::Today { current, .. } => Some(current),
+            Moment::Other => None,
+        }
     }
 
     fn end_of(slot: &SolarSlot) -> Timestamp {
@@ -234,27 +257,22 @@ impl ShownDay<'_> {
 
     /// Whether the slot is over, so its measurement is whole.
     fn completed(&self, slot: &SolarSlot) -> bool {
-        self.now.is_some_and(|(now, _)| Self::end_of(slot) <= now)
+        matches!(self.moment, Moment::Today { now, .. } if Self::end_of(slot) <= now)
     }
 }
 
 /// The current slot on today, the day's forecast total on any other.
 fn default_readout(shown: &ShownDay) -> SolarReadoutView {
-    match (shown.now, shown.current()) {
-        (Some(_), Some(index)) => {
-            let slot = &shown.day.slots[index];
+    match shown.moment {
+        Moment::Today { current, .. } => {
+            let slot = &shown.day.slots[current];
             SolarReadoutView {
                 label: format!("Now · {}", shown.label(slot)),
                 forecast: SolarFigure::watts(slot.forecast),
                 actual: Some(SolarFigure::watts(slot.actual)),
             }
         }
-        (Some(_), None) => SolarReadoutView {
-            label: "Now".to_string(),
-            forecast: SolarFigure::watts(None),
-            actual: Some(SolarFigure::watts(None)),
-        },
-        (None, _) => SolarReadoutView {
+        Moment::Other => SolarReadoutView {
             label: "Day total".to_string(),
             forecast: SolarFigure::kwh(kwh(&powers(shown.day.forecast()))),
             actual: None,
@@ -263,28 +281,41 @@ fn default_readout(shown: &ShownDay) -> SolarReadoutView {
 }
 
 fn stats(shown: &ShownDay) -> Vec<MiniStatView> {
-    match shown.now {
-        Some(_) => today_stats(shown, shown.current().unwrap_or(0)),
-        None => vec![peak_stat(shown)],
+    match shown.moment {
+        Moment::Today { now, current } => today_stats(shown, now, current),
+        Moment::Other => vec![peak_stat(shown)],
     }
 }
 
-/// So far against the forecast for the same slots, and what is still to come.
-fn today_stats(shown: &ShownDay, current: usize) -> Vec<MiniStatView> {
+/// So far against the forecast for the same span, and what is still to come.
+fn today_stats(shown: &ShownDay, now: Timestamp, current: usize) -> Vec<MiniStatView> {
     let slots = &shown.day.slots;
-    // Only slots with a measurement, so a gap in the record never reads as
+    // The two totals split at `now`, not at a slot edge: the slot in progress
+    // counts its elapsed part in So far and the rest in Still expected, so
+    // what it has already produced is in exactly one of them.
+    let elapsed = slots[current]
+        .start
+        .span_within(now, SOLAR_SLOT)
+        .unwrap_or(Duration::ZERO);
+    let remaining = SOLAR_SLOT.saturating_sub(elapsed);
+    let spans = std::iter::repeat_n(SOLAR_SLOT, current).chain([elapsed]);
+    // Only spans with a measurement, so a gap in the record never reads as
     // underproduction.
-    let (actual, forecast): (Vec<SolarPower>, Vec<SolarPower>) = shown
-        .day
-        .actual()
-        .zip(shown.day.forecast())
-        .take(current)
-        .filter_map(|(actual, forecast)| Some((actual?, forecast.unwrap_or(SolarPower::ZERO))))
-        .unzip();
-    let (actual, forecast) = (kwh(&actual), kwh(&forecast));
+    let (actual, forecast) = slots
+        .iter()
+        .zip(spans)
+        .filter_map(|(slot, span)| {
+            let forecast = slot.forecast.unwrap_or(SolarPower::ZERO);
+            Some((energy(slot.actual?, span), energy(forecast, span)))
+        })
+        .fold(
+            (WattHours::ZERO, WattHours::ZERO),
+            |(actual, forecast), (a, f)| (actual + a, forecast + f),
+        );
+    let (actual, forecast) = (actual.to_kwh(), forecast.to_kwh());
     let so_far = MiniStatView {
         label: "So far",
-        value: format!("{} kWh", format_kwh(actual)),
+        value: energy_string(actual),
         sub: delta_pct(actual, forecast).map(|pct| MiniStatSub {
             text: format!("{} vs forecast", format_delta(pct)),
             tone: None,
@@ -293,9 +324,13 @@ fn today_stats(shown: &ShownDay, current: usize) -> Vec<MiniStatView> {
 
     let ahead = powers(slots[current..].iter().map(|slot| slot.forecast));
     let until = last_sun_slot(&ahead).map(|last| &slots[current + last]);
+    let expected = ahead[1..]
+        .iter()
+        .map(|&power| energy(power, SOLAR_SLOT))
+        .fold(energy(ahead[0], remaining), |total, e| total + e);
     let still_expected = MiniStatView {
         label: "Still expected",
-        value: format!("{} kWh", format_kwh(kwh(&ahead))),
+        value: energy_string(expected.to_kwh()),
         sub: until.map(|slot| MiniStatSub {
             text: format!("until {}", format_time(ShownDay::end_of(slot), shown.tz)),
             tone: None,
@@ -416,12 +451,28 @@ fn chart(shown: &ShownDay, top: Watts) -> ForecastChartView {
     }
 }
 
-fn subtitle(forecast: &ForecastSnapshot, tz: Tz) -> String {
+/// The fetch time, dated once it is no longer today's so a stale forecast
+/// says so.
+fn subtitle(forecast: &ForecastSnapshot, now: Timestamp, tz: Tz) -> String {
     let label = "Forecast vs. actual production, per 30 min";
     match forecast.as_of {
-        Some(at) => format!("{label} · fetched {}", format_time(at, tz)),
+        Some(at) if local_date(at, tz) == local_date(now, tz) => {
+            format!("{label} · fetched {}", format_time(at, tz))
+        }
+        Some(at) => format!("{label} · fetched {}", format_day_time(at, tz)),
         None => format!("{label} · fetch pending"),
     }
+}
+
+/// `Thu 8 Oct 18:30`.
+fn format_day_time(at: Timestamp, tz: Tz) -> String {
+    use chrono::TimeZone;
+    tz.timestamp_millis_opt(at.as_millis())
+        .single()
+        .map_or_else(
+            || format_time(at, tz),
+            |dt| dt.format("%a %-d %b %H:%M").to_string(),
+        )
 }
 
 /// The panel on the day `query` asks for.
@@ -441,7 +492,8 @@ pub fn requested_forecast_panel(
 /// The day `query` asks for, clamped to today and tomorrow, the latter only
 /// once its forecast covers every slot. Today has a now: its readout
 /// defaults to the current slot and its line stops at the last whole one.
-/// Tomorrow defaults to its forecast total.
+/// Tomorrow defaults to its forecast total. A forecast with nothing for today
+/// (none fetched, or only older days cached) waits for the next fetch.
 pub fn forecast_panel_view(
     query: DayQuery,
     context: &SolarContext,
@@ -452,44 +504,35 @@ pub fn forecast_panel_view(
         return DayPanel::Empty(EmptyReason::NotConfigured);
     }
     let forecast = context.forecast;
-    // A clock no calendar can place has no today to forecast.
-    let Some(today) = local_date(now, tz).filter(|_| !forecast.points.is_empty()) else {
+    let Some(days) = solar_days(forecast, context.intervals, tz, now)
+        .filter(|days| days.today.forecast().any(|slot| slot.is_some()))
+    else {
         return DayPanel::Empty(EmptyReason::Waiting);
     };
-    let tomorrow = today
-        .succ_opt()
-        .filter(|_| tomorrow_complete(forecast, tz, now));
-    let latest = tomorrow.unwrap_or(today);
+    let today = days.today.date;
+    let latest = days.tomorrow.as_ref().map_or(today, |day| day.date);
     let date = query.resolve(today, today, latest);
-    let days: Vec<SolarDay> = [Some(today), tomorrow]
-        .into_iter()
-        .flatten()
-        .filter_map(|day| solar_for(day, forecast, context.intervals, tz, now))
-        .collect();
-    let Some(day) = days.iter().find(|day| day.date == date) else {
+    let Some(day) = days.get(date) else {
         return DayPanel::Empty(EmptyReason::Waiting);
     };
 
     let nav = DayNavView::new(date, today, Some(today), latest);
-    let frame = Day::of(date, tz);
-    let now = nav.is_today().then(|| {
-        let current = day
-            .slots
-            .iter()
-            .position(|slot| slot.start <= now && now < ShownDay::end_of(slot));
-        (now, current)
-    });
+    let current = day.slots.iter().rposition(|slot| slot.start <= now);
+    let moment = match current {
+        Some(current) if nav.is_today() => Moment::Today { now, current },
+        _ => Moment::Other,
+    };
     let shown = ShownDay {
         day,
-        frame,
-        now,
+        frame: Day::of(date, tz),
+        moment,
         tz,
     };
     DayPanel::Shown(Box::new(ForecastDayView {
-        subtitle: subtitle(forecast, tz),
+        subtitle: subtitle(forecast, now, tz),
         readout: default_readout(&shown),
         stats: stats(&shown),
-        chart: chart(&shown, scale_top(&days)),
+        chart: chart(&shown, scale_top(days.iter())),
         nav,
     }))
 }

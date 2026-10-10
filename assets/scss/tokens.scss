@@ -131,7 +131,7 @@
 
   // Solar forecast panel: the forecast bars are the accent at 0.38 alpha; the
   // actual line is near text-primary so amber keeps meaning "now".
-  --color-solar-forecast: oklch(0.75 0.15 75 / 0.38);
+  --color-solar-forecast: oklch(from var(--color-accent) l c h / 0.38);
   --color-solar-actual: oklch(0.93 0.01 250);
 
   // Sizes

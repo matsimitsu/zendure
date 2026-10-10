@@ -36,17 +36,20 @@ fn delta_is_none_for_a_zero_forecast() {
 
 #[test]
 fn delta_rounds_to_the_nearest_percent() {
-    assert_eq!(delta_pct(KiloWattHours(1.04), KiloWattHours(1.0)), Some(4));
-    assert_eq!(delta_pct(KiloWattHours(1.046), KiloWattHours(1.0)), Some(5));
-    assert_eq!(delta_pct(KiloWattHours(0.5), KiloWattHours(1.0)), Some(-50));
-    assert_eq!(delta_pct(KiloWattHours(1.004), KiloWattHours(1.0)), Some(0));
+    let delta = |actual| delta_pct(KiloWattHours(actual), KiloWattHours(1.0)).map(format_delta);
+    assert_eq!(delta(1.04).as_deref(), Some("+4%"));
+    assert_eq!(delta(1.046).as_deref(), Some("+5%"));
+    assert_eq!(delta(0.5).as_deref(), Some("\u{2212}50%"));
+    assert_eq!(delta(1.004).as_deref(), Some("±0%"));
+    assert_eq!(delta(0.996).as_deref(), Some("±0%"));
 }
 
 #[test]
 fn delta_formats_with_a_real_minus_sign() {
-    assert_eq!(format_delta(4), "+4%");
-    assert_eq!(format_delta(-12), "\u{2212}12%");
-    assert_eq!(format_delta(0), "±0%");
+    assert_eq!(format_delta(Percent(4.0)), "+4%");
+    assert_eq!(format_delta(Percent(-12.0)), "\u{2212}12%");
+    assert_eq!(format_delta(Percent(0.0)), "±0%");
+    assert_eq!(format_delta(Percent(-0.0)), "±0%");
 }
 
 #[test]
@@ -65,18 +68,14 @@ fn last_sun_is_the_last_nonzero_slot() {
 
 use chrono::{NaiveDate, TimeZone};
 
-use crate::clock::local_day_bounds;
 use crate::fixtures::{amsterdam, date, journey, local};
 use crate::units::SolarForecastPoint;
 use crate::web::plot::{CHART_WIDTH, testing};
 use crate::web::templates::forecast_panel;
 
 /// Every half-hour slot start of local `day`.
-fn slot_starts(day: NaiveDate) -> Vec<Timestamp> {
-    let (start, end) = local_day_bounds(day, amsterdam()).unwrap();
-    std::iter::successors(Some(start), |&at| Some(at + Elapsed::of(SOLAR_SLOT)))
-        .take_while(|&at| at < end)
-        .collect()
+fn slot_starts(day: NaiveDate) -> impl Iterator<Item = Timestamp> {
+    Day::of(day, amsterdam()).slot_starts(SOLAR_SLOT)
 }
 
 /// A bell peaking at 2,000 W in slot 26 (13:00 on a 48-slot day), with sun
@@ -91,7 +90,6 @@ fn forecast(days: &[NaiveDate], watts: impl Fn(NaiveDate, usize) -> f64) -> Fore
         .iter()
         .flat_map(|&day| {
             slot_starts(day)
-                .into_iter()
                 .enumerate()
                 .map(move |(slot, at)| (day, slot, at))
         })
@@ -109,7 +107,7 @@ fn forecast(days: &[NaiveDate], watts: impl Fn(NaiveDate, usize) -> f64) -> Fore
 /// One meter reading at the start of each of `day`'s first `slots` slots.
 fn measured(day: NaiveDate, slots: usize, watts: impl Fn(usize) -> f64) -> IntervalHistory {
     let mut intervals = journey::interval_ring();
-    for (slot, at) in slot_starts(day).into_iter().take(slots).enumerate() {
+    for (slot, at) in slot_starts(day).take(slots).enumerate() {
         intervals.record(&journey::meter_event(at, 0.0, watts(slot)));
     }
     intervals
@@ -278,7 +276,7 @@ fn a_gap_in_the_record_breaks_the_line() {
     let today = date(6, 15);
     let forecast = forecast(&[today], |_, slot| bell(slot));
     let mut intervals = journey::interval_ring();
-    for (slot, at) in slot_starts(today).into_iter().enumerate().take(24) {
+    for (slot, at) in slot_starts(today).enumerate().take(24) {
         if slot != 20 {
             intervals.record(&journey::meter_event(at, 0.0, bell(slot)));
         }
@@ -303,7 +301,8 @@ fn so_far_compares_with_the_forecast_for_the_same_slots() {
     assert_eq!(so_far.value, "2.9 kWh");
     assert_eq!(so_far.sub.as_ref().unwrap().text, "+4% vs forecast");
     assert_eq!(still_expected.label, "Still expected");
-    assert_eq!(still_expected.value, "7.2 kWh");
+    // Slots 24–35 forecast 7.2 kWh, less the 10 minutes of slot 24 gone by.
+    assert_eq!(still_expected.value, "6.9 kWh");
     assert_eq!(still_expected.sub.as_ref().unwrap().text, "until 18:00");
 }
 
@@ -316,7 +315,7 @@ fn before_sunrise_so_far_has_no_forecast_to_compare_with() {
 
     assert_eq!(view.stats[0].value, "0.0 kWh");
     assert!(view.stats[0].sub.is_none());
-    assert_eq!(format_kwh(kwh(&[])), "0.0");
+    assert_eq!(energy_figure(kwh(&[])), "0.0");
     let html = render(view);
     assert_eq!(html.matches("mini-stat__sub").count(), 1, "{html}");
 }
@@ -451,4 +450,86 @@ fn only_sunny_slots_have_a_bar_inset_from_its_slot() {
     assert!((peak.span.x - inset.x).abs() < 1e-6);
     assert!((peak.span.width - inset.width).abs() < 1e-6);
     assert!(peak.y.abs() < 1e-6, "the peak fills the 2,000 W scale");
+}
+
+/// At 12:10 slot 24 is a third gone: that third of its measurement is in So
+/// far, compared with a third of its forecast, and the other two thirds of
+/// its forecast are still expected.
+#[test]
+fn the_slot_in_progress_splits_at_now_between_the_two_totals() {
+    let today = date(6, 15);
+    let forecast = forecast(&[today], |_, slot| bell(slot));
+    let intervals = measured(today, 25, |slot| bell(slot) * 1.04);
+    let view = shown(view(None, &forecast, &intervals, local(6, 15, 12, 10)));
+
+    let [so_far, still_expected] = &view.stats[..] else {
+        panic!("today has two stats");
+    };
+    // 2.8 kWh by 12:00 and a third of 1,600 W for half an hour: 3.07 kWh
+    // forecast, 4% more measured.
+    assert_eq!(so_far.value, "3.2 kWh");
+    assert_eq!(so_far.sub.as_ref().unwrap().text, "+4% vs forecast");
+    assert_eq!(still_expected.value, "6.9 kWh");
+}
+
+/// Exactly on a slot edge nothing of the new slot has gone by.
+#[test]
+fn on_a_slot_edge_the_new_slot_is_wholly_still_expected() {
+    let today = date(6, 15);
+    let forecast = forecast(&[today], |_, slot| bell(slot));
+    let intervals = measured(today, 24, bell);
+    let view = shown(view(None, &forecast, &intervals, local(6, 15, 12, 0)));
+
+    assert_eq!(view.stats[0].value, "2.8 kWh");
+    assert_eq!(view.stats[1].value, "7.2 kWh");
+}
+
+#[test]
+fn a_fetch_from_an_earlier_day_is_dated() {
+    let (yesterday, today) = (date(6, 14), date(6, 15));
+    let mut forecast = forecast(&[yesterday, today], |_, slot| bell(slot));
+    forecast.as_of = Some(local(6, 14, 18, 30));
+    let view = shown(view(
+        None,
+        &forecast,
+        &journey::interval_ring(),
+        local(6, 15, 12, 10),
+    ));
+
+    assert_eq!(
+        view.subtitle,
+        "Forecast vs. actual production, per 30 min · fetched Sun 14 Jun 18:30"
+    );
+}
+
+#[test]
+fn a_fetch_from_today_shows_only_its_time() {
+    let forecast = forecast(&[date(6, 15)], |_, slot| bell(slot));
+    let view = shown(view(
+        None,
+        &forecast,
+        &journey::interval_ring(),
+        local(6, 15, 12, 10),
+    ));
+
+    assert_eq!(
+        view.subtitle,
+        "Forecast vs. actual production, per 30 min · fetched 06:00"
+    );
+}
+
+/// A cache holding only older days has nothing to draw today, so the panel
+/// waits for the next fetch rather than showing bare axes.
+#[test]
+fn a_forecast_with_nothing_for_today_waits() {
+    let mut forecast = forecast(&[date(6, 13), date(6, 14)], |_, slot| bell(slot));
+    forecast.as_of = Some(local(6, 13, 18, 30));
+    let view = view(
+        Some(date(6, 16)),
+        &forecast,
+        &journey::interval_ring(),
+        local(6, 15, 12, 10),
+    );
+
+    assert_eq!(empty(view), EmptyReason::Waiting);
 }

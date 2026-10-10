@@ -80,6 +80,12 @@ impl<T: Averaged> Mean<T> {
         self.count += 1;
     }
 
+    /// Folds in another span's samples, each weighing as much as one of ours.
+    pub(crate) fn merge(&mut self, other: &Mean<T>) {
+        self.sum += other.sum;
+        self.count += other.count;
+    }
+
     /// `None` until something has been added.
     pub(crate) fn get(&self) -> Option<T> {
         (self.count > 0).then(|| T::from_mean(self.sum / f64::from(self.count)))
@@ -352,6 +358,14 @@ impl IntervalHistory {
     pub fn averages(&self, index: IntervalIndex) -> IntervalAverages {
         self.bucket(index)
             .map(IntervalBucket::averages)
+            .unwrap_or_default()
+    }
+
+    /// The interval's solar samples, unaveraged, so a caller spanning
+    /// several intervals can weigh each by how much it holds.
+    pub(crate) fn solar(&self, index: IntervalIndex) -> Mean<SolarPower> {
+        self.bucket(index)
+            .map(|bucket| bucket.solar.clone())
             .unwrap_or_default()
     }
 
