@@ -82,7 +82,7 @@ pub fn host_class(view: &EnergyFlowsView) -> String {
 /// the stream may overwrite the panel.
 fn day_nav_markup(nav: &DayNavView, interval: FlowResolution) -> Markup {
     let link = |day: Option<NaiveDate>| DayNavLink {
-        href: page_href(day, interval),
+        href: page_href(day, interval, &nav.keep),
         hx_get: fragment_href(day),
     };
     day_nav::render(&DayNav {
@@ -99,11 +99,12 @@ fn day_nav_markup(nav: &DayNavView, interval: FlowResolution) -> Markup {
 
 /// The whole page on `day`, for a browser following the link itself. The
 /// interval rides along because only the script remembers it otherwise.
-fn page_href(day: Option<NaiveDate>, interval: FlowResolution) -> String {
-    match day {
-        Some(day) => format!("/?day={day}&interval={}", interval.key()),
-        None => format!("/?interval={}", interval.key()),
-    }
+fn page_href(day: Option<NaiveDate>, interval: FlowResolution, keep: &str) -> String {
+    let own = match day {
+        Some(day) => format!("day={day}&interval={}", interval.key()),
+        None => format!("interval={}", interval.key()),
+    };
+    day_nav::page_href(&[&own, keep])
 }
 
 /// The panel alone; the script adds the interval it is showing.

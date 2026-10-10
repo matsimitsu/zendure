@@ -101,8 +101,21 @@ fn without_a_feed_the_panel_says_how_to_configure_prices() {
 }
 
 #[test]
-fn a_feed_with_nothing_for_today_is_waiting() {
+fn a_feed_with_nothing_for_today_waits_with_a_nav_back_to_the_cached_days() {
     let view = view_at(date(1), &snapshot(&whole_day(0, rising)), local(1, 12, 0));
+    let html = price_panel::render(&view).into_string();
+    let nav = unpriced(view);
+
+    assert!(nav.is_today());
+    assert_eq!(nav.previous, Some(date(0)));
+    assert!(html.contains("Waiting for prices…"));
+    assert!(html.contains(r#"href="/?price_day=2025-09-04""#));
+    assert!(html.contains(r#"data-day="2025-09-05" data-live="true""#));
+}
+
+#[test]
+fn a_feed_with_nothing_at_all_is_waiting() {
+    let view = view_at(date(1), &snapshot(&[]), local(1, 12, 0));
 
     assert_eq!(empty(view), EmptyReason::Waiting);
 }
@@ -110,7 +123,8 @@ fn a_feed_with_nothing_for_today_is_waiting() {
 #[test]
 fn another_day_without_prices_keeps_its_nav_to_step_on() {
     let view = view_at(date(2), &snapshot(&whole_day(4, rising)), local(4, 12, 0));
-    assert_eq!(view.data_day(), "2025-09-06");
+    assert_eq!(view.data_day(), Some(date(2)));
+    assert!(!view.data_live());
     let nav = unpriced(view);
 
     assert_eq!(nav.previous, Some(date(1)));
@@ -124,16 +138,18 @@ fn another_day_without_prices_keeps_its_nav_to_step_on() {
     .into_string();
     assert!(html.contains("No prices for this day"));
     assert!(html.contains("hx-get=\"/fragments/price-panel?day=2025-09-07\""));
-    assert!(html.contains("data-day=\"2025-09-06\""));
+    assert!(html.contains("data-day=\"2025-09-06\" data-live=\"false\""));
 }
 
 #[test]
-fn todays_empty_state_still_marks_the_day_for_the_host() {
+fn todays_empty_state_still_marks_the_panel_live_for_the_host() {
     let view = view_at(date(1), &snapshot(&[]), local(1, 12, 0));
-    assert_eq!(view.data_day(), "today");
+    assert_eq!(view.data_day(), None);
+    assert!(view.data_live());
 
     let html = price_panel::render(&view).into_string();
-    assert!(html.contains("data-day=\"today\""));
+    assert!(html.contains("data-live=\"true\""));
+    assert!(!html.contains("data-day"));
     assert!(!html.contains("day-nav"));
 }
 
@@ -241,19 +257,62 @@ fn a_block_starting_in_the_repeated_hour_names_where_it_starts() {
     let day_end = start + Elapsed::of(Duration::from_secs(25 * 3600));
     let at = |hours: u64| start + Elapsed::of(Duration::from_secs(hours * 3600));
 
-    assert_eq!(range_label(at(2), at(5), day_end, tz()), "02:00 CEST–04:00");
+    assert_eq!(
+        range_label(at(2), at(5), day_end, tz()),
+        "02:00 CEST–04:00 CET"
+    );
     assert_eq!(range_label(at(0), at(3), day_end, tz()), "00:00–03:00 CEST");
     assert_eq!(range_label(at(3), at(6), day_end, tz()), "02:00–05:00 CET");
 }
 
 #[test]
-fn the_short_dst_day_reads_its_missing_hour_as_a_jump() {
+fn a_block_over_the_repeated_hour_names_both_offsets() {
+    let start =
+        Timestamp::from(chrono::DateTime::parse_from_rfc3339("2026-10-24T22:00:00Z").unwrap());
+    let day_end = start + Elapsed::of(Duration::from_secs(25 * 3600));
+    let at = |hours: u64| start + Elapsed::of(Duration::from_secs(hours * 3600));
+
+    // 01:00 CEST to 03:00 CET is three hours, not the two `01:00–03:00` reads.
+    assert_eq!(
+        range_label(at(1), at(4), day_end, tz()),
+        "01:00 CEST–03:00 CET"
+    );
+}
+
+#[test]
+fn the_short_dst_day_names_both_offsets_across_its_missing_hour() {
     let start =
         Timestamp::from(chrono::DateTime::parse_from_rfc3339("2026-03-28T23:00:00Z").unwrap());
     let day_end = start + Elapsed::of(Duration::from_secs(23 * 3600));
     let at = |hours: u64| start + Elapsed::of(Duration::from_secs(hours * 3600));
 
-    assert_eq!(range_label(at(1), at(2), day_end, tz()), "01:00–03:00");
+    assert_eq!(
+        range_label(at(1), at(2), day_end, tz()),
+        "01:00 CET–03:00 CEST"
+    );
+    assert_eq!(
+        range_label(at(0), at(3), day_end, tz()),
+        "00:00 CET–04:00 CEST"
+    );
+    assert_eq!(range_label(at(2), at(5), day_end, tz()), "03:00–06:00");
+}
+
+#[test]
+fn the_cheapest_block_over_the_repeated_hour_reads_as_three_hours() {
+    // Cheap from 01:00 CEST through the second 02:00, dear everywhere else.
+    let mut points = utc_hours("2026-10-24T22:00:00Z", 25);
+    for (slot, point) in points.iter_mut().enumerate() {
+        point.wholesale = CentsPerKwh(if (1..4).contains(&slot) { 1.0 } else { 30.0 });
+    }
+    let day = NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
+    let view = priced(view_at(
+        day,
+        &snapshot(&points),
+        utc("2026-10-26T12:00:00Z"),
+    ));
+
+    let [cheapest, _] = view.windows.unwrap();
+    assert_eq!(cheapest.value, "01:00 CEST–03:00 CET");
 }
 
 #[test]
@@ -469,7 +528,7 @@ fn today_steps_back_to_yesterday_and_not_ahead_before_tomorrow_is_published() {
     assert_eq!(view.nav.label, "Today");
     assert_eq!(view.nav.previous, Some(date(0).pred_opt().unwrap()));
     assert_eq!(view.nav.next, None, "tomorrow is only partly priced");
-    assert_eq!(day_marker(&view.nav), "today");
+    assert!(view.nav.is_today());
 }
 
 #[test]
@@ -490,7 +549,7 @@ fn the_nav_stops_six_days_back_and_at_tomorrow() {
 
     assert_eq!(oldest.nav.previous, None);
     assert_eq!(oldest.nav.label, "Thu 4 Sep");
-    assert_eq!(day_marker(&oldest.nav), "2025-09-04");
+    assert!(!oldest.nav.is_today());
     assert_eq!(tomorrow.nav.label, "Tomorrow");
     assert_eq!(tomorrow.nav.next, None);
 }
@@ -542,7 +601,10 @@ fn the_markup_carries_what_the_readout_script_reads() {
     assert!(html.contains("data-default-label=\"Now · 13:00–14:00\""));
     assert!(html.contains("data-default-tier=\"normal\""));
     assert!(html.contains("price-tier price-tier--normal"));
-    assert!(html.contains("data-day=\"today\""));
+    assert!(html.contains("data-day=\"2025-09-04\" data-live=\"true\""));
+    assert!(html.contains("data-label=\"13:00–14:00\""));
+    assert!(html.contains("data-slot=\"13\""));
+    assert!(!html.contains("aria-live"));
     assert!(html.contains("hx-get=\"/fragments/price-panel?day=2025-09-03\""));
     assert!(html.contains("href=\"/?price_day=2025-09-03\""));
     assert!(html.contains("price-panel__bar price-panel__bar--cheap price-panel__bar--past"));

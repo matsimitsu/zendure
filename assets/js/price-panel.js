@@ -2,7 +2,7 @@
 //
 // Light DOM and no framework, like <energy-flows>: the SSE stream replaces
 // the host's innerHTML every tick, but the host persists, so listeners and
-// the hovered index live on it and are re-applied to each fresh fragment.
+// the hovered slot live on it and are re-applied to each fresh fragment.
 // All formatting happens in Rust; this only copies strings and moves the
 // highlight.
 const B = "price-panel";
@@ -12,16 +12,18 @@ class PricePanel extends HTMLElement {
     // The element can be re-attached; listeners must be added only once.
     if (this.bound) return;
     this.bound = true;
-    this.hover = null; // index of the hovered/tapped hit rect
+    // The hovered/tapped hit's slot: its hour's place in the day, which a
+    // refetch filling a gap never shifts the way it shifts positions.
+    this.hover = null;
 
     this.addEventListener("pointerover", (e) => {
       if (e.pointerType !== "mouse") return; // touch/pen reach us via click
-      this.setHover(this.indexOf(e));
+      this.setHover(this.slotOf(e));
     });
     // Touch and pen have no hover; the tap is the only signal they give.
     this.addEventListener("click", (e) => {
-      const i = this.indexOf(e);
-      if (i !== null) this.setHover(i);
+      const slot = this.slotOf(e);
+      if (slot !== null) this.setHover(slot);
     });
     // `pointerleave` does not bubble, so moving between bars keeps the readout.
     this.addEventListener("pointerleave", (e) => {
@@ -31,35 +33,38 @@ class PricePanel extends HTMLElement {
     // is a backstop in case the settle phase touches the markup again.
     this.addEventListener("htmx:afterSwap", () => this.apply());
     this.addEventListener("htmx:afterSettle", () => this.apply());
-    // The stream only ever carries today; it must not overwrite another day.
+    // The stream only ever carries today. A panel on another day takes it
+    // only once that day has become today, so one left on tomorrow goes
+    // live at midnight instead of freezing; the server's day boundary, not
+    // the browser's, decides.
     this.addEventListener("htmx:sseBeforeMessage", (e) => {
-      if (this.dataset.day && this.dataset.day !== "today") e.preventDefault();
+      if (this.dataset.live === "true") return;
+      const day = /data-day="([^"]+)"/.exec(e.detail?.data ?? "")?.[1];
+      if (day !== this.dataset.day) e.preventDefault();
     });
     this.apply();
   }
 
-  hits() {
-    return [...this.querySelectorAll(`.${B}__hit`)];
+  slotOf(e) {
+    return e.target.closest?.(`.${B}__hit`)?.dataset.slot ?? null;
   }
 
-  indexOf(e) {
-    const hit = e.target.closest?.(`.${B}__hit`);
-    return hit ? this.hits().indexOf(hit) : null;
-  }
-
-  // The fragment says which day it shows; the host keeps it across swaps.
+  // The fragment says which day it shows and whether it is today; the host
+  // keeps both across swaps.
   mirrorDay() {
-    const marker = this.querySelector("[data-day]");
+    const marker = this.querySelector("[data-live]");
     if (!marker) return;
     if (this.dataset.day !== marker.dataset.day) {
-      // Indexes from another day point at unrelated hours.
+      // Slots from another day point at unrelated hours.
       this.hover = null;
     }
-    this.dataset.day = marker.dataset.day;
+    if (marker.dataset.day) this.dataset.day = marker.dataset.day;
+    else delete this.dataset.day;
+    this.dataset.live = marker.dataset.live;
   }
 
-  setHover(i) {
-    this.hover = i;
+  setHover(slot) {
+    this.hover = slot;
     this.apply();
   }
 
@@ -69,8 +74,11 @@ class PricePanel extends HTMLElement {
     this.mirrorDay();
     const root = this.querySelector(`.${B}__readout`);
     if (!root) return;
-    // A remembered index that no longer exists falls back to the default.
-    const hit = this.hover !== null ? this.hits()[this.hover] : undefined;
+    // A remembered slot that is no longer priced falls back to the default.
+    const hit =
+      this.hover !== null
+        ? this.querySelector(`.${B}__hit[data-slot="${this.hover}"]`)
+        : null;
     const d = root.dataset;
     const label = hit ? hit.dataset.label : d.defaultLabel;
     const value = hit ? hit.dataset.value : d.defaultValue;

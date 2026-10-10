@@ -27,6 +27,20 @@ pub(super) fn query_values<'a>(
     })
 }
 
+/// `key=value` for the last value each of `keys` has in `raw`, joined with
+/// `&`, so a full-page link can keep another panel's choice. Only called once
+/// `raw` has parsed, so every value kept is one a panel accepted.
+pub fn kept_query(raw: Option<&str>, keys: &[&str]) -> String {
+    keys.iter()
+        .filter_map(|key| {
+            query_values(raw, key)
+                .last()
+                .map(|value| format!("{key}={value}"))
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
 /// The last date `key` names in `raw`; `None` when it names none.
 pub fn parse_day_param(raw: Option<&str>, key: &str) -> Result<Option<NaiveDate>, BadQuery> {
     query_values(raw, key).try_fold(None, |_, value| {
@@ -49,6 +63,9 @@ pub struct DayNavView {
     pub label: String,
     /// "7 Oct".
     pub date: String,
+    /// The other panel's query a full-page step link keeps, e.g.
+    /// `price_day=2025-09-05`; empty outside a full page.
+    pub keep: String,
 }
 
 impl DayNavView {
@@ -77,6 +94,7 @@ impl DayNavView {
             next: shown.succ_opt().filter(|_| shown < latest),
             label,
             date: shown.format("%-d %b").to_string(),
+            keep: String::new(),
         }
     }
 

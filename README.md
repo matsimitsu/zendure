@@ -695,11 +695,15 @@ day nav steps from 6 days back to tomorrow once tomorrow is fully priced
 (today until then), with a Today button on past days; a day in range with no
 prices says so and keeps the nav. Out-of-range days clamp to the nearest end.
 Only today is live: the stream's updates are ignored while another day is
-shown. The steps are plain links to `/?price_day=…` too, so they work
-without JavaScript. A DST change gives 23 or 25 bars; on the autumn day the
-repeated hour names its offset (`02:00–03:00 CEST`, then `02:00–03:00 CET`).
+shown, except that a panel left on tomorrow goes live when the server's day
+rolls over to it. The steps are plain links to `/?price_day=…` too, so they
+work without JavaScript, and each panel's links keep the other panel's day.
+A DST change gives 23 or 25 bars; on the autumn day the repeated hour names
+its offset (`02:00–03:00 CEST`, then `02:00–03:00 CET`), and a range across
+the change names both (`01:00 CEST–03:00 CET` is three hours).
 Without `[prices]` the panel says how to configure it; with it, but before
-the first fetch lands, it says it is waiting for prices.
+the first fetch lands, it says it is waiting for prices. If today has no
+prices while earlier days do, it waits with the nav still there.
 
 The EV card shows a car's battery state of charge when `[car_battery]` is
 configured. `kind = "vw_portal"` reads it from the VW Group EU Data Act
