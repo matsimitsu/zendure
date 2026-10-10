@@ -97,7 +97,7 @@ fn pricing(db: &Path, config: Option<&Path>) -> Result<Pricing, Box<dyn std::err
     // hundred bytes a day.
     let rows = read::read_raw_in_range(
         db,
-        analyze::PRICE_KIND,
+        crate::prices::JOURNAL_KIND,
         Timestamp::from_millis(i64::MIN),
         Timestamp::from_millis(i64::MAX),
     )?;

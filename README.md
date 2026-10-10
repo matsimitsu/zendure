@@ -311,7 +311,9 @@ restarting per session, and leaves gaps where a write failed or a prune deleted.
 
 `events.kind` is one of `shelly` and `zendure_poll` (payloads captured verbatim,
 *before* parsing) or `meter`, `device_update` and `mqtt_timeout` (the engine's
-own events, replayable). The first *foldable* event of every session is a
+own events, replayable), or `solar_forecast` and `energy_price` (what the
+forecast and price pollers fetched, for the dashboard and `analyze`; never
+folded). The first *foldable* event of every session is a
 `device_update` carrying the startup poll, so the world a replay rebuilds from
 events is the same world the controller decided against from its first reading.
 It is not necessarily the first row: the startup handshake captures its raw

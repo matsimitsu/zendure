@@ -175,9 +175,6 @@ impl DayTotals {
     }
 }
 
-/// The `events` row kind the price poller journals a fetched batch under.
-pub const PRICE_KIND: &str = "energy_price";
-
 /// Both contracts being compared. Only both together make a comparison; one
 /// alone would be a price list, which the supplier already publishes.
 #[derive(Debug, Clone, Copy, PartialEq)]
