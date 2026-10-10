@@ -330,3 +330,158 @@ async fn the_battery_detail_charts_soc_and_power_in_the_dialog_and_on_its_own_pa
         assert!(body.contains("+ discharge · − charge"), "{body}");
     }
 }
+
+/// Half-hourly forecast points from 4 September 00:00 UTC up to `until`,
+/// beside eight days of prices so every panel has days to step through.
+fn forecast_until(until: &str) -> AppState {
+    use crate::units::{Elapsed, SolarForecastPoint};
+    use crate::web::state::ForecastSnapshot;
+    let parse = |at: &str| Timestamp::from(chrono::DateTime::parse_from_rfc3339(at).unwrap());
+    let (first, until) = (parse("2025-09-04T00:00:00Z"), parse(until));
+    let half_hour = Elapsed::of(std::time::Duration::from_secs(1800));
+    let mut points = Vec::new();
+    let mut at = first;
+    while at < until {
+        points.push(SolarForecastPoint {
+            at,
+            estimate: SolarPower::new(500.0),
+        });
+        at = at + half_hour;
+    }
+    let priced = priced_days(8).dashboard.borrow().clone();
+    app_state_with(|state| {
+        state.price_feed = priced.price_feed;
+        state.prices = priced.prices;
+        state.forecast_feed = true;
+        state.forecast = ForecastSnapshot {
+            points,
+            as_of: Some(state.as_of),
+        };
+    })
+}
+
+/// Through tomorrow, 5 September.
+fn solar_tomorrow_published() -> AppState {
+    forecast_until("2025-09-06T00:00:00Z")
+}
+
+/// Tomorrow's forecast stops at noon.
+fn solar_tomorrow_incomplete() -> AppState {
+    forecast_until("2025-09-05T12:00:00Z")
+}
+
+#[tokio::test]
+async fn an_unparsable_solar_day_is_a_bad_request() {
+    let (status, _) = get("/fragments/forecast-panel?day=someday", true).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, _) = get("/?solar_day=2025-02-30", false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn the_forecast_fragment_steps_to_tomorrow_and_clamps_to_its_range() {
+    let cases = [
+        ("2025-09-05", "2025-09-05"),
+        ("2099-01-01", "2025-09-05"),
+        ("2020-01-01", TODAY),
+        (TODAY, TODAY),
+    ];
+    for (asked, shown) in cases {
+        let (status, body) = get_from(
+            solar_tomorrow_published(),
+            &format!("/fragments/forecast-panel?day={asked}"),
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.contains("<html"));
+        assert!(
+            body.contains(&format!(r#"data-day="{shown}""#)),
+            "{asked}: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn tomorrow_has_no_next_and_no_today_button_but_steps_back() {
+    let (_, body) = get_from(
+        solar_tomorrow_published(),
+        "/fragments/forecast-panel?day=2025-09-05",
+        true,
+    )
+    .await;
+
+    assert!(body.contains(r#"data-live="false""#), "{body}");
+    assert!(body.contains(r#"hx-get="/fragments/forecast-panel?day=2025-09-04""#));
+    assert!(body.contains(r#"href="/?solar_day=2025-09-04""#));
+    assert!(!body.contains("day-nav__today"));
+    assert!(!body.contains("solar_day=2025-09-06"));
+}
+
+#[tokio::test]
+async fn an_incomplete_tomorrow_clamps_to_today_with_next_disabled() {
+    let (status, body) = get_from(
+        solar_tomorrow_incomplete(),
+        "/fragments/forecast-panel?day=2025-09-05",
+        true,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains(&format!(r#"data-day="{TODAY}" data-live="true""#)),
+        "{body}"
+    );
+    assert!(!body.contains("solar_day=2025-09-05"), "{body}");
+    assert!(!body.contains("day=2025-09-05"), "{body}");
+}
+
+#[tokio::test]
+async fn the_page_opens_the_solar_panel_on_solar_day() {
+    let (_, page) = get_from(solar_tomorrow_published(), "/?solar_day=2025-09-05", false).await;
+    assert!(
+        page.contains(r#"sse-swap="forecast-panel" data-day="2025-09-05" data-live="false""#),
+        "{page}"
+    );
+
+    let (_, page) = get_from(solar_tomorrow_incomplete(), "/?solar_day=2025-09-05", false).await;
+    assert!(
+        page.contains(&format!(
+            r#"sse-swap="forecast-panel" data-day="{TODAY}" data-live="true""#
+        )),
+        "{page}"
+    );
+}
+
+#[tokio::test]
+async fn every_panels_page_links_keep_the_other_two_panels_days() {
+    let (_, page) = get_from(
+        solar_tomorrow_published(),
+        "/?day=2025-09-01&interval=15m&price_day=2025-09-03&solar_day=2025-09-05",
+        false,
+    )
+    .await;
+
+    // Flows steps forward keeping price and solar.
+    assert!(
+        page.contains(
+            r#"href="/?day=2025-09-02&amp;interval=15m&amp;price_day=2025-09-03&amp;solar_day=2025-09-05""#
+        ),
+        "{page}"
+    );
+    // Prices step back keeping flows and solar.
+    assert!(
+        page.contains(
+            r#"href="/?price_day=2025-09-02&amp;day=2025-09-01&amp;interval=15m&amp;solar_day=2025-09-05""#
+        ),
+        "{page}"
+    );
+    // Solar steps back keeping flows and prices.
+    assert!(
+        page.contains(
+            r#"href="/?solar_day=2025-09-04&amp;day=2025-09-01&amp;interval=15m&amp;price_day=2025-09-03""#
+        ),
+        "{page}"
+    );
+}

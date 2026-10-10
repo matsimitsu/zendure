@@ -100,6 +100,13 @@ impl ForecastPanelView {
         }
     }
 
+    pub fn nav_mut(&mut self) -> Option<&mut DayNavView> {
+        match self {
+            ForecastPanelView::Empty(_) => None,
+            ForecastPanelView::Forecast(day) => Some(&mut day.nav),
+        }
+    }
+
     /// The day shown, which the host's `data-day` mirrors; `None` with no
     /// nav, which only ever stands for today.
     pub fn data_day(&self) -> Option<NaiveDate> {
@@ -464,12 +471,21 @@ fn subtitle(forecast: &ForecastSnapshot, tz: Tz) -> String {
 
 /// Today's panel, as the page and the stream render it.
 pub fn todays_forecast_panel(state: &DashboardState, tz: Tz) -> ForecastPanelView {
+    requested_forecast_panel(state, None, tz)
+}
+
+/// The panel on the day a request asks for, `None` being today.
+pub fn requested_forecast_panel(
+    state: &DashboardState,
+    day: Option<NaiveDate>,
+    tz: Tz,
+) -> ForecastPanelView {
     let context = SolarContext {
         forecast: &state.forecast,
         intervals: &state.intervals,
         configured: state.forecast_feed,
     };
-    forecast_panel_view(None, &context, state.as_of, tz)
+    forecast_panel_view(day, &context, state.as_of, tz)
 }
 
 /// `day`, or today when `None`, clamped to today and tomorrow, the latter

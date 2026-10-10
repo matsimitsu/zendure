@@ -9,14 +9,15 @@ use axum::routing::get;
 use chrono_tz::Tz;
 use rust_embed::Embed;
 
-use super::day_nav::{BadQuery, kept_query};
+use super::day_nav::{BadQuery, kept_query, parse_day_param};
 use super::entity::Entity;
 use super::flows::{EnergyFlowsView, requested_flows_view};
 use super::past_days::{FlowsQuery, PastDays};
 use super::prices::{PriceDayQuery, requested_price_panel};
+use super::solar::requested_forecast_panel;
 use super::sse::fragment_stream;
 use super::state::{DashboardState, DashboardStateReceiver};
-use super::templates::{energy_flows, layout, price_panel};
+use super::templates::{energy_flows, forecast_panel, layout, price_panel};
 use super::view::{dashboard_view, detail_view};
 use crate::clock::local_date;
 
@@ -39,6 +40,7 @@ pub fn router(state: AppState) -> Router {
         .route("/events", get(events))
         .route("/fragments/energy-flows", get(energy_flows))
         .route("/fragments/price-panel", get(price_panel))
+        .route("/fragments/forecast-panel", get(forecast_panel))
         .route("/detail/{entity}", get(detail))
         .route("/assets/{*path}", get(asset))
         .with_state(state)
@@ -52,14 +54,19 @@ async fn index(
 ) -> Result<Response, Refused> {
     let query = FlowsQuery::parse(raw.as_deref())?;
     let price_day = PriceDayQuery::parse_page(raw.as_deref())?;
+    let solar_day = parse_day_param(raw.as_deref(), "solar_day")?;
     let current = state.dashboard.borrow().clone();
     let mut view = dashboard_view(&current, price_day, state.timezone);
+    view.forecast = requested_forecast_panel(&current, solar_day, state.timezone);
     view.energy_flows = flows_view(&state, &current, query).await?;
-    // Each panel's full-page links keep the other's day, for a browser
-    // without htmx.
-    view.energy_flows.nav.keep = kept_query(raw.as_deref(), &["price_day"]);
+    // Each panel's full-page links keep the other panels' days, for a
+    // browser without htmx.
+    view.energy_flows.nav.keep = kept_query(raw.as_deref(), &["price_day", "solar_day"]);
     if let Some(nav) = view.prices.nav_mut() {
-        nav.keep = kept_query(raw.as_deref(), &["day", "interval"]);
+        nav.keep = kept_query(raw.as_deref(), &["day", "interval", "solar_day"]);
+    }
+    if let Some(nav) = view.forecast.nav_mut() {
+        nav.keep = kept_query(raw.as_deref(), &["day", "interval", "price_day"]);
     }
     Ok(layout::page(&view).into_response())
 }
@@ -86,6 +93,18 @@ async fn price_panel(
     let current = state.dashboard.borrow().clone();
     let view = requested_price_panel(&current, query, state.timezone);
     Ok(price_panel::render(&view).into_response())
+}
+
+/// The solar panel's contents for today or tomorrow, which the step links
+/// swap into its host. Both days are already in the forecast snapshot.
+async fn forecast_panel(
+    State(state): State<AppState>,
+    RawQuery(raw): RawQuery,
+) -> Result<Response, BadQuery> {
+    let day = parse_day_param(raw.as_deref(), "day")?;
+    let current = state.dashboard.borrow().clone();
+    let view = requested_forecast_panel(&current, day, state.timezone);
+    Ok(forecast_panel::render(&view).into_response())
 }
 
 /// Today from the live ring, which the stream keeps current; any earlier day
