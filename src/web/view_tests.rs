@@ -219,6 +219,7 @@ fn every_app_script_loads_as_a_module_with_its_own_scope() {
     let scripts = app_script_tags(&html);
 
     let names: Vec<&str> = scripts.iter().map(|(_, name)| name.as_str()).collect();
+    assert!(names.contains(&"day-chart.js"), "{names:?}");
     assert!(names.contains(&"energy-flows.js"), "{names:?}");
     assert!(names.contains(&"line-chart.js"), "{names:?}");
     assert!(names.contains(&"price-panel.js"), "{names:?}");
