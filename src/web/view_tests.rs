@@ -661,46 +661,6 @@ fn a_sub_watt_grid_reading_reads_as_zero_without_a_sign() {
     );
 }
 
-// --- Forecast panel ----------------------------------------------------------
-
-#[test]
-fn forecast_panel_view_of_an_empty_snapshot_has_no_data() {
-    let view = forecast_panel_view(
-        &ForecastSnapshot::default(),
-        &journey::interval_ring(),
-        at(0),
-        tz(),
-    );
-
-    assert!(!view.has_data);
-    assert!(view.bar_heights.iter().all(|&h| h == 0.0));
-    assert!(view.line_path.is_empty());
-}
-
-/// A gap (a slot with no recorded actual sample) must start a new `M`
-/// subpath rather than drawing a line straight across it.
-#[test]
-fn actual_line_path_starts_a_new_subpath_across_a_gap() {
-    let mut buckets: [Option<f64>; 48] = [None; 48];
-    buckets[12] = Some(1000.0);
-    buckets[13] = Some(1200.0);
-    // bucket 14 is a gap
-    buckets[15] = Some(900.0);
-
-    let path = actual_line_path(&buckets, 2000.0, 100.0);
-
-    let subpaths: Vec<&str> = path.split('M').filter(|s| !s.is_empty()).collect();
-    assert_eq!(subpaths.len(), 2, "expected two subpaths, got: {path}");
-    assert!(
-        subpaths[0].contains('L'),
-        "the first subpath joins slots 12 and 13: {path}"
-    );
-    assert!(
-        !subpaths[1].contains('L'),
-        "a single-slot subpath has nothing to join: {path}"
-    );
-}
-
 /// Home usage is the one stat card carrying real arithmetic rather than a
 /// straight meter reading — 400 W still imported, 750 W of solar and 600 W out
 /// of the pack is a house drawing 1750 W.

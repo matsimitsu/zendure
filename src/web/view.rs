@@ -5,18 +5,16 @@
 use crate::device::PackStatus;
 use crate::models::ControlMode;
 use crate::prices::tiers::Tier;
-use crate::units::{KiloWattHours, Percent, Soc, SolarPower, Timestamp, Watts};
+use crate::units::{KiloWattHours, Percent, Soc, Timestamp, Watts};
 
-use super::axis::{AxisTick, day_axis};
 use super::detail::detail_body;
 use super::entity::Entity;
 use super::flows::{EnergyFlowsView, energy_flows_view};
-use super::intervals::IntervalHistory;
 use super::line_chart::LineChartView;
 use super::prices::{PriceDayQuery, PricePanelView, requested_price_panel};
 use super::soc_bar::SocBarView;
-use super::solar_day::solar_for;
-use super::state::{DashboardState, ForecastSnapshot, Plottable, Sparkline};
+use super::solar::{ForecastPanelView, todays_forecast_panel};
+use super::state::{DashboardState, Plottable, Sparkline};
 use crate::controller::SocLimits;
 
 pub struct StatCardView {
@@ -76,8 +74,8 @@ pub struct MiniStatView {
 /// A third line under a mini stat's value, tinted by what it qualifies.
 pub struct MiniStatSub {
     pub text: String,
-    /// BEM modifier: "cheap" | "expensive".
-    pub tone: Tier,
+    /// BEM modifier: "cheap" | "expensive"; `None` reads neutral.
+    pub tone: Option<Tier>,
 }
 
 pub struct BatteryPanelView {
@@ -106,22 +104,6 @@ pub struct PackRowView {
     pub power: String,
     pub temperature: String,
     pub capacity: String,
-}
-
-/// The forecast panel's contents: a shared-scale bar chart (predicted
-/// production, one bar per local half-hour of today — Solcast's own
-/// resolution) with the actual measured production drawn over it as a line,
-/// for whichever slots have already elapsed.
-pub struct ForecastPanelView {
-    pub has_data: bool,
-    pub as_of: String,
-    /// Pixel heights within the panel's `1000x110` viewBox, one per local
-    /// half-hour of today; `0.0` where no forecast sample fell in that slot.
-    pub bar_heights: Vec<f64>,
-    /// The actual-production line's SVG path `d`, possibly several `M`/`L`
-    /// subpaths where a slot has no recorded sample.
-    pub line_path: String,
-    pub axis: Vec<AxisTick>,
 }
 
 pub struct DecisionLogRowView {
@@ -419,90 +401,6 @@ fn format_log_time(at: Timestamp, now: Timestamp, timezone: chrono_tz::Tz) -> St
     }
 }
 
-// --- Forecast panel: a shared-scale bar+line chart --------------------------
-
-/// The panel's viewBox geometry, shared so the bar and line builders agree.
-pub(super) const FORECAST_CHART_WIDTH: f64 = 1000.0;
-pub(super) const FORECAST_CHART_BASELINE: f64 = 108.0;
-const FORECAST_CHART_TOP_MARGIN: f64 = 4.0;
-
-/// The actual-production line's `d` attribute: one or more `M`/`L` subpaths,
-/// starting a new subpath at every slot with no recorded sample rather than
-/// interpolating across the gap — a restart that lost a slot must read as a
-/// gap, not a smoothed-over guess.
-fn actual_line_path(buckets: &[Option<f64>], scale: f64, plot_height: f64) -> String {
-    let bar_width = FORECAST_CHART_WIDTH / buckets.len() as f64;
-    let mut path = String::new();
-    let mut drawing = false;
-
-    for (h, value) in buckets.iter().enumerate() {
-        let Some(watts) = value else {
-            drawing = false;
-            continue;
-        };
-        let x = (h as f64 + 0.5) * bar_width;
-        let y = FORECAST_CHART_BASELINE - (watts / scale) * plot_height;
-        if drawing {
-            path.push_str(&format!(" L{x:.1},{y:.1}"));
-        } else {
-            if !path.is_empty() {
-                path.push(' ');
-            }
-            path.push_str(&format!("M{x:.1},{y:.1}"));
-            drawing = true;
-        }
-    }
-    path
-}
-
-fn forecast_panel_view(
-    forecast: &ForecastSnapshot,
-    intervals: &IntervalHistory,
-    now: Timestamp,
-    timezone: chrono_tz::Tz,
-) -> ForecastPanelView {
-    let today = crate::clock::local_date(now, timezone)
-        .and_then(|today| solar_for(today, forecast, intervals, timezone, now));
-    let Some(today) = today.filter(|_| !forecast.points.is_empty()) else {
-        return ForecastPanelView {
-            has_data: false,
-            as_of: "No solar forecast configured — add [prediction] to config.toml".to_string(),
-            bar_heights: Vec::new(),
-            line_path: String::new(),
-            axis: day_axis(),
-        };
-    };
-
-    let watts = |power: Option<SolarPower>| power.map(SolarPower::get);
-    let forecast_buckets: Vec<Option<f64>> = today.forecast().map(watts).collect();
-    let actual_buckets: Vec<Option<f64>> = today.actual().map(watts).collect();
-
-    let scale = forecast_buckets
-        .iter()
-        .chain(actual_buckets.iter())
-        .filter_map(|v| *v)
-        .fold(0.0_f64, f64::max)
-        .max(1.0);
-    let plot_height = FORECAST_CHART_BASELINE - FORECAST_CHART_TOP_MARGIN;
-
-    let bar_heights = forecast_buckets
-        .iter()
-        .map(|v| v.map_or(0.0, |w| (w / scale) * plot_height))
-        .collect();
-    let line_path = actual_line_path(&actual_buckets, scale, plot_height);
-
-    ForecastPanelView {
-        has_data: true,
-        as_of: forecast
-            .as_of
-            .map(|at| format!("Forecast last fetched {}", format_time(at, timezone)))
-            .unwrap_or_else(|| "Forecast fetch pending".to_string()),
-        bar_heights,
-        line_path,
-        axis: day_axis(),
-    }
-}
-
 /// Everything the full page and every SSE fragment render from.
 pub fn dashboard_view(
     state: &DashboardState,
@@ -630,7 +528,7 @@ pub fn dashboard_view(
         },
         battery,
         decision_log,
-        forecast: forecast_panel_view(&state.forecast, &state.intervals, state.as_of, timezone),
+        forecast: todays_forecast_panel(state, timezone),
         prices: requested_price_panel(state, price_day, timezone),
         energy_flows: energy_flows_view(&state.intervals, state.as_of, timezone),
     }

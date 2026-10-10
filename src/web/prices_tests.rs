@@ -459,7 +459,7 @@ fn today_looks_ahead_for_its_windows() {
     assert_eq!(cheapest.sub.unwrap().text, "15.0 ct avg");
     assert_eq!(priciest.label, "Priciest 3 h ahead");
     assert_eq!(priciest.value, "21:00–24:00");
-    assert_eq!(priciest.sub.unwrap().tone, Tier::Expensive);
+    assert_eq!(priciest.sub.unwrap().tone, Some(Tier::Expensive));
 }
 
 #[test]

@@ -1,11 +1,25 @@
+@use "../breakpoints" as *;
 @use "../surfaces" as *;
 
+// The block is the persistent `<forecast-panel>` host, so whatever the
+// readout script keeps on it survives the SSE swaps of its contents.
 .forecast-panel {
   @include panel-surface;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
   padding: var(--space-5);
+  font-family: var(--font-ui);
 
-  &__header {
-    margin-bottom: var(--space-4);
+  &__head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+  }
+
+  &__titles {
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
@@ -19,35 +33,169 @@
     @include panel-caption;
   }
 
-  &__empty {
-    @include panel-caption;
-    margin-top: var(--space-2);
+  // Wraps rather than overflows, so the figures never widen a 375px screen.
+  &__readout {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: var(--space-4) var(--space-7);
   }
 
-  &__chart-label {
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
-    color: var(--color-text-faint);
-    margin-bottom: var(--space-2);
-    font-family: var(--font-ui);
+  &__now {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  &__reads {
+    display: flex;
+    align-items: flex-end;
+    gap: var(--space-5);
+  }
+
+  // A fixed width, not a minimum: hovering swaps each figure and its unit
+  // for ones of a different length, and a figure that grew with them would
+  // shove its neighbour and the mini-stats on every bar.
+  &__read {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    width: var(--size-readout-figure);
+  }
+
+  &__read-label {
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+  }
+
+  &__read-row {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+  }
+
+  &__read-value {
+    color: var(--color-text-primary);
+    font-family: var(--font-mono);
+    font-size: var(--text-2xl);
+    font-weight: var(--weight-medium);
+    line-height: var(--leading-tight);
+  }
+
+  &__read-unit {
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+  }
+
+  &__read-caption {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+  }
+
+  &__plot {
+    display: grid;
+    // `minmax(0, …)` so nothing in the plot can widen the panel.
+    grid-template-columns: var(--size-axis-gutter) minmax(0, 1fr);
+    grid-template-rows: var(--size-chart-day) auto;
+    gap: var(--space-2);
+  }
+
+  &__y-axis {
+    display: flex;
+    flex-direction: column;
+
+    .axis {
+      flex: 1;
+    }
   }
 
   &__chart {
-    width: 100%;
-    height: 110px;
     display: block;
-    margin-bottom: var(--space-3);
+    width: 100%;
+    height: 100%;
+    touch-action: pan-y;
+  }
+
+  &__x-axis {
+    grid-column: 2;
+  }
+
+  &__grid {
+    stroke: var(--color-grid-line);
+    stroke-width: var(--stroke-rule);
+  }
+
+  &__now-line {
+    stroke: var(--color-accent);
+    stroke-opacity: var(--opacity-now-line);
+    stroke-width: var(--stroke-now-line);
+    stroke-dasharray: var(--dash-now-line);
+  }
+
+  &__highlight {
+    fill: var(--color-hover-wash);
+  }
+
+  &__hit {
+    fill: transparent;
   }
 
   &__bar {
-    fill: var(--color-accent);
-    opacity: 0.35;
+    fill: var(--color-solar-forecast);
   }
 
-  &__line {
-    stroke: var(--color-accent);
-    stroke-width: 2;
+  &__actual {
+    fill: none;
+    stroke: var(--color-solar-actual);
+    stroke-width: var(--stroke-series);
     stroke-linejoin: round;
+    stroke-linecap: round;
+  }
+
+  &__legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-5);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  &__legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+  }
+
+  &__legend-label {
+    color: var(--color-text-muted);
+  }
+
+  &__swatch {
+    width: var(--size-swatch);
+
+    &--forecast {
+      height: var(--size-swatch);
+      border-radius: var(--radius-sm);
+      background: var(--color-solar-forecast);
+    }
+
+    &--actual {
+      height: var(--size-swatch-line);
+      background: var(--color-solar-actual);
+    }
+  }
+}
+
+// The two figures take their own row, and the mini-stats share the next.
+@include narrow {
+  .forecast-panel__now {
+    flex-basis: 100%;
   }
 }
