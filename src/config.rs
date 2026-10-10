@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::prediction::TimeOfDay;
 use crate::source::shelly::SolarPhase;
 use crate::units::{
-    Efficiency, Gain, GridPower, PowerMargin, RetentionDays, SlewLimit, Soc, SolarPower, WattHours,
-    Watts,
+    CentsPerKwh, Efficiency, Gain, GridPower, Percent, PowerMargin, RetentionDays, SlewLimit, Soc,
+    SolarPower, WattHours, Watts,
 };
 use crate::zendure::POLL_INTERVAL_FLOOR;
 
@@ -221,11 +221,22 @@ impl Taker {
     /// backend, and `known_tables` (which only records tables walked *into*) can't
     /// answer that for an absent one. A present-but-not-a-table key is still fatal.
     fn has_table(&self, name: &str) -> Result<bool, String> {
-        match self.root.get(name) {
-            None => Ok(false),
-            Some(toml::Value::Table(_)) => Ok(true),
-            Some(v) => Err(format!("{name} is not a table, found {}", v.type_str())),
+        // A dotted name (`prices.dynamic`) walks down through its parents; a
+        // parent that is absent or not a table means the leaf is absent too,
+        // since the parent's own shape is the caller's to validate.
+        let mut table = &self.root;
+        let mut segments = name.split('.').peekable();
+        while let Some(segment) = segments.next() {
+            match table.get(segment) {
+                None => return Ok(false),
+                Some(toml::Value::Table(t)) => table = t,
+                Some(v) if segments.peek().is_none() => {
+                    return Err(format!("{name} is not a table, found {}", v.type_str()));
+                }
+                Some(_) => return Ok(false),
+            }
         }
+        Ok(true)
     }
 
     /// Turns whatever is left after every known key is taken into one
@@ -423,6 +434,67 @@ impl PredictionConfig {
             PredictionConfig::Simulated { poll_times, .. } => poll_times,
         }
     }
+}
+
+/// Which wholesale feed `[prices]` reads, selected by `prices.kind` the same
+/// way `prediction.kind` selects its backend.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriceKind {
+    EnergyZero,
+    Simulated,
+}
+
+/// `[prices.dynamic]`: what a dynamic contract adds to the wholesale price to
+/// reach the consumer rate. Every field is required: a missing one would
+/// silently price energy wrong, and money is not a knob to default.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DynamicTariff {
+    /// Supplier surcharge on imported energy, excl. VAT.
+    pub markup: CentsPerKwh,
+    /// Energy tax per kWh, excl. VAT. Changes every January, so the
+    /// configured value has to be re-checked yearly.
+    pub energy_tax: CentsPerKwh,
+    /// Deducted from the wholesale price on exported energy, excl. VAT.
+    pub export_markup: CentsPerKwh,
+    pub vat: Percent,
+}
+
+/// `[prices.fixed]`: a flat contract, already VAT-inclusive.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FixedTariff {
+    pub import: CentsPerKwh,
+    pub export: CentsPerKwh,
+}
+
+/// `[prices]`, present or not — same presence-gates-the-feature rule
+/// `[prediction]` follows. A struct rather than an enum like
+/// [`PredictionConfig`]: no backend has fields of its own (EnergyZero needs no
+/// key), so only `kind` varies.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct PricesConfig {
+    pub kind: PriceKind,
+    pub poll_times: Vec<TimeOfDay>,
+    /// How many past days the first fetch reaches back for. The unit is in the
+    /// name because a bare count says nothing about days vs. fetches.
+    pub backfill_days: u16,
+    pub dynamic: Option<DynamicTariff>,
+    pub fixed: Option<FixedTariff>,
+}
+
+pub const DEFAULT_PRICES_BACKFILL_DAYS: u16 = 60;
+
+/// EnergyZero publishes day-ahead prices in the early afternoon, so the
+/// afternoon anchors catch tomorrow's; the small-hours one catches a late
+/// revision for the day just started.
+pub fn default_price_poll_times() -> Vec<TimeOfDay> {
+    [(0, 5), (15, 0), (17, 0)]
+        .into_iter()
+        .map(|(h, m)| TimeOfDay::new(h, m).expect("default price poll time is valid"))
+        .collect()
 }
 
 /// `[car_battery]`, present or not — same presence-gates-the-feature rule
@@ -810,6 +882,9 @@ pub struct Config {
     /// `None` when `[prediction]` is absent — no forecast poller runs, and
     /// the dashboard's forecast panel renders its empty state.
     pub prediction: Option<PredictionConfig>,
+    /// `None` when `[prices]` is absent — nothing fetches or applies prices.
+    #[allow(dead_code)]
+    pub prices: Option<PricesConfig>,
     /// `None` when `[car_battery]` is absent — no car-battery poller runs,
     /// and the dashboard's EV card stays a placeholder.
     pub car_battery: Option<CarBatteryConfig>,
@@ -886,6 +961,7 @@ impl std::fmt::Debug for Config {
             .field("meter", &self.meter)
             .field("web", &self.web)
             .field("prediction", &self.prediction)
+            .field("prices", &self.prices)
             .field("car_battery", &self.car_battery)
             .field("ha_publish_prefix", &self.ha_publish_prefix)
             .field("charge_margin", &self.charge_margin)
@@ -1014,6 +1090,7 @@ impl Config {
             meter: _,
             web: _,
             prediction: _,
+            prices: _,
             car_battery: _,
             ha_publish_prefix: _,
             journal_path: _,
@@ -1202,6 +1279,51 @@ impl Config {
             None
         };
 
+        // Same presence-gates-the-feature rule as `[prediction]`. Each tariff
+        // table is optional on its own; the fields inside one are not.
+        let prices = if taker.has_table("prices")? {
+            let kind = match taker.required::<String>("prices.kind")?.as_str() {
+                "energyzero" => PriceKind::EnergyZero,
+                "simulated" => PriceKind::Simulated,
+                other => {
+                    return Err(format!(
+                        "prices.kind must be \"energyzero\" or \"simulated\", found {other:?}"
+                    ));
+                }
+            };
+            let poll_times =
+                taker.lenient::<Vec<TimeOfDay>>("prices.poll_times", default_price_poll_times())?;
+            let backfill_days =
+                taker.lenient::<u16>("prices.backfill_days", DEFAULT_PRICES_BACKFILL_DAYS)?;
+            let dynamic = if taker.has_table("prices.dynamic")? {
+                Some(DynamicTariff {
+                    markup: taker.required("prices.dynamic.markup")?,
+                    energy_tax: taker.required("prices.dynamic.energy_tax")?,
+                    export_markup: taker.required("prices.dynamic.export_markup")?,
+                    vat: taker.required("prices.dynamic.vat")?,
+                })
+            } else {
+                None
+            };
+            let fixed = if taker.has_table("prices.fixed")? {
+                Some(FixedTariff {
+                    import: taker.required("prices.fixed.import")?,
+                    export: taker.required("prices.fixed.export")?,
+                })
+            } else {
+                None
+            };
+            Some(PricesConfig {
+                kind,
+                poll_times,
+                backfill_days,
+                dynamic,
+                fixed,
+            })
+        } else {
+            None
+        };
+
         // Same presence-gates-the-feature rule as `[prediction]`.
         let car_battery = if taker.has_table("car_battery")? {
             let kind = taker.required::<String>("car_battery.kind")?;
@@ -1297,6 +1419,7 @@ impl Config {
                 meter,
                 web,
                 prediction,
+                prices,
                 car_battery,
                 ha_publish_prefix,
                 charge_margin,

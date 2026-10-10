@@ -31,6 +31,7 @@ fn config() -> Config {
         meter: MeterConfig::Shelly,
         web: None,
         prediction: None,
+        prices: None,
         car_battery: None,
         ha_publish_prefix: "SECRET-PREFIX".to_string(),
         charge_margin: PowerMargin::new(50),
@@ -615,6 +616,7 @@ fn the_example_config_is_what_production_runs() {
         meter: MeterConfig::Shelly,
         web: None,
         prediction: None,
+        prices: None,
         car_battery: None,
         ha_publish_prefix: "zendure".to_string(),
         charge_margin: PowerMargin::new(50),
@@ -962,4 +964,90 @@ fn the_api_key_never_appears_in_debug_output() {
     let debug = format!("{config:?}");
     assert!(!debug.contains("TOP-SECRET-KEY"), "{debug}");
     assert!(debug.contains("<redacted>"), "{debug}");
+}
+
+// --- `[prices]` --------------------------------------------------------------
+
+fn prices_toml(body: &str) -> String {
+    format!("{}\n[prices]\n{body}", minimal_toml())
+}
+
+#[test]
+fn no_prices_table_is_none_with_zero_warnings() {
+    let (config, warnings) = Config::from_toml_str(&minimal_toml()).unwrap();
+    assert_eq!(warnings, Vec::<String>::new(), "{warnings:?}");
+    assert!(config.prices.is_none());
+}
+
+#[test]
+fn prices_defaults_apply_and_tariffs_are_absent() {
+    let (config, warnings) =
+        Config::from_toml_str(&prices_toml("kind = \"energyzero\"\n")).unwrap();
+    assert_eq!(warnings, Vec::<String>::new(), "{warnings:?}");
+    let prices = config.prices.unwrap();
+    assert_eq!(prices.kind, PriceKind::EnergyZero);
+    assert_eq!(prices.poll_times, default_price_poll_times());
+    assert_eq!(prices.backfill_days, 60);
+    assert_eq!(prices.dynamic, None);
+    assert_eq!(prices.fixed, None);
+}
+
+#[test]
+fn prices_with_both_tariffs_parses() {
+    let toml = prices_toml(
+        "kind = \"simulated\"\npoll_times = [\"01:00\"]\nbackfill_days = 7\n\
+         [prices.dynamic]\nmarkup = 1.5\nenergy_tax = 12.28\nexport_markup = 0.0\nvat = 21.0\n\
+         [prices.fixed]\nimport = 28.0\nexport = 5.0\n",
+    );
+    let (config, warnings) = Config::from_toml_str(&toml).unwrap();
+    assert_eq!(warnings, Vec::<String>::new(), "{warnings:?}");
+    let prices = config.prices.unwrap();
+    assert_eq!(prices.kind, PriceKind::Simulated);
+    assert_eq!(prices.poll_times, vec![TimeOfDay::new(1, 0).unwrap()]);
+    assert_eq!(prices.backfill_days, 7);
+    assert_eq!(
+        prices.dynamic,
+        Some(DynamicTariff {
+            markup: CentsPerKwh(1.5),
+            energy_tax: CentsPerKwh(12.28),
+            export_markup: CentsPerKwh(0.0),
+            vat: Percent(21.0),
+        })
+    );
+    assert_eq!(
+        prices.fixed,
+        Some(FixedTariff {
+            import: CentsPerKwh(28.0),
+            export: CentsPerKwh(5.0),
+        })
+    );
+}
+
+#[test]
+fn an_unknown_prices_kind_is_a_hard_error() {
+    let err = Config::from_toml_str(&prices_toml("kind = \"entsoe\"\n")).unwrap_err();
+    assert!(err.contains("prices.kind"), "{err}");
+}
+
+#[test]
+fn prices_kind_is_required() {
+    let err = Config::from_toml_str(&prices_toml("backfill_days = 5\n")).unwrap_err();
+    assert!(err.contains("prices.kind is required"), "{err}");
+}
+
+#[test]
+fn a_dynamic_tariff_missing_a_field_is_a_hard_error() {
+    let toml = prices_toml("kind = \"energyzero\"\n[prices.dynamic]\nmarkup = 1.0\n");
+    let err = Config::from_toml_str(&toml).unwrap_err();
+    assert!(err.contains("prices.dynamic.energy_tax"), "{err}");
+}
+
+#[test]
+fn a_malformed_backfill_falls_back_with_a_warning() {
+    let (config, warnings) = Config::from_toml_str(&prices_toml(
+        "kind = \"energyzero\"\nbackfill_days = \"lots\"\n",
+    ))
+    .unwrap();
+    assert_eq!(config.prices.unwrap().backfill_days, 60);
+    assert!(warnings.iter().any(|w| w.contains("prices.backfill_days")));
 }
