@@ -109,6 +109,13 @@ Every section of the page that renders live state must appear in `web::sse`'s
 `FRAGMENTS` table, which is what `page_is_live_everywhere_it_claims_to_be`
 checks the page markup against.
 
+## Merging
+
+A personal project: no pull requests. A ticket branch lands on `main` as a
+merge commit, `git merge --no-ff <branch> -m "Merge [REF] <title>"`, after
+the checks above pass on the merged result. Push `main` right after, because a
+local-only `main` vanishes on the next `git fetch origin +main:main`.
+
 ## Documentation
 
 When behavior changes or environment variables are added/removed, update `README.md` to reflect the changes.
