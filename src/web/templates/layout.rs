@@ -12,8 +12,8 @@
 use maud::{DOCTYPE, Markup, html};
 
 use super::components::{
-    back_link, battery_panel, callout, decision_log, detail_view, energy_flows, forecast_panel,
-    modal, page_header, price_panel, stat_card, top_bar,
+    back_link, battery_panel, callout, charger_panel, decision_log, detail_view, energy_flows,
+    forecast_panel, modal, page_header, price_panel, stat_card, top_bar,
 };
 use crate::web::view::{DashboardView, DetailView};
 
@@ -64,6 +64,7 @@ pub fn page(view: &DashboardView) -> Markup {
                         (stat_card::render(&view.stat_cards.ev, "stat-card-ev"))
                     }
                     (battery_panel::render(view.battery.as_ref(), "battery-panel"))
+                    (charger_panel::render(&view.charger, "charger-panel"))
                     // `data-live` is on the host from the first byte, so a
                     // page opened on a past day drops the stream's first
                     // message too.
@@ -137,6 +138,12 @@ pub fn ev_card_inner(view: &DashboardView) -> Markup {
 /// payload must match.
 pub fn battery_panel_inner(view: &DashboardView) -> Markup {
     battery_panel::contents(view.battery.as_ref())
+}
+
+/// The charger panel's contents — what the `charger-panel` SSE event's
+/// payload must match.
+pub fn charger_panel_inner(view: &DashboardView) -> Markup {
+    charger_panel::contents(&view.charger)
 }
 
 /// The flows chart's contents. Its `<energy-flows>` host is the swap target

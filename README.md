@@ -714,6 +714,16 @@ The EV card shows the car's own battery state of charge when `[car_battery]`
 is configured — see below — and a "No vehicle configured" placeholder
 otherwise.
 
+With `[charger]` configured, the EV card's line under the car's state of
+charge follows the charger: `Charging · 7.2 kW`, `Plugged in`, `No car`, or
+`Charger offline (12 min)` once its reading is older than the blind window
+(`mqtt_timeout_secs`). A charger panel under the battery panel shows its
+status, power, per-phase current and voltage, phase mode, session energy and
+duration, and when it was last read, live over the same stream. While the
+discharge hold is active (see EV charger, above) the panel says `Battery
+discharge held`, decided by the same rule the controller uses. Without
+`[charger]` the panel reads `No charger configured`.
+
 The energy flows panel charts today's solar, home, grid and battery power as
 grouped bars on one signed kW scale, per hour (default) or per 15 minutes.
 Grid reads positive while importing and negative while exporting; the

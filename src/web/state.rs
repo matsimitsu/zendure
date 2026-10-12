@@ -8,7 +8,7 @@ use std::path::Path;
 
 use crate::command::Command;
 use crate::config::{DynamicTariff, PricesConfig};
-use crate::controller::SocLimits;
+use crate::controller::{ChargerGuard, SocLimits};
 use crate::device::PackStatus;
 use crate::engine::EngineState;
 use crate::event::Event;
@@ -217,6 +217,10 @@ pub struct DashboardState {
     /// that poller's own schedule. A failed poll leaves this as it was, so
     /// its age (not a fallback value) is what tells a viewer it's stale.
     pub car_soc: Option<(Soc, Timestamp)>,
+    /// The rule the controller holds discharge by, when `[charger]` is
+    /// configured: the panel names the hold through the same predicate, and
+    /// `None` tells "not set up" from "not read yet".
+    pub charger: Option<ChargerGuard>,
     pub as_of: Timestamp,
 }
 
@@ -254,6 +258,7 @@ impl DashboardState {
             price_feed: false,
             forecast_feed: false,
             car_soc: None,
+            charger: None,
             as_of,
         };
         for (at, decision) in history {
@@ -277,6 +282,11 @@ impl DashboardState {
 
     pub fn with_forecast(mut self, configured: bool) -> Self {
         self.forecast_feed = configured;
+        self
+    }
+
+    pub fn with_charger(mut self, guard: Option<ChargerGuard>) -> Self {
+        self.charger = guard;
         self
     }
 
@@ -320,6 +330,12 @@ impl DashboardState {
     /// every event the engine folds.
     pub fn car_soc_tick(&mut self, soc: Soc, at: Timestamp) {
         self.car_soc = Some((soc, at));
+    }
+
+    /// A charger reading folded into `engine`. It carries no history of its
+    /// own, so it only refreshes the snapshot the panel reads from.
+    pub fn charger_tick(&mut self, engine: &EngineState, as_of: Timestamp) {
+        self.refresh(engine, None, as_of);
     }
 
     /// A device poll: SOC, RTE and pack figures move here and nowhere else.

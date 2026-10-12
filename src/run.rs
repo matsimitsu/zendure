@@ -14,7 +14,7 @@ use crate::car_battery;
 use crate::charger::{Charger, ChargerMonitor, ChargerReading};
 use crate::clock::Clock;
 use crate::config::Config;
-use crate::controller::SocLimits;
+use crate::controller::{ChargerGuard, SocLimits};
 use crate::device::{Applied, BatteryMonitor, BatteryReading, ControlPath, PackStatus};
 use crate::engine::Engine;
 use crate::event::Event;
@@ -161,6 +161,10 @@ impl Tick<'_> {
                     &reading.state,
                     hold,
                 );
+                if let Some(tx) = self.dashboard {
+                    let snapshot = engine.state();
+                    tx.send_modify(|state| state.charger_tick(&snapshot, sampled_at.now));
+                }
             }
             Delivery::Quiet => {}
             Delivery::Down(failures) => {
@@ -703,7 +707,13 @@ pub async fn run(
                     engine.soc_limits(startup_clock.weekday, telemetry.min_soc),
                 ))
                 .with_prices(config.prices.as_ref())
-                .with_forecast(config.prediction.is_some());
+                .with_forecast(config.prediction.is_some())
+                .with_charger(
+                    config
+                        .charger
+                        .as_ref()
+                        .map(|_| ChargerGuard::from_session(&config.session())),
+                );
         let (tx, rx) = tokio::sync::watch::channel(seed);
         let past_days = web::PastDays::new(config.journal_path.clone(), configured);
         web_task = web::spawn(web_cfg, rx, config.timezone, past_days, async move {
