@@ -1,0 +1,62 @@
+src/run_tests.rs
+  s_1eb51bc5cbf150::t_956fd14760fe2d 143
+  s_1eb51bc5cbf150::t_f6e0bf7f2fc909 13-14,780-781
+  s_1eb51bc5cbf150::t_d43a70bf0fc6a6 795
+  s_1eb51bc5cbf150::t_7b0a8ceffe1503 715-779,782-794,796-800
+src/controller_tests.rs
+  s_1eb51bc5cbf150::t_6b010f36b09900 2,1649-1748,1754-1774,1791-1816,1818-1831
+  s_1eb51bc5cbf150::t_4b284203cb6419 1775-1790
+  s_1eb51bc5cbf150::t_f6e0bf7f2fc909 1749-1753,1817
+  s_1eb51bc5cbf150::t_b20d5eaa070748 1832
+src/config_tests.rs
+  s_1eb51bc5cbf150::t_7080c33745d4c6 96,122-130
+  s_1eb51bc5cbf150::t_956fd14760fe2d 55,178-180,656
+  s_1eb51bc5cbf150::t_da3770027e9e09 131-132,177
+config.example.virtual.toml
+  s_1eb51bc5cbf150::t_6bfa09d0f11705 157-158
+src/source/synthetic.rs
+  s_1eb51bc5cbf150::t_b7672432116985 11-14,21-23,96-113,115-116,123,140-145,156-157,161,165-174,185,188,306,320,368,372,376
+  s_1eb51bc5cbf150::t_20780ea42dcbf4 393-466
+src/run.rs
+  s_1eb51bc5cbf150::t_b7672432116985 779
+src/controller.rs
+  s_1eb51bc5cbf150::t_452a4cfcc04413 11-12,50-89,159,204,307,309,312,331,349-352,378-380,384,387-392,395-404,428-429,518,523,533,637,639-640,652
+  s_1eb51bc5cbf150::t_4b284203cb6419 620-624,628-632,638,650-651
+  s_1eb51bc5cbf150::t_6a2f933b71934b 653
+src/charger/simulated.rs
+  s_1eb51bc5cbf150::t_b7672432116985 167-170,176
+src/units.rs
+  s_1eb51bc5cbf150::t_780f9e1e0f54d4 980-981
+  s_1eb51bc5cbf150::t_2ef7c98c5fea92 982-983
+src/source/mod.rs
+  s_1eb51bc5cbf150::t_56e14fa1409641 10
+  s_1eb51bc5cbf150::t_b7672432116985 89-92,114-119,123
+src/scenario_tests.rs
+  s_1eb51bc5cbf150::t_c1021892890f3e 101
+config.example.toml
+  s_1eb51bc5cbf150::t_6bfa09d0f11705 158-159,161-164
+README.md
+  s_1eb51bc5cbf150::t_fe2242ce47ebe2 97,170-171,544-546,551-585
+  s_1eb51bc5cbf150::t_735f4b7dfd2369 586
+src/config.rs
+  s_1eb51bc5cbf150::t_f6e0bf7f2fc909 16-17
+  s_1eb51bc5cbf150::t_780f9e1e0f54d4 60-62
+  s_1eb51bc5cbf150::t_8c19e7ea125f91 1029-1031,1033-1035,1093-1096,1147-1151,1189,1238,1261,1532-1535,1568
+  s_1eb51bc5cbf150::t_98c28fda87cd50 63
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8bc7ae90242b0871ff5acbfd7671c9454770d2e7",
+  "prompts": {},
+  "sessions": {
+    "s_1eb51bc5cbf150": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "240820dc-c6c0-4a01-b8ce-f8f066dd22a3",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Beekman <robert@matsimitsu.nl>"
+    }
+  }
+}
