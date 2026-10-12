@@ -129,9 +129,9 @@ impl ChargeProfile {
             power,
             currents,
             voltages,
-            phases: self.phases,
-            session_energy,
-            session_duration: SessionDuration::new(elapsed),
+            phases: Some(self.phases),
+            session_energy: Some(session_energy),
+            session_duration: Some(SessionDuration::new(elapsed)),
         }
     }
 
@@ -142,9 +142,9 @@ impl ChargeProfile {
             power: ChargerDraw::ZERO,
             currents: [MilliAmps::ZERO; 3],
             voltages: [NOMINAL_VOLTAGE; 3],
-            phases: self.phases,
-            session_energy: WattHours::ZERO,
-            session_duration: SessionDuration::ZERO,
+            phases: Some(self.phases),
+            session_energy: Some(WattHours::ZERO),
+            session_duration: Some(SessionDuration::ZERO),
         }
     }
 }

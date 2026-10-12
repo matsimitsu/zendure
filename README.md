@@ -322,6 +322,17 @@ falls back to its failsafe current when that stops. This adapter is
 read-only, so it never writes the heartbeat. Leave load management off until
 the controller can set the charging current itself.
 
+Only the status, cable, current, voltage and power registers (1000–1021) are
+required: a poll that cannot read them fails. The phase mode (404), lifetime
+energy (1036) and session block (1502) are display-only and read on a
+best-effort basis. Firmware that refuses one of them, or reports a phase mode
+other than 0 or 1, still yields a reading. The missing fields show as `—` on
+the dashboard and as unknown in Home Assistant, and a `warn` is logged once
+until the block answers again.
+
+`host` is the address alone (a port belongs in `port`), and `port` must be
+non-zero. Either mistake fails at startup.
+
 The brand, model, serial and firmware are logged at `info` once per
 connection; status and cable changes are logged at `info` as they happen.
 The lifetime energy counter (register 1036) is read but its unit is
@@ -601,7 +612,8 @@ rule reads measured power, not the charger's status, because a charger can
 report Charging at 0 W. `0` disables the hold.
 
 **Fail open.** A reading older than the blind window (`mqtt_timeout_secs`), a
-charger that never answered, or no `[charger]` at all leaves the battery
+charger that never answered, a charger task that crashed (logged as an
+error, the controller carries on), or no `[charger]` at all leaves the battery
 behaving as it would without one, so a dead network link can't park the
 battery indefinitely.
 

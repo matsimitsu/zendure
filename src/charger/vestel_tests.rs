@@ -90,7 +90,7 @@ fn device_map(r: &Registers) -> BTreeMap<u16, u16> {
 fn blocks(r: &Registers) -> RegisterBlocks {
     let map = device_map(r);
     let mut blocks = RegisterBlocks::default();
-    for span in POLL_SPANS {
+    for span in REQUIRED_SPANS.into_iter().chain(BEST_EFFORT_SPANS) {
         let words = (span.start..span.start + span.count)
             .map(|register| map.get(&register).copied().unwrap_or(0))
             .collect();
@@ -111,9 +111,9 @@ fn a_charging_car_parses_from_the_documented_map() {
             power: ChargerDraw::new(11_040),
             currents: [MilliAmps(15_900), MilliAmps(16_000), MilliAmps(16_100)],
             voltages: [Volts(229), Volts(231), Volts(233)],
-            phases: PhaseMode::Three,
-            session_energy: WattHours(4_200.0),
-            session_duration: SessionDuration::new(Duration::from_secs(4_140)),
+            phases: Some(PhaseMode::Three),
+            session_energy: Some(WattHours(4_200.0)),
+            session_duration: Some(SessionDuration::new(Duration::from_secs(4_140))),
         }
     );
 }
@@ -125,7 +125,7 @@ fn an_idle_charger_parses() {
     assert_eq!(state.status, ChargePointStatus::Available);
     assert_eq!(state.cable, CableState::NoCable);
     assert_eq!(state.power, ChargerDraw::ZERO);
-    assert_eq!(state.session_energy, WattHours::ZERO);
+    assert_eq!(state.session_energy, Some(WattHours::ZERO));
 }
 
 #[test]
@@ -134,8 +134,8 @@ fn a_full_car_parses_as_suspended_on_one_phase() {
 
     assert_eq!(state.status, ChargePointStatus::SuspendedEv);
     assert_eq!(state.cable, CableState::VehicleLocked);
-    assert_eq!(state.phases, PhaseMode::One);
-    assert_eq!(state.session_energy, WattHours(20_000.0));
+    assert_eq!(state.phases, Some(PhaseMode::One));
+    assert_eq!(state.session_energy, Some(WattHours(20_000.0)));
 }
 
 /// 70 000 is `0x0001_1170`: read low word first it would be 4464 × 65536.
@@ -149,10 +149,10 @@ fn a_u32_is_read_high_word_first() {
 
     let state = parse(&blocks).unwrap();
 
-    assert_eq!(state.session_energy, WattHours(70_000.0));
+    assert_eq!(state.session_energy, Some(WattHours(70_000.0)));
     assert_eq!(
         state.session_duration,
-        SessionDuration::new(Duration::from_secs(65_536))
+        Some(SessionDuration::new(Duration::from_secs(65_536)))
     );
 }
 
@@ -178,14 +178,32 @@ fn a_status_or_cable_this_build_cannot_name_survives_as_unknown() {
 }
 
 #[test]
-fn an_unknown_phase_mode_fails_the_parse() {
-    let err = parse(&blocks(&Registers {
+fn an_unknown_phase_mode_still_parses_with_its_power() {
+    let state = parse(&blocks(&Registers {
         phases: 7,
         ..CHARGING
     }))
-    .unwrap_err();
+    .unwrap();
 
-    assert!(err.contains("404"), "{err}");
+    assert_eq!(state.power, ChargerDraw::new(11_040));
+    assert_eq!(state.phases, None);
+}
+
+#[test]
+fn the_display_only_blocks_missing_still_parse_with_their_fields_empty() {
+    let mut blocks = blocks(&CHARGING);
+    for span in BEST_EFFORT_SPANS {
+        blocks.0.remove(&span.start);
+    }
+
+    let state = parse(&blocks).unwrap();
+
+    assert_eq!(state.power, ChargerDraw::new(11_040));
+    assert_eq!(state.status, ChargePointStatus::Charging);
+    assert_eq!(state.phases, None);
+    assert_eq!(state.session_energy, None);
+    assert_eq!(state.session_duration, None);
+    assert!(total_energy(&blocks).is_err());
 }
 
 #[test]
@@ -225,8 +243,11 @@ fn the_capture_maps_each_read_start_to_its_words() {
 }
 
 /// A Modbus TCP server answering FC4 from a register map, until the test
-/// ends: enough wire to drive the real client end to end.
-async fn fake_vestel(map: BTreeMap<u16, u16>) -> u16 {
+/// ends: enough wire to drive the real client end to end. A read starting at
+/// any of `refused` gets exception 02 (illegal data address), as firmware
+/// without that block would answer.
+async fn fake_vestel(map: BTreeMap<u16, u16>, refused: &[u16]) -> u16 {
+    let refused = refused.to_vec();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
@@ -235,20 +256,26 @@ async fn fake_vestel(map: BTreeMap<u16, u16>) -> u16 {
                 return;
             };
             let map = map.clone();
+            let refused = refused.clone();
             tokio::spawn(async move {
                 let mut request = [0u8; 12];
                 while stream.read_exact(&mut request).await.is_ok() {
                     let start = u16::from_be_bytes([request[8], request[9]]);
                     let count = u16::from_be_bytes([request[10], request[11]]);
-                    let words: Vec<u8> = (start..start + count)
-                        .flat_map(|r| map.get(&r).copied().unwrap_or(0).to_be_bytes())
-                        .collect();
-                    let length = u16::try_from(3 + words.len()).unwrap();
-                    let byte_count = u8::try_from(words.len()).unwrap();
                     let mut response = vec![request[0], request[1], 0, 0];
-                    response.extend(length.to_be_bytes());
-                    response.extend([request[6], 4, byte_count]);
-                    response.extend(words);
+                    if refused.contains(&start) {
+                        response.extend(3u16.to_be_bytes());
+                        response.extend([request[6], 0x84, 0x02]);
+                    } else {
+                        let words: Vec<u8> = (start..start + count)
+                            .flat_map(|r| map.get(&r).copied().unwrap_or(0).to_be_bytes())
+                            .collect();
+                        let length = u16::try_from(3 + words.len()).unwrap();
+                        let byte_count = u8::try_from(words.len()).unwrap();
+                        response.extend(length.to_be_bytes());
+                        response.extend([request[6], 4, byte_count]);
+                        response.extend(words);
+                    }
                     if stream.write_all(&response).await.is_err() {
                         return;
                     }
@@ -271,7 +298,7 @@ fn client(port: u16) -> VestelClient {
 
 #[tokio::test]
 async fn a_poll_reads_parses_and_captures_over_modbus_tcp() {
-    let port = fake_vestel(device_map(&CHARGING)).await;
+    let port = fake_vestel(device_map(&CHARGING), &[]).await;
     let client = client(port);
 
     for _ in 0..2 {
@@ -283,19 +310,52 @@ async fn a_poll_reads_parses_and_captures_over_modbus_tcp() {
     }
 }
 
-/// The bytes that failed to parse are the ones a parser fix needs.
 #[tokio::test]
-async fn a_poll_that_fails_to_parse_still_carries_its_registers() {
-    let unparseable = Registers {
-        phases: 7,
-        ..CHARGING
-    };
-    let port = fake_vestel(device_map(&unparseable)).await;
+async fn refused_display_only_blocks_still_yield_a_reading() {
+    let port = fake_vestel(
+        device_map(&CHARGING),
+        &BEST_EFFORT_SPANS.map(|span| span.start),
+    )
+    .await;
+    let client = client(port);
 
+    for _ in 0..2 {
+        let reading = client.poll().await.unwrap();
+
+        assert_eq!(reading.state.power, ChargerDraw::new(11_040));
+        assert_eq!(reading.state.phases, None);
+        assert_eq!(reading.state.session_energy, None);
+        assert_eq!(reading.state.session_duration, None);
+        assert_eq!(reading.telemetry.total_energy, None);
+
+        let mut expected = blocks(&CHARGING);
+        for span in BEST_EFFORT_SPANS {
+            expected.0.remove(&span.start);
+        }
+        assert_eq!(reading.raw, Some(expected.capture()));
+    }
+}
+
+/// Power is the register the discharge guard reads, so no reading stands in
+/// for it. What did arrive is still carried for the journal.
+#[tokio::test]
+async fn a_refused_power_or_status_block_is_a_poll_error() {
+    let port = fake_vestel(device_map(&CHARGING), &[CURRENTS[0]]).await;
     let err = client(port).poll().await.unwrap_err();
 
-    assert_eq!(err.raw, Some(blocks(&unparseable).capture()));
-    assert!(err.error.contains("phase"), "{}", err.error);
+    let mut arrived = RegisterBlocks::default();
+    arrived.insert(
+        CHARGEPOINT_STATE,
+        blocks(&CHARGING).0[&CHARGEPOINT_STATE].clone(),
+    );
+    assert_eq!(err.raw, Some(arrived.capture()));
+    assert!(err.error.contains("1008"), "{}", err.error);
+
+    let port = fake_vestel(device_map(&CHARGING), &[CHARGEPOINT_STATE]).await;
+    let err = client(port).poll().await.unwrap_err();
+
+    assert!(err.raw.is_none());
+    assert!(err.error.contains("1000"), "{}", err.error);
 }
 
 #[tokio::test]

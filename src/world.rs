@@ -545,6 +545,28 @@ mod tests {
         );
     }
 
+    /// Display-only fields a firmware did not answer journal as `null` and
+    /// read back empty; the pinned shape above is the same row with all of
+    /// them answered.
+    #[test]
+    fn a_charger_missing_its_display_only_fields_round_trips_as_null() {
+        let state = ChargerState {
+            phases: None,
+            session_energy: None,
+            session_duration: None,
+            ..ChargerState::test_sample()
+        };
+        let json = serde_json::to_string(&Measurement::Charger(state.clone())).unwrap();
+        assert!(
+            json.contains(r#""phases":null,"session_energy":null,"session_duration":null"#),
+            "{json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Measurement>(&json).unwrap(),
+            Measurement::Charger(state)
+        );
+    }
+
     /// The battery-only shape every row was journalled with before a
     /// charger existed reads exactly as it did.
     #[test]

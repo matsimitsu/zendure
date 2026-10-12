@@ -39,8 +39,8 @@ fn before_the_window_no_car_is_plugged_in() {
     assert_eq!(state.cable, CableState::NoCable);
     assert_eq!(state.power, ChargerDraw::ZERO);
     assert_eq!(state.currents, [MilliAmps::ZERO; 3]);
-    assert_eq!(state.session_energy, WattHours::ZERO);
-    assert_eq!(state.session_duration, SessionDuration::ZERO);
+    assert_eq!(state.session_energy, Some(WattHours::ZERO));
+    assert_eq!(state.session_duration, Some(SessionDuration::ZERO));
 }
 
 /// 3 × 16 A × 230 V, half an hour in.
@@ -53,11 +53,11 @@ fn during_the_window_three_phases_draw_their_current_on_every_phase() {
     assert_eq!(state.currents, [AMPS_16; 3]);
     assert_eq!(state.voltages, [Volts(230); 3]);
     assert_eq!(state.power, ChargerDraw::new(11_040));
-    assert_eq!(state.phases, PhaseMode::Three);
-    assert_eq!(state.session_energy, WattHours(5_520.0));
+    assert_eq!(state.phases, Some(PhaseMode::Three));
+    assert_eq!(state.session_energy, Some(WattHours(5_520.0)));
     assert_eq!(
         state.session_duration,
-        SessionDuration::new(Duration::from_secs(30 * 60))
+        Some(SessionDuration::new(Duration::from_secs(30 * 60)))
     );
 }
 
@@ -67,7 +67,7 @@ fn one_phase_draws_on_the_first_phase_only() {
 
     assert_eq!(state.currents, [AMPS_16, MilliAmps::ZERO, MilliAmps::ZERO]);
     assert_eq!(state.power, ChargerDraw::new(3_680));
-    assert_eq!(state.session_energy, WattHours(3_680.0));
+    assert_eq!(state.session_energy, Some(WattHours(3_680.0)));
 }
 
 /// 11,040 W reaches 11,040 Wh after one hour exactly, and the car then stops
@@ -83,10 +83,10 @@ fn once_the_target_is_reached_the_car_suspends() {
     assert_eq!(state.cable, CableState::VehicleLocked);
     assert_eq!(state.power, ChargerDraw::ZERO);
     assert_eq!(state.currents, [MilliAmps::ZERO; 3]);
-    assert_eq!(state.session_energy, WattHours(11_040.0));
+    assert_eq!(state.session_energy, Some(WattHours(11_040.0)));
     assert_eq!(
         state.session_duration,
-        SessionDuration::new(Duration::from_secs(3 * 3600))
+        Some(SessionDuration::new(Duration::from_secs(3 * 3600)))
     );
 }
 
@@ -100,7 +100,7 @@ fn a_window_that_wraps_midnight_carries_the_session_across_it() {
     assert_eq!(state.status, ChargePointStatus::Charging);
     assert_eq!(
         state.session_duration,
-        SessionDuration::new(Duration::from_secs(8 * 3600))
+        Some(SessionDuration::new(Duration::from_secs(8 * 3600)))
     );
 
     assert_eq!(profile.at(&utc(6, 59)).cable, CableState::VehicleLocked);
@@ -136,9 +136,9 @@ fn the_night_the_clocks_go_back_charges_for_the_extra_hour() {
     let state = profile.at(&clock_in(Amsterdam, (2026, 10, 25), 6, 0));
     assert_eq!(
         state.session_duration,
-        SessionDuration::new(Duration::from_secs(13 * 3600))
+        Some(SessionDuration::new(Duration::from_secs(13 * 3600)))
     );
-    assert_eq!(state.session_energy, WattHours(3_680.0 * 13.0));
+    assert_eq!(state.session_energy, Some(WattHours(3_680.0 * 13.0)));
 }
 
 /// And the night they go forward loses one: eleven hours.
@@ -149,7 +149,7 @@ fn the_night_the_clocks_go_forward_charges_an_hour_less() {
     let state = profile.at(&clock_in(Amsterdam, (2026, 3, 29), 6, 0));
     assert_eq!(
         state.session_duration,
-        SessionDuration::new(Duration::from_secs(11 * 3600))
+        Some(SessionDuration::new(Duration::from_secs(11 * 3600)))
     );
 }
 
@@ -170,6 +170,6 @@ fn a_plug_in_time_skipped_by_the_clocks_going_forward_starts_at_the_jump() {
     assert_eq!(state.status, ChargePointStatus::Charging);
     assert_eq!(
         state.session_duration,
-        SessionDuration::new(Duration::from_secs(10 * 60))
+        Some(SessionDuration::new(Duration::from_secs(10 * 60)))
     );
 }

@@ -910,7 +910,8 @@ fn take_device_packs(table: &mut toml::Table, key: &str) -> Result<Vec<WattHours
 
 /// `[charger]`, if present. Same presence-gates-the-feature rule as
 /// `[car_battery]`; the simulated car's knobs are lenient, but the two
-/// relationships to other tables are fatal, as is a Vestel with no host.
+/// relationships to other tables are fatal, as is anything that leaves a
+/// Vestel unaddressable or a simulated car never plugged in.
 fn take_charger(
     taker: &mut Taker,
     device: &DeviceConfig,
@@ -946,9 +947,17 @@ fn take_charger(
                 warnings.push(format!("charger.phases ignored ({e}); keeping 3"));
                 PhaseMode::Three
             });
+            let plug_in = taker.lenient("charger.plug_in", default_time(18, 0))?;
+            let unplug = taker.lenient("charger.unplug", default_time(7, 0))?;
+            if plug_in == unplug {
+                return Err(format!(
+                    "charger.plug_in and charger.unplug are both {plug_in} — the car would \
+                     never be plugged in"
+                ));
+            }
             ChargerKind::Simulated {
-                plug_in: taker.lenient("charger.plug_in", default_time(18, 0))?,
-                unplug: taker.lenient("charger.unplug", default_time(7, 0))?,
+                plug_in,
+                unplug,
                 current: MilliAmps::from_whole_amps(
                     taker.lenient::<u32>("charger.current_amps", 16)?,
                 ),
@@ -956,11 +965,18 @@ fn take_charger(
                 session_target: taker.lenient("charger.session_target", WattHours(20_000.0))?,
             }
         }
-        "vestel" => ChargerKind::Vestel {
-            host: taker.required("charger.host")?,
-            port: taker.optional("charger.port")?.unwrap_or(502),
-            unit_id: taker.optional("charger.unit_id")?.unwrap_or(255),
-        },
+        "vestel" => {
+            let host = vestel_host(taker.required("charger.host")?)?;
+            let port = taker.optional::<u16>("charger.port")?.unwrap_or(502);
+            if port == 0 {
+                return Err("charger.port must be a TCP port, found 0".to_string());
+            }
+            ChargerKind::Vestel {
+                host,
+                port,
+                unit_id: taker.optional("charger.unit_id")?.unwrap_or(255),
+            }
+        }
         other => {
             return Err(format!(
                 "charger.kind must be \"vestel\" or \"simulated\", found {other:?}"
@@ -969,6 +985,22 @@ fn take_charger(
     };
 
     Ok(Some(ChargerConfig { id, kind }))
+}
+
+/// A bare IPv6 address has two or more colons, so only one colon, or a
+/// bracketed address with a port, is read as a port typed into the host.
+fn vestel_host(host: String) -> Result<String, String> {
+    let host = host.trim().to_string();
+    if host.is_empty() {
+        return Err("charger.host is empty".to_string());
+    }
+    if host.matches(':').count() == 1 || host.parse::<std::net::SocketAddr>().is_ok() {
+        return Err(format!(
+            "charger.host {host:?} carries a port — set the address alone and put the port \
+             in charger.port"
+        ));
+    }
+    Ok(host)
 }
 
 fn default_time(hour: u32, minute: u32) -> TimeOfDay {

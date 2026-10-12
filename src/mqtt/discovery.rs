@@ -561,13 +561,16 @@ pub fn publish_charger(
         (CHARGER_POWER.id, state.power.to_string()),
         (
             CHARGER_SESSION_ENERGY.id,
-            format!("{:.3}", state.session_energy.to_kwh()),
+            or_unknown(state.session_energy.map(|wh| format!("{:.3}", wh.to_kwh()))),
         ),
         (
             CHARGER_SESSION_DURATION.id,
-            state.session_duration.as_secs().to_string(),
+            or_unknown(state.session_duration.map(|d| d.as_secs().to_string())),
         ),
-        (CHARGER_PHASES.id, state.phases.count().to_string()),
+        (
+            CHARGER_PHASES.id,
+            or_unknown(state.phases.map(|p| p.count().to_string())),
+        ),
     ];
     for (sensor, current) in CHARGER_CURRENTS.iter().zip(state.currents) {
         values.push((sensor.id, format!("{:.2}", current.as_amps())));
@@ -580,6 +583,12 @@ pub fn publish_charger(
         if discharge_hold { "ON" } else { "OFF" }.to_string(),
     ));
     publish_values(publisher, prefix, values);
+}
+
+/// Home Assistant's MQTT sensor reads the payload `None` as unknown; any
+/// other non-numeric text on a numeric sensor is logged there as an error.
+fn or_unknown(value: Option<String>) -> String {
+    value.unwrap_or_else(|| "None".to_string())
 }
 
 /// The hold's value alone, for a charger that has stopped answering: the
@@ -801,6 +810,24 @@ mod tests {
         assert_eq!(value("ev_charger_session_duration"), "4140");
         assert_eq!(value("ev_charger_phases"), "1");
         assert_eq!(value("ev_charger_discharge_hold"), "ON");
+    }
+
+    #[test]
+    fn charger_fields_the_firmware_did_not_answer_publish_as_unknown() {
+        let p = RecordingPublisher::new();
+        let state = ChargerState {
+            phases: None,
+            session_energy: None,
+            session_duration: None,
+            ..ChargerState::test_sample()
+        };
+        publish_charger(&p, &Announcer::new(), "zendure", &state, false);
+
+        let value = |id: &str| p.payload(&format!("zendure/{id}")).unwrap();
+        assert_eq!(value("ev_charger_session_energy"), "None");
+        assert_eq!(value("ev_charger_session_duration"), "None");
+        assert_eq!(value("ev_charger_phases"), "None");
+        assert_eq!(value("ev_charger_power"), "3650");
     }
 
     #[test]
