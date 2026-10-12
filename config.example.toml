@@ -88,6 +88,16 @@ publish_prefix = "zendure"
 # language = "de"
 # poll_interval_secs = 900
 
+# A Vestel EVC04 read over Modbus TCP each scan round; it is never written to.
+# Keep the charger's Modbus/EMS load management OFF: see "Vestel EVC04" in
+# README.md for why.
+# [charger]
+# kind = "vestel"
+# host = "192.168.1.30"                             # required
+# port = 502                                        # default
+# unit_id = 255                                     # default
+# id = "charger"                                    # default; must differ from the battery's
+
 [clock]
 # IANA name. Cycle counting and the balance weekday are reckoned in it.
 timezone = "Europe/Amsterdam"

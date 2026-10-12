@@ -135,10 +135,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // already gets, so something outside `run::run` can hold the device it constructs.
     // See `run::run`'s own doc comment for why that seam matters to a test.
     let devices = registry::from_config(&config);
-    let charger = config
-        .charger
-        .as_ref()
-        .map(|charger| charger::from_config(charger, config.timezone));
+    let charger = config.charger.as_ref().map(|charger| {
+        charger::from_config(charger, config.timezone, config.device.poll_interval())
+    });
 
     run::run(config, devices, charger, stop).await
 }

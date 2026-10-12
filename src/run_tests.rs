@@ -622,7 +622,8 @@ fn simulated_charger(config: &mut Config) -> crate::charger::Charger {
             session_target: WattHours(20_000.0),
         },
     };
-    let built = crate::charger::from_config(&charger, config.timezone);
+    let built =
+        crate::charger::from_config(&charger, config.timezone, config.device.poll_interval());
     config.charger = Some(charger);
     built
 }
@@ -682,6 +683,37 @@ async fn a_simulated_charger_is_journalled_and_replays() {
 /// deciding: the loop keeps commanding the battery and never stands down.
 #[tokio::test]
 async fn a_charger_found_down_never_stands_the_battery_down() {
+    charger_outage_keeps_deciding(crate::charger::Charger::Unreachable(DeviceId::new(
+        "charger",
+    )))
+    .await;
+}
+
+/// The same, through the real Modbus client refused at connect.
+#[tokio::test]
+async fn a_vestel_that_refuses_the_connection_never_stands_the_battery_down() {
+    let port = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let charger = crate::config::ChargerConfig {
+        id: DeviceId::new("charger"),
+        kind: crate::config::ChargerKind::Vestel {
+            host: "127.0.0.1".to_string(),
+            port,
+            unit_id: 255,
+        },
+    };
+
+    charger_outage_keeps_deciding(crate::charger::from_config(
+        &charger,
+        chrono_tz::UTC,
+        Duration::from_millis(50),
+    ))
+    .await;
+}
+
+async fn charger_outage_keeps_deciding(charger: crate::charger::Charger) {
     let dir = tempfile::TempDir::new().unwrap();
     let mut config = virtual_config(&dir, WattHours(1_000.0));
     with_tick(&mut config, Duration::from_millis(50));
@@ -689,7 +721,6 @@ async fn a_charger_found_down_never_stands_the_battery_down() {
     config.mqtt_timeout = Duration::from_millis(200);
     let journal_path = config.journal_path.clone();
     let (devices, _battery) = virtual_devices(&config);
-    let charger = crate::charger::Charger::Unreachable(DeviceId::new("charger"));
 
     run(
         config,

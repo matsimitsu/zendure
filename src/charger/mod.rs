@@ -7,9 +7,11 @@
 
 pub mod simulated;
 pub mod state;
+pub mod vestel;
 
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono_tz::Tz;
 
@@ -59,6 +61,7 @@ pub trait ChargerMonitor {
 /// meter can share the same car, as `Battery::Virtual` does.
 pub enum Charger {
     Simulated(Arc<simulated::SimulatedCharger>),
+    Vestel(vestel::VestelClient),
     /// A charger that never answers, for the outage tests.
     #[cfg(test)]
     Unreachable(DeviceId),
@@ -68,6 +71,7 @@ impl ChargerMonitor for Charger {
     fn id(&self) -> &DeviceId {
         match self {
             Charger::Simulated(charger) => charger.id(),
+            Charger::Vestel(charger) => charger.id(),
             #[cfg(test)]
             Charger::Unreachable(id) => id,
         }
@@ -76,6 +80,7 @@ impl ChargerMonitor for Charger {
     async fn poll(&self) -> Result<ChargerReading, PollError> {
         match self {
             Charger::Simulated(charger) => charger.poll().await,
+            Charger::Vestel(charger) => charger.poll().await,
             #[cfg(test)]
             Charger::Unreachable(id) => Err(PollError {
                 raw: None,
@@ -113,8 +118,20 @@ impl Sampler for Charger {
 
 /// Builds the charger `run` samples. `Config::from_toml_str`'s coherence
 /// checks are what make every combination reaching here a valid one.
-pub fn from_config(config: &ChargerConfig, timezone: Tz) -> Charger {
+/// `scan_period` is the round a real adapter's request timeout derives from.
+pub fn from_config(config: &ChargerConfig, timezone: Tz, scan_period: Duration) -> Charger {
     match &config.kind {
+        ChargerKind::Vestel {
+            host,
+            port,
+            unit_id,
+        } => Charger::Vestel(vestel::VestelClient::new(
+            config.id.clone(),
+            host.clone(),
+            *port,
+            *unit_id,
+            scan_period,
+        )),
         ChargerKind::Simulated {
             plug_in,
             unplug,
