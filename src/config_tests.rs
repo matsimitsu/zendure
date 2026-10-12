@@ -1182,6 +1182,51 @@ fn a_vestel_charger_without_a_host_is_fatal() {
     assert!(err.contains("charger.host"), "{err}");
 }
 
+#[test]
+fn a_vestel_charger_with_an_empty_host_is_fatal() {
+    let err = Config::from_toml_str(&charger_toml("kind = \"vestel\"\nhost = \" \"")).unwrap_err();
+    assert!(err.contains("charger.host"), "{err}");
+}
+
+#[test]
+fn a_vestel_host_carrying_a_port_points_at_charger_port() {
+    for host in ["10.0.0.5:502", "evc04.lan:502", "[fe80::1]:502"] {
+        let err = Config::from_toml_str(&charger_toml(&format!(
+            "kind = \"vestel\"\nhost = \"{host}\""
+        )))
+        .unwrap_err();
+        assert!(err.contains("charger.port"), "{host}: {err}");
+    }
+}
+
+#[test]
+fn a_vestel_host_that_is_a_bare_ipv6_address_parses() {
+    let (config, _) =
+        Config::from_toml_str(&charger_toml("kind = \"vestel\"\nhost = \"fe80::1\"")).unwrap();
+    assert!(matches!(
+        config.charger.map(|charger| charger.kind),
+        Some(ChargerKind::Vestel { host, .. }) if host == "fe80::1"
+    ));
+}
+
+#[test]
+fn a_vestel_port_of_zero_is_fatal() {
+    let err = Config::from_toml_str(&charger_toml(
+        "kind = \"vestel\"\nhost = \"10.0.0.5\"\nport = 0",
+    ))
+    .unwrap_err();
+    assert!(err.contains("charger.port"), "{err}");
+}
+
+#[test]
+fn a_simulated_car_that_plugs_in_as_it_unplugs_is_fatal() {
+    let err = Config::from_toml_str(&charger_toml(
+        "kind = \"simulated\"\nplug_in = \"07:00\"\nunplug = \"07:00\"",
+    ))
+    .unwrap_err();
+    assert!(err.contains("charger.plug_in"), "{err}");
+}
+
 /// A unit id past 255 does not fit the Modbus frame, so it is a typo, not a
 /// knob to guess past.
 #[test]

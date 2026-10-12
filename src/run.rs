@@ -615,6 +615,9 @@ pub async fn run(
     // broker connection when there is one. Any of them ending is fatal to the
     // loop — a sampler that returned would leave its slot frozen.
     let mut sources: JoinSet<()> = JoinSet::new();
+    // The charger's sampler, apart from `sources`: the charger only ever
+    // gates discharge, so its task ending must never stop the battery.
+    let mut charger_task: JoinSet<()> = JoinSet::new();
 
     // The publisher: a real, queued sink over MQTT if `[mqtt]` is configured,
     // or `NullPublisher` if not. `mqtt_drain` is `Some` only in the first
@@ -826,7 +829,7 @@ pub async fn run(
         config.timezone,
     ));
     if let Some(charger) = charger {
-        sources.spawn(scan::sample_loop(
+        charger_task.spawn(scan::sample_loop(
             charger,
             inbox
                 .charger_slot()
@@ -900,6 +903,17 @@ pub async fn run(
                     Err(e) => tracing::error!("A source task ended ({e}) — stopping"),
                 }
                 break;
+            }
+            Some(ended) = charger_task.join_next() => {
+                // Its slot now ages out to `Down`, which fails the guard open.
+                match ended {
+                    Ok(()) => tracing::error!(
+                        "The charger's sampler ended — deciding on without the charger"
+                    ),
+                    Err(e) => tracing::error!(
+                        "The charger's sampler ended ({e}) — deciding on without the charger"
+                    ),
+                }
             }
             _ = ticker.tick() => {
                 // One call, shared by the meter event, the decision row, the
@@ -981,6 +995,9 @@ pub async fn run(
     stop_within_deadline(forecast_task, "Forecast poller").await;
     stop_within_deadline(prices_task, "Price poller").await;
 
+    // It holds a journal sender, so it goes before `shut_down` waits on the
+    // writer.
+    charger_task.shutdown().await;
     shut_down(
         mqtt_drain
             .as_mut()

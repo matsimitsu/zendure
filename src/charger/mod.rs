@@ -65,6 +65,9 @@ pub enum Charger {
     /// A charger that never answers, for the outage tests.
     #[cfg(test)]
     Unreachable(DeviceId),
+    /// A charger whose adapter panics mid-poll, ending its sampler task.
+    #[cfg(test)]
+    Panicking(DeviceId),
 }
 
 impl ChargerMonitor for Charger {
@@ -73,7 +76,7 @@ impl ChargerMonitor for Charger {
             Charger::Simulated(charger) => charger.id(),
             Charger::Vestel(charger) => charger.id(),
             #[cfg(test)]
-            Charger::Unreachable(id) => id,
+            Charger::Unreachable(id) | Charger::Panicking(id) => id,
         }
     }
 
@@ -86,6 +89,8 @@ impl ChargerMonitor for Charger {
                 raw: None,
                 error: format!("{id} is unreachable"),
             }),
+            #[cfg(test)]
+            Charger::Panicking(id) => panic!("{id} panicked mid-poll"),
         }
     }
 }
@@ -103,7 +108,7 @@ impl Sampler for Charger {
 
         let state = &reading.state;
         tracing::debug!(
-            "Charger: {:?}, cable {:?}, {}W on {:?}, session {:.0}Wh, lifetime {:?}",
+            "Charger: {:?}, cable {:?}, {}W on {:?}, session {:?}, lifetime {:?}",
             state.status,
             state.cable,
             state.power,

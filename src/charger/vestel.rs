@@ -6,7 +6,7 @@
 //! hardware yet, so every word a poll reads is captured as `vestel_modbus`
 //! before [`parse`] interprets it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -47,11 +47,15 @@ const TOTAL_ENERGY: u16 = 1036;
 const SESSION_ENERGY: u16 = 1502;
 const SESSION_DURATION: u16 = 1508;
 
-/// Every register a poll needs, in as few reads as the map's gaps allow.
-const POLL_SPANS: [Span; 5] = [
+/// The reads a poll cannot do without: power (1020) is the one register a
+/// decision reads, and status and cable say what that power means.
+const REQUIRED_SPANS: [Span; 2] = [span(CHARGEPOINT_STATE, 5), span(CURRENTS[0], 14)];
+
+/// Display-only reads that firmware is not known to answer. A refusal leaves
+/// its fields empty rather than costing the reading, since losing the reading
+/// would fail the discharge guard open.
+const BEST_EFFORT_SPANS: [Span; 3] = [
     span(PHASES, 1),
-    span(CHARGEPOINT_STATE, 5),
-    span(CURRENTS[0], 14),
     span(TOTAL_ENERGY, 2),
     span(SESSION_ENERGY, 8),
 ];
@@ -112,11 +116,15 @@ pub fn parse(blocks: &RegisterBlocks) -> Result<ChargerState, String> {
         power: ChargerDraw::new(blocks.u32_at(POWER)?),
         currents: [current(0)?, current(1)?, current(2)?],
         voltages: [voltage(0)?, voltage(1)?, voltage(2)?],
-        phases: phases(blocks.word(PHASES)?)?,
-        session_energy: WattHours(f64::from(blocks.u32_at(SESSION_ENERGY)?)),
-        session_duration: SessionDuration::new(Duration::from_secs(u64::from(
-            blocks.u32_at(SESSION_DURATION)?,
-        ))),
+        phases: blocks.word(PHASES).ok().and_then(phases),
+        session_energy: blocks
+            .u32_at(SESSION_ENERGY)
+            .ok()
+            .map(|wh| WattHours(f64::from(wh))),
+        session_duration: blocks
+            .u32_at(SESSION_DURATION)
+            .ok()
+            .map(|secs| SessionDuration::new(Duration::from_secs(u64::from(secs)))),
     })
 }
 
@@ -162,13 +170,13 @@ fn cable(code: u16) -> CableState {
     }
 }
 
-/// `PhaseMode` has no `Unknown`, so a code outside the documented two fails
-/// the poll; its registers are still journalled for a parser fix.
-fn phases(code: u16) -> Result<PhaseMode, String> {
+/// A code outside the documented two reads as no phase mode; the raw
+/// capture keeps the code itself for a parser fix.
+fn phases(code: u16) -> Option<PhaseMode> {
     match code {
-        0 => Ok(PhaseMode::One),
-        1 => Ok(PhaseMode::Three),
-        other => Err(format!("register {PHASES}: unknown phase mode {other}")),
+        0 => Some(PhaseMode::One),
+        1 => Some(PhaseMode::Three),
+        _ => None,
     }
 }
 
@@ -220,6 +228,9 @@ pub struct VestelClient {
     timeout: Duration,
     connection: tokio::sync::Mutex<Option<Context>>,
     last_seen: Mutex<Option<(ChargePointStatus, CableState)>>,
+    /// Best-effort reads that failed last poll, so a firmware that never
+    /// answers one warns once rather than every round.
+    missing: Mutex<BTreeSet<u16>>,
 }
 
 impl VestelClient {
@@ -232,6 +243,7 @@ impl VestelClient {
             timeout: scan::request_timeout(scan_period),
             connection: tokio::sync::Mutex::new(None),
             last_seen: Mutex::new(None),
+            missing: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -266,7 +278,7 @@ impl VestelClient {
         };
 
         let mut blocks = RegisterBlocks::default();
-        for span in POLL_SPANS {
+        for span in REQUIRED_SPANS {
             match read(context, span, self.timeout).await {
                 Ok(words) => blocks.insert(span.start, words),
                 Err(failure) => {
@@ -280,7 +292,44 @@ impl VestelClient {
                 }
             }
         }
+
+        let mut missing = BTreeSet::new();
+        for (i, span) in BEST_EFFORT_SPANS.into_iter().enumerate() {
+            match read(context, span, self.timeout).await {
+                Ok(words) => blocks.insert(span.start, words),
+                Err(failure) => {
+                    self.note_missing(span, &failure.error);
+                    missing.insert(span.start);
+                    // Nothing more can be asked of a connection in doubt.
+                    if failure.broken {
+                        *connection = None;
+                        missing.extend(BEST_EFFORT_SPANS[i..].iter().map(|span| span.start));
+                        break;
+                    }
+                }
+            }
+        }
+        self.note_answering(missing);
         Ok(blocks)
+    }
+
+    fn note_missing(&self, span: Span, error: &str) {
+        if !guard(&self.missing).contains(&span.start) {
+            tracing::warn!(
+                "{}: {error} — reading on without registers {}+{}",
+                self.id,
+                span.start,
+                span.count
+            );
+        }
+    }
+
+    fn note_answering(&self, missing: BTreeSet<u16>) {
+        let mut known = guard(&self.missing);
+        for start in known.difference(&missing) {
+            tracing::info!("{}: registers from {start} answer again", self.id);
+        }
+        *known = missing;
     }
 
     async fn connect(&self) -> Result<Context, PollError> {

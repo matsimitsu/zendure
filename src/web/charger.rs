@@ -90,7 +90,8 @@ pub(super) fn charger_panel_view(
         return ChargerPanelView::Waiting;
     };
     let charger = seen.state;
-    let phases = charger.phases.count();
+    // A charger that did not say how it is wired shows every phase.
+    let phases = charger.phases.map_or(3, PhaseMode::count);
 
     // Only the clock's instant matters to the guard; the calendar fields are
     // for the controller's own decisions.
@@ -140,16 +141,24 @@ pub(super) fn charger_panel_view(
         phases: stat(
             "Phases",
             match charger.phases {
-                PhaseMode::One => "1 phase",
-                PhaseMode::Three => "3 phases",
+                Some(PhaseMode::One) => "1 phase",
+                Some(PhaseMode::Three) => "3 phases",
+                None => UNREAD,
             }
             .to_string(),
         ),
         session_energy: stat(
             "Session energy",
-            energy_string(charger.session_energy.to_kwh()),
+            charger
+                .session_energy
+                .map_or_else(|| UNREAD.to_string(), |wh| energy_string(wh.to_kwh())),
         ),
-        session_duration: stat("Session time", duration(charger.session_duration)),
+        session_duration: stat(
+            "Session time",
+            charger
+                .session_duration
+                .map_or_else(|| UNREAD.to_string(), duration),
+        ),
         last_seen: stat(
             "Last seen",
             format_log_time(seen.sampled_at, state.as_of, timezone),
@@ -157,6 +166,9 @@ pub(super) fn charger_panel_view(
         discharge_hold,
     }))
 }
+
+/// A figure the charger's firmware did not answer this poll.
+const UNREAD: &str = "—";
 
 fn stat(label: &'static str, value: String) -> MiniStatView {
     MiniStatView {

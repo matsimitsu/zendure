@@ -163,7 +163,7 @@ fn the_panel_renders_a_reading() {
 #[test]
 fn a_three_phase_panel_lists_each_phase() {
     let three = ChargerState {
-        phases: PhaseMode::Three,
+        phases: Some(PhaseMode::Three),
         ..reading(
             ChargePointStatus::Charging,
             CableState::VehicleLocked,
@@ -174,6 +174,25 @@ fn a_three_phase_panel_lists_each_phase() {
 
     assert!(html.contains(">15.9 · 0.0 · 0.0 A<"), "{html}");
     assert!(html.contains(">229 · 231 · 233 V<"), "{html}");
+}
+
+#[test]
+fn the_panel_shows_unanswered_fields_as_a_dash_and_every_phase() {
+    let degraded = ChargerState {
+        phases: None,
+        session_energy: None,
+        session_duration: None,
+        ..reading(
+            ChargePointStatus::Charging,
+            CableState::VehicleLocked,
+            3_650,
+        )
+    };
+    let html = panel_html(&state(Some(degraded), 0, 5));
+
+    assert!(html.contains(">3.65 kW<"), "{html}");
+    assert!(html.contains(">15.9 · 0.0 · 0.0 A<"), "{html}");
+    assert_eq!(html.matches(">—<").count(), 3, "{html}");
 }
 
 #[test]

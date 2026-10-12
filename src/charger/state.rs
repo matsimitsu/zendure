@@ -123,6 +123,10 @@ impl TryFrom<u8> for PhaseMode {
 
 /// One charger reading. `power` is the charger's own figure, never re-summed
 /// from the phases, for the reason `MeterReading::total` gives.
+///
+/// Only `power` gates a decision, so the display-only fields a firmware may
+/// not answer are optional rather than a reason to lose the reading; a
+/// missing one journals as `null`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChargerState {
     pub status: ChargePointStatus,
@@ -130,9 +134,9 @@ pub struct ChargerState {
     pub power: ChargerDraw,
     pub currents: [MilliAmps; 3],
     pub voltages: [Volts; 3],
-    pub phases: PhaseMode,
-    pub session_energy: WattHours,
-    pub session_duration: SessionDuration,
+    pub phases: Option<PhaseMode>,
+    pub session_energy: Option<WattHours>,
+    pub session_duration: Option<SessionDuration>,
 }
 
 #[cfg(test)]
@@ -147,9 +151,9 @@ impl ChargerState {
             power: ChargerDraw::new(3_650),
             currents: [MilliAmps(15_900), MilliAmps(20), MilliAmps(10)],
             voltages: [Volts(229), Volts(231), Volts(233)],
-            phases: PhaseMode::One,
-            session_energy: WattHours(4_200.5),
-            session_duration: SessionDuration::new(std::time::Duration::from_secs(4_140)),
+            phases: Some(PhaseMode::One),
+            session_energy: Some(WattHours(4_200.5)),
+            session_duration: Some(SessionDuration::new(std::time::Duration::from_secs(4_140))),
         }
     }
 }

@@ -102,8 +102,8 @@ const CAR_PHASE: usize = 1;
 fn car_phases(car: &ChargerState) -> [f64; 3] {
     let draw = car.power.as_f64();
     match car.phases {
-        PhaseMode::Three => [draw / 3.0; 3],
-        PhaseMode::One => {
+        Some(PhaseMode::Three) | None => [draw / 3.0; 3],
+        Some(PhaseMode::One) => {
             let mut phases = [0.0; 3];
             phases[CAR_PHASE] = draw;
             phases
@@ -394,7 +394,7 @@ mod tests {
     fn car(draw: u32, phases: PhaseMode) -> ChargerState {
         ChargerState {
             power: crate::units::ChargerDraw::new(draw),
-            phases,
+            phases: Some(phases),
             ..ChargerState::test_sample()
         }
     }

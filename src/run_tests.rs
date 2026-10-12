@@ -714,6 +714,42 @@ async fn a_vestel_that_refuses_the_connection_never_stands_the_battery_down() {
     .await;
 }
 
+/// A charger task that dies takes only the charger with it: the loop runs to
+/// its stop signal, deciding for the battery on every round after.
+#[tokio::test]
+async fn a_charger_task_that_panics_never_stops_the_controller() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut config = virtual_config(&dir, WattHours(1_000.0));
+    with_tick(&mut config, Duration::from_millis(50));
+    let journal_path = config.journal_path.clone();
+    let (devices, _battery) = virtual_devices(&config);
+    let charger = crate::charger::Charger::Panicking(DeviceId::new("charger"));
+
+    let started = std::time::Instant::now();
+    run(
+        config,
+        devices,
+        Some(charger),
+        stop_after(Duration::from_millis(800)),
+    )
+    .await
+    .expect("run must exit cleanly");
+
+    assert!(
+        started.elapsed() >= Duration::from_millis(800),
+        "the loop ran until its stop signal, not until the charger died"
+    );
+    let conn = rusqlite::Connection::open(&journal_path).unwrap();
+    assert_eq!(count_events(&conn, "mqtt_timeout"), 0);
+    assert!(
+        journal::testing::count(
+            &conn,
+            "SELECT COUNT(*) FROM decisions WHERE kind = 'decision'"
+        ) >= 5,
+        "the objective kept deciding after the charger's task ended"
+    );
+}
+
 async fn charger_outage_keeps_deciding(charger: crate::charger::Charger) {
     let dir = tempfile::TempDir::new().unwrap();
     let mut config = virtual_config(&dir, WattHours(1_000.0));
