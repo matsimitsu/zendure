@@ -7,6 +7,7 @@ use crate::models::ControlMode;
 use crate::prices::tiers::Tier;
 use crate::units::{KiloWattHours, Percent, Soc, Timestamp, Watts};
 
+use super::charger::{ChargerPanelView, charger_panel_view, ev_card_detail};
 use super::day_nav::DayQuery;
 use super::detail::detail_body;
 use super::entity::Entity;
@@ -149,6 +150,7 @@ pub struct DashboardView {
     pub page_header: PageHeaderView,
     pub stat_cards: StatCardsView,
     pub battery: Option<BatteryPanelView>,
+    pub charger: ChargerPanelView,
     pub decision_log: Vec<DecisionLogRowView>,
     pub forecast: ForecastPanelView,
     pub prices: PricePanelView,
@@ -284,18 +286,15 @@ fn panel_badge(mode: Option<ControlMode>) -> (&'static str, &'static str) {
 /// successful poll yet, look identical from here — both are `car_soc: None`.
 /// No sparkline: one poll every ~15 minutes is too sparse to plot, per
 /// `SparklineHistory`'s own doc comment.
-fn ev_stat_card_view(
-    car_soc: Option<(Soc, Timestamp)>,
-    now: Timestamp,
-    timezone: chrono_tz::Tz,
-) -> StatCardView {
-    let (value, detail) = match car_soc {
+fn ev_stat_card_view(state: &DashboardState, timezone: chrono_tz::Tz) -> StatCardView {
+    let (value, soc_detail) = match state.car_soc {
         Some((soc, at)) => (
             soc.to_string(),
-            format!("Updated {}", format_log_time(at, now, timezone)),
+            format!("Updated {}", format_log_time(at, state.as_of, timezone)),
         ),
         None => ("--".to_string(), "No vehicle configured".to_string()),
     };
+    let detail = ev_card_detail(state).unwrap_or(soc_detail);
     StatCardView {
         detail_entity: None,
         variant: "ev",
@@ -391,7 +390,7 @@ pub(super) fn format_time(at: Timestamp, timezone: chrono_tz::Tz) -> String {
 /// A decision log row's timestamp, dated once it is no longer today's. The
 /// log is seeded from a journal bounded by neither session nor age, so a row
 /// can be days old.
-fn format_log_time(at: Timestamp, now: Timestamp, timezone: chrono_tz::Tz) -> String {
+pub(super) fn format_log_time(at: Timestamp, now: Timestamp, timezone: chrono_tz::Tz) -> String {
     use chrono::TimeZone;
     let (Some(at), Some(now)) = (
         timezone.timestamp_millis_opt(at.as_millis()).single(),
@@ -538,9 +537,10 @@ pub fn dashboard_view(
             solar,
             home,
             grid,
-            ev: ev_stat_card_view(state.car_soc, state.as_of, timezone),
+            ev: ev_stat_card_view(state, timezone),
         },
         battery,
+        charger: charger_panel_view(state, timezone),
         decision_log,
         forecast: requested_forecast_panel(state, days.solar, timezone),
         prices: requested_price_panel(state, days.prices, timezone),

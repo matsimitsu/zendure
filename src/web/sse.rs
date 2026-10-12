@@ -28,7 +28,7 @@ pub(super) type Fragment = (&'static str, fn(&DashboardView) -> Markup);
 /// element whose contents it replaces, and [`fragment_stream`] emits an event
 /// per entry.
 /// `page_is_live_everywhere_it_claims_to_be` checks the two agree.
-pub(super) const FRAGMENTS: [Fragment; 11] = [
+pub(super) const FRAGMENTS: [Fragment; 12] = [
     ("top-bar", layout::top_bar_inner),
     ("page-header", layout::page_header_inner),
     ("stat-card-solar", layout::solar_card_inner),
@@ -36,6 +36,7 @@ pub(super) const FRAGMENTS: [Fragment; 11] = [
     ("stat-card-grid", layout::grid_card_inner),
     ("stat-card-ev", layout::ev_card_inner),
     ("battery-panel", layout::battery_panel_inner),
+    ("charger-panel", layout::charger_panel_inner),
     ("energy-flows", layout::energy_flows_inner),
     ("decision-log", layout::decision_log_inner),
     ("forecast-panel", layout::forecast_panel_inner),

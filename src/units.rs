@@ -981,6 +981,11 @@ impl ChargerDraw {
         f64::from(self.0)
     }
 
+    /// The draw as the unsigned-by-role `Watts` the dashboard formats.
+    pub fn into_watts(self) -> Watts {
+        Watts::from_device(self.0)
+    }
+
     /// The energy drawn at this power over `elapsed`.
     pub fn over(self, elapsed: Duration) -> WattHours {
         WattHours(f64::from(self.0) * elapsed.as_secs_f64() / 3600.0)
@@ -1012,6 +1017,10 @@ impl SessionDuration {
     /// Truncated to whole seconds, the resolution a charger reports.
     pub fn new(elapsed: Duration) -> Self {
         SessionDuration(elapsed.as_secs())
+    }
+
+    pub fn as_secs(self) -> u64 {
+        self.0
     }
 }
 

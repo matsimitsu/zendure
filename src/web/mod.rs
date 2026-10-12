@@ -3,6 +3,7 @@
 //! Grass-compiled, rust-embed'd CSS.
 
 mod axis;
+mod charger;
 mod day_nav;
 mod day_panel;
 mod detail;
