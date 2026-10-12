@@ -62,6 +62,10 @@ impl Engine {
         self.world.battery()
     }
 
+    pub fn world(&self) -> &World {
+        &self.world
+    }
+
     pub fn soc_limits(&self, weekday: chrono::Weekday, device_min: Soc) -> SocLimits {
         self.controller.soc_limits(weekday, device_min)
     }

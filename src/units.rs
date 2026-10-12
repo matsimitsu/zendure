@@ -911,6 +911,11 @@ impl MilliAmps {
         MilliAmps(amps.saturating_mul(1000))
     }
 
+    /// For display: Home Assistant's current sensors read amps.
+    pub fn as_amps(self) -> f64 {
+        f64::from(self.0) / 1000.0
+    }
+
     /// The power this current draws through one phase at `voltage`.
     pub fn draw_at(self, voltage: Volts) -> ChargerDraw {
         ChargerDraw(self.0.saturating_mul(voltage.0) / 1000)
@@ -1012,6 +1017,10 @@ impl SessionDuration {
     /// Truncated to whole seconds, the resolution a charger reports.
     pub fn new(elapsed: Duration) -> Self {
         SessionDuration(elapsed.as_secs())
+    }
+
+    pub fn as_secs(self) -> u64 {
+        self.0
     }
 }
 

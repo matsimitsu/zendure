@@ -77,6 +77,11 @@ impl TickSeq {
 pub struct Failures(u32);
 
 impl Failures {
+    #[cfg(test)]
+    pub(crate) fn test(count: u32) -> Self {
+        Failures(count)
+    }
+
     pub fn get(self) -> u32 {
         self.0
     }

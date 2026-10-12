@@ -505,6 +505,7 @@ async fn a_device_found_down_is_written_to_once_per_outage() {
         prefix: "test",
         dashboard: None,
         blind_window: config.mqtt_timeout,
+        charger_guard: controller::ChargerGuard::from_session(&config.session()),
     };
     let at = Clock::now(config.timezone);
 
@@ -993,4 +994,85 @@ async fn a_run_against_the_simulator_replays_byte_identically() {
         "{:?}",
         fixture.expected
     );
+}
+
+/// The binary sensor reports what the controller's own guard decided, and
+/// drops back to OFF once the charger stops answering, since the guard fails
+/// open on a silent charger.
+#[test]
+fn the_discharge_hold_sensor_follows_the_guard() {
+    use crate::charger::{ChargerReading, ChargerState, ChargerTelemetry};
+
+    let devices = Devices::new([]);
+    let publisher = crate::publish::RecordingPublisher::new();
+    let announcer = Announcer::new();
+    let journal = journal::testing::nowhere();
+    let tick = Tick {
+        devices: &devices,
+        publisher: &publisher,
+        announcer: &announcer,
+        journal: &journal,
+        prefix: "test",
+        dashboard: None,
+        blind_window: Duration::from_secs(60),
+        charger_guard: controller::ChargerGuard {
+            threshold: ChargerDraw::new(750),
+            max_age: Duration::from_secs(60),
+        },
+    };
+    let mut engine = Engine::new(
+        controller::Controller::from_session(
+            &SessionConfig::test_default(),
+            &Clock::test_at(1_000_000),
+        ),
+        World::new(),
+        Duration::from_secs(60),
+    );
+    let id = DeviceId::new("charger");
+    let reading = |power| ChargerReading {
+        state: ChargerState {
+            power: ChargerDraw::new(power),
+            ..ChargerState::test_sample()
+        },
+        telemetry: ChargerTelemetry::default(),
+        raw: None,
+    };
+    let mut silent = false;
+    let hold = || publisher.payload("test/ev_charger_discharge_hold").unwrap();
+
+    tick.fold_charger(
+        &mut engine,
+        &mut silent,
+        Some((
+            id.clone(),
+            Delivery::Fresh(Clock::test_at(1_000_000), reading(3_650)),
+        )),
+    );
+    assert_eq!(hold(), "ON");
+
+    tick.fold_charger(
+        &mut engine,
+        &mut silent,
+        Some((
+            id.clone(),
+            Delivery::Fresh(Clock::test_at(1_005_000), reading(100)),
+        )),
+    );
+    assert_eq!(hold(), "OFF", "below the threshold");
+
+    tick.fold_charger(
+        &mut engine,
+        &mut silent,
+        Some((
+            id.clone(),
+            Delivery::Fresh(Clock::test_at(1_010_000), reading(3_650)),
+        )),
+    );
+    assert_eq!(hold(), "ON");
+    tick.fold_charger(
+        &mut engine,
+        &mut silent,
+        Some((id, Delivery::Down(Failures::test(5)))),
+    );
+    assert_eq!(hold(), "OFF", "a silent charger fails open");
 }
