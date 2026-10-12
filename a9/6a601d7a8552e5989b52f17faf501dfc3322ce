@@ -1,0 +1,71 @@
+src/web/charger_tests.rs
+  s_1eb51bc5cbf150::t_28ed527fa73beb 166
+  s_1eb51bc5cbf150::t_6e87b7b770b0ba 180-197
+  s_1eb51bc5cbf150::t_09806c9d2072ea 179
+src/web/charger.rs
+  s_1eb51bc5cbf150::t_f240bbb6b79077 144-146,152-160
+  s_1eb51bc5cbf150::t_6c65b14c010a2f 170-172
+  s_1eb51bc5cbf150::t_54701c9e19c376 93-94
+src/charger/vestel.rs
+  s_1eb51bc5cbf150::t_9674b7d4f1d8c5 297,306
+  s_1eb51bc5cbf150::t_1f26142e7f7920 9,50-57,119-127,173-175,177-179,231-233,246,281,295-296,298-305,307-312,316-333
+  s_1eb51bc5cbf150::t_bc53fb9920cc88 334
+src/run.rs
+  s_1eb51bc5cbf150::t_d9b0b3319307aa 998-1000
+  s_1eb51bc5cbf150::t_bda2a60a978b68 907-917
+  s_1eb51bc5cbf150::t_bc16e4080826bd 618-620
+  s_1eb51bc5cbf150::t_4e958f4a29f7ae 832
+README.md
+  s_1eb51bc5cbf150::t_4c9f3f2591d4b7 615-616
+  s_1eb51bc5cbf150::t_6a24daa913c8b2 325-335
+src/source/synthetic.rs
+  s_1eb51bc5cbf150::t_28ed527fa73beb 397
+  s_1eb51bc5cbf150::t_d25e680e726bf9 105-106
+src/config.rs
+  s_1eb51bc5cbf150::t_b88ba3a611ac33 913-914,950-957,959-960,968-979,990-1003
+  s_1eb51bc5cbf150::t_7311a31846bb5b 1004-1005
+src/run_tests.rs
+  s_1eb51bc5cbf150::t_31560d98b7dfa0 717-752
+src/world.rs
+  s_1eb51bc5cbf150::t_a24cbe2e80dea5 548-569
+src/config_tests.rs
+  s_1eb51bc5cbf150::t_f763f8e88be7ef 1185-1229
+src/mqtt/discovery.rs
+  s_1eb51bc5cbf150::t_baa22bddac406e 588-593
+  s_1eb51bc5cbf150::t_8c71386e6e309e 816-832
+  s_1eb51bc5cbf150::t_c544504bcd4bb6 564,568-572
+  s_1eb51bc5cbf150::t_d1188b55fa5111 815
+src/charger/simulated.rs
+  s_1eb51bc5cbf150::t_aded056a50dbcc 132-134,145-147
+src/charger/mod.rs
+  s_1eb51bc5cbf150::t_32b4cb843b470f 68-70,79,92-93
+  s_1eb51bc5cbf150::t_9d87b2384ba0b6 111
+src/charger/vestel_tests.rs
+  s_1eb51bc5cbf150::t_78528a847376dd 93
+  s_1eb51bc5cbf150::t_41a66c76cb9de0 114-116
+  s_1eb51bc5cbf150::t_e739b61f30315c 128,137-138,152,155
+  s_1eb51bc5cbf150::t_3d92bb0242ec9d 315,322,328-330
+  s_1eb51bc5cbf150::t_ead3e3c20202bc 246-250,259,266-278,301,316-321,323-327,331-352,354,357-358
+  s_1eb51bc5cbf150::t_b61d1e1f70f516 181-182,186,188-206
+  s_1eb51bc5cbf150::t_38c0c556288aea 314
+src/charger/simulated_tests.rs
+  s_1eb51bc5cbf150::t_28ed527fa73beb 42-43,56-57,60,70,86,89,103,139,141,152,173
+src/charger/state.rs
+  s_1eb51bc5cbf150::t_aded056a50dbcc 126-129,137-139,154-156
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a96a601d7a8552e5989b52f17faf501dfc3322ce",
+  "prompts": {},
+  "sessions": {
+    "s_1eb51bc5cbf150": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "240820dc-c6c0-4a01-b8ce-f8f066dd22a3",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Beekman <robert@matsimitsu.nl>"
+    }
+  }
+}
