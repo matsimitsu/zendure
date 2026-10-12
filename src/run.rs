@@ -11,6 +11,7 @@ use std::time::Duration;
 use crate::allocate::Directive;
 use crate::announce::Announcer;
 use crate::car_battery;
+use crate::charger::{Charger, ChargerMonitor, ChargerReading};
 use crate::clock::Clock;
 use crate::config::Config;
 use crate::controller::SocLimits;
@@ -123,6 +124,45 @@ struct Silent {
 }
 
 impl Tick<'_> {
+    /// Folds this round's charger sample, ahead of the batteries' and the
+    /// meter's so a decision this tick sees it. The charger only ever gates
+    /// discharge on or off and never enters setpoint arithmetic, so it is
+    /// exempt from CONTROL-2's matched ages: a round never waits on it, and a
+    /// silent one never stands the fleet down. `silent` is what makes the
+    /// warning once per outage.
+    fn fold_charger(
+        &self,
+        engine: &mut Engine,
+        silent: &mut bool,
+        delivery: Option<(DeviceId, Delivery<ChargerReading>)>,
+    ) {
+        let Some((id, delivery)) = delivery else {
+            return;
+        };
+
+        match delivery {
+            Delivery::Fresh(sampled_at, reading) => {
+                *silent = false;
+                let event = Event::DeviceUpdate {
+                    at: sampled_at,
+                    id,
+                    measurement: Measurement::Charger(reading.state),
+                };
+                self.journal.event(&event);
+                engine.step(&event);
+            }
+            Delivery::Quiet => {}
+            Delivery::Down(failures) => {
+                if !std::mem::replace(silent, true) {
+                    tracing::warn!(
+                        "{id} is not answering ({} consecutive failures) — carrying on without it",
+                        failures.get(),
+                    );
+                }
+            }
+        }
+    }
+
     /// Folds and publishes every device sample taken for this round, whatever
     /// the rest of the fleet is doing: a sample is taken once, and dropping it
     /// because another source went quiet leaves `RteTracker::record`
@@ -471,10 +511,11 @@ impl PollTelemetry {
 /// rather than built here — like `stop`, it's a real process edge, and building it
 /// inside `run`
 /// would leave tests no handle on it (the wiring test keeps an `Arc<VirtualBattery>`
-/// clone from it).
+/// clone from it). `charger` is handed in for the same reason.
 pub async fn run(
     config: Config,
     devices: Devices,
+    charger: Option<Charger>,
     stop: impl Future<Output = StopReason>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(
@@ -736,6 +777,7 @@ pub async fn run(
     let tick = config.device.poll_interval();
 
     let meter = Arc::new(source::from_config(&config, &devices));
+    let charger = charger.map(Arc::new);
 
     // Opened before the samplers are asked for anything, so a source that
     // never answers at all ages out from here. Its device membership comes
@@ -744,6 +786,9 @@ pub async fn run(
     // `scan::Slot`'s own doc comment for why.
     let inbox = Inbox::new(
         devices.handles().map(|(id, _)| id),
+        charger
+            .as_ref()
+            .map(|charger| ChargerMonitor::id(&**charger).clone()),
         Instant::now(),
         mqtt_timeout,
     );
@@ -758,6 +803,17 @@ pub async fn run(
         journal.clone(),
         config.timezone,
     ));
+    if let Some(charger) = charger {
+        sources.spawn(scan::sample_loop(
+            charger,
+            inbox
+                .charger_slot()
+                .expect("the inbox was built with this charger's slot"),
+            requests.subscribe(),
+            journal.clone(),
+            config.timezone,
+        ));
+    }
     for (id, battery) in devices.handles() {
         sources.spawn(scan::sample_loop(
             battery,
@@ -804,6 +860,7 @@ pub async fn run(
     // before is not served beside one taken for this one. Asked for ahead of
     // the first tick, so that tick finds filled slots.
     let mut round = TickSeq::FIRST.next();
+    let mut charger_silent = false;
     requests.send_modify(|seq| *seq = round);
 
     loop {
@@ -831,6 +888,11 @@ pub async fn run(
                 // ticks without moving it.
                 let scan_now = Instant::now();
 
+                tick_context.fold_charger(
+                    &mut engine,
+                    &mut charger_silent,
+                    inbox.take_charger(round, scan_now),
+                );
                 let fleet = tick_context.fold_devices(
                     &mut engine,
                     &mut telemetry,

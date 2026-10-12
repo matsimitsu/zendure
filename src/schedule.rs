@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use chrono::{NaiveDate, Timelike};
+use chrono::{NaiveDate, NaiveTime, Timelike};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +32,11 @@ impl TimeOfDay {
             return Err(format!("minute must be 0-59, found {minute}"));
         }
         Ok(TimeOfDay { hour, minute })
+    }
+
+    pub fn as_naive_time(self) -> NaiveTime {
+        NaiveTime::from_hms_opt(self.hour, self.minute, 0)
+            .expect("the constructor bounds hour and minute")
     }
 }
 

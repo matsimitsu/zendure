@@ -309,6 +309,12 @@ pub fn daily(events: &[Event], pricing: &Pricing) -> Vec<DayTotals> {
                 measurement: Measurement::Battery(state),
                 ..
             } => battery = Some(state.clone()),
+            // The car's draw is already inside the meter's import, which is
+            // what gets integrated.
+            Event::DeviceUpdate {
+                measurement: Measurement::Charger(_),
+                ..
+            } => {}
 
             Event::Meter { at, grid, .. } => {
                 let Some(day) = local_date(at) else { continue };

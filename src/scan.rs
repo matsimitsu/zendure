@@ -21,6 +21,7 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 
 use crate::backpressure;
+use crate::charger::ChargerReading;
 use crate::clock::Clock;
 use crate::device::{BatteryReading, PollError, RawCapture};
 use crate::journal::Journal;
@@ -198,6 +199,9 @@ impl<T> Slot<T> {
 pub struct Inbox {
     meter: Arc<Slot<MeterSample>>,
     devices: BTreeMap<DeviceId, Arc<Slot<BatteryReading>>>,
+    /// Apart from `devices`, which is the fleet a tick commands: a silent
+    /// charger is no reason to stand the batteries down.
+    charger: Option<(DeviceId, Arc<Slot<ChargerReading>>)>,
 }
 
 impl Inbox {
@@ -205,6 +209,7 @@ impl Inbox {
     /// slot has read every box it is about to command.
     pub fn new(
         devices: impl IntoIterator<Item = DeviceId>,
+        charger: Option<DeviceId>,
         opened_at: Instant,
         blind_window: Duration,
     ) -> Self {
@@ -214,7 +219,23 @@ impl Inbox {
                 .into_iter()
                 .map(|id| (id, Arc::new(Slot::new(blind_window, opened_at))))
                 .collect(),
+            charger: charger.map(|id| (id, Arc::new(Slot::new(blind_window, opened_at)))),
         }
+    }
+
+    pub fn charger_slot(&self) -> Option<Arc<Slot<ChargerReading>>> {
+        self.charger.as_ref().map(|(_, slot)| slot.clone())
+    }
+
+    /// `None` when no charger is configured.
+    pub fn take_charger(
+        &self,
+        round: TickSeq,
+        now: Instant,
+    ) -> Option<(DeviceId, Delivery<ChargerReading>)> {
+        self.charger
+            .as_ref()
+            .map(|(id, slot)| (id.clone(), slot.take(round, now)))
     }
 
     pub fn meter_slot(&self) -> Arc<Slot<MeterSample>> {

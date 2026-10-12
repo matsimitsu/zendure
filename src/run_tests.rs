@@ -117,6 +117,7 @@ fn virtual_config(dir: &tempfile::TempDir, capacity: WattHours) -> Config {
         prediction: None,
         prices: None,
         car_battery: None,
+        charger: None,
         ha_publish_prefix: "test".to_string(),
         charge_margin: PowerMargin::new(50),
         discharge_margin: PowerMargin::new(5),
@@ -211,7 +212,7 @@ async fn run_drives_real_decisions_against_a_virtual_battery() {
 
     let stop = stop_after(Duration::from_secs(300));
 
-    run(config, devices, stop)
+    run(config, devices, None, stop)
         .await
         .expect("run must exit cleanly");
 
@@ -290,7 +291,7 @@ async fn an_open_dashboard_stream_does_not_hold_shutdown_to_the_deadline() {
     let stop = stop_after(RUN_FOR);
 
     let started = std::time::Instant::now();
-    run(config, devices, stop)
+    run(config, devices, None, stop)
         .await
         .expect("run must exit cleanly");
     let elapsed = started.elapsed();
@@ -338,9 +339,14 @@ async fn a_dead_meter_does_not_stop_the_battery_being_recorded() {
     let journal_path = config.journal_path.clone();
     let (devices, _battery) = virtual_devices(&config);
 
-    run(config, devices, stop_after(Duration::from_millis(800)))
-        .await
-        .expect("run must exit cleanly");
+    run(
+        config,
+        devices,
+        None,
+        stop_after(Duration::from_millis(800)),
+    )
+    .await
+    .expect("run must exit cleanly");
 
     let conn = rusqlite::Connection::open(&journal_path).unwrap();
     let outage_began: i64 = conn
@@ -379,9 +385,14 @@ async fn the_failsafe_fires_while_the_tick_is_healthy() {
     let journal_path = config.journal_path.clone();
     let (devices, _battery) = virtual_devices(&config);
 
-    run(config, devices, stop_after(Duration::from_millis(800)))
-        .await
-        .expect("run must exit cleanly");
+    run(
+        config,
+        devices,
+        None,
+        stop_after(Duration::from_millis(800)),
+    )
+    .await
+    .expect("run must exit cleanly");
 
     let conn = rusqlite::Connection::open(&journal_path).unwrap();
     assert!(
@@ -464,7 +475,7 @@ async fn a_device_found_down_is_written_to_once_per_outage() {
         id: device_id.clone(),
         told: AtomicBool::new(false),
     });
-    let inbox = Inbox::new([device_id.clone()], Instant::now(), BLIND_WINDOW);
+    let inbox = Inbox::new([device_id.clone()], None, Instant::now(), BLIND_WINDOW);
     let (requests, _) = tokio::sync::watch::channel(TickSeq::FIRST);
     let journal = std::sync::Arc::new(journal::testing::nowhere());
     let sampler = tokio::spawn(scan::sample_loop(
@@ -584,13 +595,119 @@ async fn a_live_meter_never_arms_the_failsafe() {
     let journal_path = config.journal_path.clone();
     let (devices, _battery) = virtual_devices(&config);
 
-    run(config, devices, stop_after(Duration::from_millis(600)))
-        .await
-        .expect("run must exit cleanly");
+    run(
+        config,
+        devices,
+        None,
+        stop_after(Duration::from_millis(600)),
+    )
+    .await
+    .expect("run must exit cleanly");
 
     let conn = rusqlite::Connection::open(&journal_path).unwrap();
     assert!(count_events(&conn, "meter") > 0, "the meter was answering");
     assert_eq!(count_events(&conn, "mqtt_timeout"), 0);
+}
+
+fn simulated_charger(config: &mut Config) -> crate::charger::Charger {
+    let charger = crate::config::ChargerConfig {
+        id: DeviceId::new("charger"),
+        kind: crate::config::ChargerKind::Simulated {
+            plug_in: crate::schedule::TimeOfDay::new(18, 0).unwrap(),
+            unplug: crate::schedule::TimeOfDay::new(7, 0).unwrap(),
+            current: crate::units::MilliAmps::from_whole_amps(16),
+            phases: crate::charger::state::PhaseMode::Three,
+            session_target: WattHours(20_000.0),
+        },
+    };
+    let built = crate::charger::from_config(&charger, config.timezone);
+    config.charger = Some(charger);
+    built
+}
+
+fn count_charger_updates(conn: &rusqlite::Connection) -> i64 {
+    journal::testing::count(
+        conn,
+        r#"SELECT COUNT(*) FROM events
+           WHERE kind = 'device_update' AND payload_json LIKE '%"class":"charger"%'"#,
+    )
+}
+
+/// Every round's charger reading reaches the journal as a `device_update`
+/// of its own class, and a recording holding them still replays exactly.
+#[tokio::test]
+async fn a_simulated_charger_is_journalled_and_replays() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut config = virtual_config(&dir, WattHours(1_000.0));
+    with_tick(&mut config, Duration::from_millis(50));
+    let charger = simulated_charger(&mut config);
+    let journal_path = config.journal_path.clone();
+    let (devices, _battery) = virtual_devices(&config);
+
+    run(
+        config,
+        devices,
+        Some(charger),
+        stop_after(Duration::from_millis(800)),
+    )
+    .await
+    .expect("run must exit cleanly");
+
+    let conn = rusqlite::Connection::open(&journal_path).unwrap();
+    assert!(
+        count_charger_updates(&conn) > 0,
+        "no charger reading was journalled"
+    );
+    assert!(
+        count_events(&conn, "device_update") > count_charger_updates(&conn),
+        "the battery's own updates are still journalled beside the charger's"
+    );
+
+    let recording = crate::journal::read::read_range(
+        &journal_path,
+        Timestamp::from_millis(0),
+        Timestamp::from_millis(i64::MAX),
+    )
+    .expect("a run that recorded decisions must produce a readable range");
+    let (fixture, _warnings) =
+        crate::replay::from_recording(recording).expect("a populated journal must yield a fixture");
+    let frames = crate::replay::run(&fixture, &[]).expect("the fixture's own format must replay");
+    crate::replay::verify(&fixture, &frames)
+        .expect("a recording with charger readings must replay as recorded");
+}
+
+/// The charger only gates discharge, so its outage is no reason to stop
+/// deciding: the loop keeps commanding the battery and never stands down.
+#[tokio::test]
+async fn a_charger_found_down_never_stands_the_battery_down() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut config = virtual_config(&dir, WattHours(1_000.0));
+    with_tick(&mut config, Duration::from_millis(50));
+    // Short enough that the charger is `Down` for most of the run.
+    config.mqtt_timeout = Duration::from_millis(200);
+    let journal_path = config.journal_path.clone();
+    let (devices, _battery) = virtual_devices(&config);
+    let charger = crate::charger::Charger::Unreachable(DeviceId::new("charger"));
+
+    run(
+        config,
+        devices,
+        Some(charger),
+        stop_after(Duration::from_millis(800)),
+    )
+    .await
+    .expect("run must exit cleanly");
+
+    let conn = rusqlite::Connection::open(&journal_path).unwrap();
+    assert_eq!(count_events(&conn, "mqtt_timeout"), 0);
+    assert_eq!(count_charger_updates(&conn), 0);
+    assert!(
+        journal::testing::count(
+            &conn,
+            "SELECT COUNT(*) FROM decisions WHERE kind = 'decision'"
+        ) > 0,
+        "the objective kept deciding through the charger's outage"
+    );
 }
 
 /// The matched-age invariant as the journal records it: a decision has to land
@@ -605,9 +722,14 @@ async fn a_tick_emits_its_device_updates_before_its_meter() {
     let journal_path = config.journal_path.clone();
     let (devices, _battery) = virtual_devices(&config);
 
-    run(config, devices, stop_after(Duration::from_millis(600)))
-        .await
-        .expect("run must exit cleanly");
+    run(
+        config,
+        devices,
+        None,
+        stop_after(Duration::from_millis(600)),
+    )
+    .await
+    .expect("run must exit cleanly");
 
     let conn = rusqlite::Connection::open(&journal_path).unwrap();
     let mut statement = conn
@@ -650,9 +772,14 @@ async fn a_device_update_never_carries_a_command() {
     let journal_path = config.journal_path.clone();
     let (devices, _battery) = virtual_devices(&config);
 
-    run(config, devices, stop_after(Duration::from_millis(600)))
-        .await
-        .expect("run must exit cleanly");
+    run(
+        config,
+        devices,
+        None,
+        stop_after(Duration::from_millis(600)),
+    )
+    .await
+    .expect("run must exit cleanly");
 
     let recording = crate::journal::read::read_range(
         &journal_path,
@@ -718,7 +845,7 @@ async fn a_run_against_the_simulator_replays_byte_identically() {
     // asserts away.
     let started_at = Timestamp::from_millis(0);
 
-    run(config, devices, stop)
+    run(config, devices, None, stop)
         .await
         .expect("run must exit cleanly");
 

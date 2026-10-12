@@ -33,6 +33,7 @@ fn config() -> Config {
         prediction: None,
         prices: None,
         car_battery: None,
+        charger: None,
         ha_publish_prefix: "SECRET-PREFIX".to_string(),
         charge_margin: PowerMargin::new(50),
         discharge_margin: PowerMargin::new(5),
@@ -618,6 +619,7 @@ fn the_example_config_is_what_production_runs() {
         prediction: None,
         prices: None,
         car_battery: None,
+        charger: None,
         ha_publish_prefix: "zendure".to_string(),
         charge_margin: PowerMargin::new(50),
         discharge_margin: PowerMargin::new(5),
@@ -1050,4 +1052,153 @@ fn a_malformed_backfill_falls_back_with_a_warning() {
     .unwrap();
     assert_eq!(config.prices.unwrap().backfill_days, BackfillDays::new(60));
     assert!(warnings.iter().any(|w| w.contains("prices.backfill_days")));
+}
+
+// --- [charger] ----------------------------------------------------------------
+
+fn charger_toml(body: &str) -> String {
+    format!("{}\n[charger]\n{body}\n", minimal_virtual_toml())
+}
+
+#[test]
+fn no_charger_table_is_none() {
+    let (config, _) = Config::from_toml_str(&minimal_virtual_toml()).unwrap();
+    assert!(config.charger.is_none());
+}
+
+#[test]
+fn a_simulated_charger_parses_with_defaults() {
+    let (config, warnings) = Config::from_toml_str(&charger_toml("kind = \"simulated\"")).unwrap();
+
+    assert_eq!(warnings, Vec::<String>::new(), "{warnings:?}");
+    assert_eq!(
+        config.charger,
+        Some(ChargerConfig {
+            id: DeviceId::new("charger"),
+            kind: ChargerKind::Simulated {
+                plug_in: TimeOfDay::new(18, 0).unwrap(),
+                unplug: TimeOfDay::new(7, 0).unwrap(),
+                current: MilliAmps(16_000),
+                phases: PhaseMode::Three,
+                session_target: WattHours(20_000.0),
+            },
+        })
+    );
+}
+
+#[test]
+fn a_simulated_charger_takes_every_knob() {
+    let (config, warnings) = Config::from_toml_str(&charger_toml(
+        r#"
+        kind = "simulated"
+        id = "ev"
+        plug_in = "17:30"
+        unplug = "06:45"
+        current_amps = 10
+        phases = 1
+        session_target = 7500
+        "#,
+    ))
+    .unwrap();
+
+    assert_eq!(warnings, Vec::<String>::new(), "{warnings:?}");
+    assert_eq!(
+        config.charger,
+        Some(ChargerConfig {
+            id: DeviceId::new("ev"),
+            kind: ChargerKind::Simulated {
+                plug_in: TimeOfDay::new(17, 30).unwrap(),
+                unplug: TimeOfDay::new(6, 45).unwrap(),
+                current: MilliAmps(10_000),
+                phases: PhaseMode::One,
+                session_target: WattHours(7_500.0),
+            },
+        })
+    );
+}
+
+/// `vestel` included: it is refused until its adapter exists.
+#[test]
+fn an_unknown_charger_kind_is_fatal() {
+    for kind in ["vestel", "telepathic"] {
+        let err = Config::from_toml_str(&charger_toml(&format!("kind = \"{kind}\""))).unwrap_err();
+        assert!(err.contains("charger.kind"), "{err}");
+    }
+}
+
+#[test]
+fn a_charger_table_without_a_kind_is_fatal() {
+    let err = Config::from_toml_str(&charger_toml("id = \"ev\"")).unwrap_err();
+    assert!(err.contains("charger.kind"), "{err}");
+}
+
+/// A fake car on a real meter would hold a real battery to a load that does
+/// not exist.
+#[test]
+fn a_simulated_charger_without_a_synthetic_meter_is_fatal() {
+    let toml = format!("{}\n[charger]\nkind = \"simulated\"\n", minimal_toml());
+    let err = Config::from_toml_str(&toml).unwrap_err();
+    assert!(err.contains("synthetic"), "{err}");
+}
+
+#[test]
+fn a_charger_id_that_collides_with_the_battery_is_fatal() {
+    let err =
+        Config::from_toml_str(&charger_toml("kind = \"simulated\"\nid = \"sim\"")).unwrap_err();
+    assert!(err.contains("charger.id"), "{err}");
+}
+
+#[test]
+fn an_unknown_charger_key_warns() {
+    let (config, warnings) =
+        Config::from_toml_str(&charger_toml("kind = \"simulated\"\nhost = \"10.0.0.5\"")).unwrap();
+
+    assert!(config.charger.is_some());
+    assert_eq!(
+        warnings,
+        vec!["unknown key `charger.host`; ignored".to_string()]
+    );
+}
+
+#[test]
+fn a_wiring_with_two_phases_warns_and_keeps_three() {
+    let (config, warnings) =
+        Config::from_toml_str(&charger_toml("kind = \"simulated\"\nphases = 2")).unwrap();
+
+    let Some(ChargerConfig {
+        kind: ChargerKind::Simulated { phases, .. },
+        ..
+    }) = config.charger
+    else {
+        panic!("a simulated charger was configured");
+    };
+    assert_eq!(phases, PhaseMode::Three);
+    assert!(
+        warnings.iter().any(|w| w.contains("charger.phases")),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn the_charger_never_leaks_into_session_config() {
+    let (with, _) = Config::from_toml_str(&charger_toml("kind = \"simulated\"")).unwrap();
+    let (without, _) = Config::from_toml_str(&minimal_virtual_toml()).unwrap();
+    assert_eq!(with.session(), without.session());
+}
+
+#[test]
+fn the_virtual_example_config_parses_with_zero_warnings() {
+    let (config, warnings) =
+        Config::from_toml_str(include_str!("../config.example.virtual.toml")).unwrap();
+    assert_eq!(warnings, Vec::<String>::new(), "{warnings:?}");
+    assert!(
+        matches!(
+            config.charger,
+            Some(ChargerConfig {
+                kind: ChargerKind::Simulated { .. },
+                ..
+            })
+        ),
+        "the simulator example runs a simulated charger"
+    );
 }

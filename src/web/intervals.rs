@@ -290,6 +290,8 @@ impl IntervalHistory {
                     bucket.home.add(home);
                 }
             }
+            // `devices` is the battery fleet, so this is also what keeps a
+            // charger's reading out of the battery series.
             Event::DeviceUpdate { id, .. } if !self.devices.contains(id) => {}
             Event::DeviceUpdate {
                 at,
