@@ -51,8 +51,11 @@ fn state(charger: Option<ChargerState>, sampled: i64, as_of: i64) -> DashboardSt
             .state(),
         mqtt_timed_out: false,
     };
-    DashboardState::seed(&engine, vec![], journey::interval_ring(), at(as_of))
-        .with_charger(Some(guard()))
+    let standing = guard().standing(&engine.world, at(as_of));
+    let mut state = DashboardState::seed(&engine, vec![], journey::interval_ring(), at(as_of))
+        .with_charger(true);
+    state.charger_tick(&engine, standing, at(as_of));
+    state
 }
 
 fn reading(status: ChargePointStatus, cable: CableState, watts: u32) -> ChargerState {
@@ -198,7 +201,7 @@ fn the_panel_shows_unanswered_fields_as_a_dash_and_every_phase() {
 #[test]
 fn the_panel_says_when_no_charger_is_configured() {
     let mut s = state(None, 0, 5);
-    s.charger = None;
+    s.charger_feed = false;
     assert!(panel_html(&s).contains("No charger configured"));
 }
 

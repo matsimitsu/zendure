@@ -14,7 +14,7 @@ use crate::car_battery;
 use crate::charger::{Charger, ChargerMonitor, ChargerReading};
 use crate::clock::Clock;
 use crate::config::Config;
-use crate::controller::{ChargerGuard, SocLimits};
+use crate::controller::{ChargerStanding, SocLimits};
 use crate::device::{Applied, BatteryMonitor, BatteryReading, ControlPath, PackStatus};
 use crate::engine::Engine;
 use crate::event::Event;
@@ -102,7 +102,6 @@ struct Tick<'a> {
     /// How long the loop may go without a usable reading, for the line that
     /// says so.
     blind_window: Duration,
-    charger_guard: controller::ChargerGuard,
 }
 
 /// What a tick's device slots said, once every sample taken for its round has
@@ -124,61 +123,77 @@ struct Silent {
     devices: Vec<(DeviceId, Failures)>,
 }
 
-impl Tick<'_> {
+/// The charger's side of the loop, carried from one tick to the next: whether
+/// its silence has been reported, and the verdict the dashboard was last sent,
+/// so neither repeats every tick.
+#[derive(Default)]
+struct ChargerTick {
+    silent: bool,
+    shown: Option<ChargerStanding>,
+}
+
+impl ChargerTick {
     /// Folds this round's charger sample, ahead of the batteries' and the
     /// meter's so a decision this tick sees it. The charger only ever gates
     /// discharge on or off and never enters setpoint arithmetic, so it is
     /// exempt from CONTROL-2's matched ages: a round never waits on it, and a
-    /// silent one never stands the fleet down. `silent` is what makes the
-    /// warning once per outage.
-    fn fold_charger(
-        &self,
+    /// silent one never stands the fleet down. The dashboard hears of every
+    /// reading, and of the engine's verdict whenever ageing changes it.
+    fn fold(
+        &mut self,
+        tick: &Tick,
         engine: &mut Engine,
-        silent: &mut bool,
+        now: Timestamp,
         delivery: Option<(DeviceId, Delivery<ChargerReading>)>,
     ) {
         let Some((id, delivery)) = delivery else {
             return;
         };
 
-        match delivery {
+        let read = match delivery {
             Delivery::Fresh(sampled_at, reading) => {
-                *silent = false;
+                self.silent = false;
                 let event = Event::DeviceUpdate {
                     at: sampled_at,
                     id,
                     measurement: Measurement::Charger(reading.state.clone()),
                 };
-                self.journal.event(&event);
+                tick.journal.event(&event);
                 engine.step(&event);
-                let hold =
-                    controller::car_charging(engine.world(), &sampled_at, self.charger_guard)
-                        .is_some();
                 mqtt::publish_charger(
-                    self.publisher,
-                    self.announcer,
-                    self.prefix,
+                    tick.publisher,
+                    tick.announcer,
+                    tick.prefix,
                     &reading.state,
-                    hold,
+                    engine.discharge_hold(now).is_some(),
                 );
-                if let Some(tx) = self.dashboard {
-                    let snapshot = engine.state();
-                    tx.send_modify(|state| state.charger_tick(&snapshot, sampled_at.now));
-                }
+                true
             }
-            Delivery::Quiet => {}
+            Delivery::Quiet => false,
             Delivery::Down(failures) => {
-                if !std::mem::replace(silent, true) {
-                    mqtt::publish_charger_discharge_hold(self.publisher, self.prefix, false);
+                if !std::mem::replace(&mut self.silent, true) {
+                    mqtt::publish_charger_discharge_hold(tick.publisher, tick.prefix, false);
                     tracing::warn!(
                         "{id} is not answering ({} consecutive failures) — carrying on without it",
                         failures.get(),
                     );
                 }
+                false
+            }
+        };
+
+        let standing = engine.charger_standing(now);
+        if read || standing != self.shown {
+            self.shown = standing;
+            if let Some(tx) = tick.dashboard {
+                let snapshot = engine.state();
+                tx.send_modify(|state| state.charger_tick(&snapshot, standing, now));
             }
         }
     }
+}
 
+impl Tick<'_> {
     /// Folds and publishes every device sample taken for this round, whatever
     /// the rest of the fleet is doing: a sample is taken once, and dropping it
     /// because another source went quiet leaves `RteTracker::record`
@@ -711,12 +726,7 @@ pub async fn run(
                 ))
                 .with_prices(config.prices.as_ref())
                 .with_forecast(config.prediction.is_some())
-                .with_charger(
-                    config
-                        .charger
-                        .as_ref()
-                        .map(|_| ChargerGuard::from_session(&config.session())),
-                );
+                .with_charger(config.charger.is_some());
         let (tx, rx) = tokio::sync::watch::channel(seed);
         let past_days = web::PastDays::new(config.journal_path.clone(), configured);
         web_task = web::spawn(web_cfg, rx, config.timezone, past_days, async move {
@@ -878,7 +888,6 @@ pub async fn run(
         prefix: &ha_prefix,
         dashboard: dashboard_tx.as_ref(),
         blind_window: mqtt_timeout,
-        charger_guard: controller::ChargerGuard::from_session(&config.session()),
     };
 
     // The round every slot is currently answering. A tick reads only the
@@ -886,7 +895,7 @@ pub async fn run(
     // before is not served beside one taken for this one. Asked for ahead of
     // the first tick, so that tick finds filled slots.
     let mut round = TickSeq::FIRST.next();
-    let mut charger_silent = false;
+    let mut charger = ChargerTick::default();
     requests.send_modify(|seq| *seq = round);
 
     loop {
@@ -925,9 +934,10 @@ pub async fn run(
                 // ticks without moving it.
                 let scan_now = Instant::now();
 
-                tick_context.fold_charger(
+                charger.fold(
+                    &tick_context,
                     &mut engine,
-                    &mut charger_silent,
+                    at.now,
                     inbox.take_charger(round, scan_now),
                 );
                 let fleet = tick_context.fold_devices(

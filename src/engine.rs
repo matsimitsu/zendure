@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 use crate::allocate::{Directive, allocate};
 use crate::battery::BatteryState;
 use crate::clock::Clock;
-use crate::controller::{Controller, ControllerState, SocLimits};
+use crate::controller::{ChargerStanding, Controller, ControllerState, SocLimits};
 use crate::event::Event;
 use crate::models::{ControlDecision, ControlMode, CycleCounts};
-use crate::units::{GridPower, Setpoint, Soc, SolarPower, Timestamp};
+use crate::units::{ChargerDraw, GridPower, Setpoint, Soc, SolarPower, Timestamp};
 use crate::world::{MeterReading, World};
 
 /// The event-driven fold at the heart of the controller. Owns exactly the
@@ -62,8 +62,14 @@ impl Engine {
         self.world.battery()
     }
 
-    pub fn world(&self) -> &World {
-        &self.world
+    /// Whether the car holds battery discharge at `now`, by the rule the
+    /// controller decides with.
+    pub fn discharge_hold(&self, now: Timestamp) -> Option<ChargerDraw> {
+        self.controller.discharge_hold(&self.world, now)
+    }
+
+    pub fn charger_standing(&self, now: Timestamp) -> Option<ChargerStanding> {
+        self.controller.charger_standing(&self.world, now)
     }
 
     pub fn soc_limits(&self, weekday: chrono::Weekday, device_min: Soc) -> SocLimits {

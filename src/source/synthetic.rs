@@ -182,7 +182,7 @@ impl SyntheticMeter {
     /// between the house and the reader.
     pub async fn sample(&self) -> Result<MeterSample, PollError> {
         let clock = Clock::now(self.profile.timezone);
-        let car = self.charger.as_ref().map(|charger| charger.at(&clock));
+        let car = self.charger.as_ref().map(|charger| charger.at(clock.now));
 
         Ok(MeterSample {
             observation: observation(&self.profile, &clock, self.battery.flow(), car.as_ref()),

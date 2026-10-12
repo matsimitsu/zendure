@@ -607,7 +607,9 @@ one non-solar phase for a one-phase car.
 `[tuning] charger_discharge_block_threshold` (500 W by default), the battery
 won't discharge, so the car isn't charged out of the home battery at
 round-trip loss. The decision reason says so: `car charging at 7200W,
-discharge held`. Charging from export still runs while the car charges. The
+discharge held` whenever the house is importing and the pack has charge above
+its floor, even if another guard (the post-charge idle, the solar block) would
+also have kept it idle. Charging from export still runs while the car charges. The
 rule reads measured power, not the charger's status, because a charger can
 report Charging at 0 W. `0` disables the hold.
 

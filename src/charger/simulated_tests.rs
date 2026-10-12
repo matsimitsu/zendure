@@ -16,24 +16,21 @@ fn overnight(timezone: Tz, phases: PhaseMode, target: WattHours) -> ChargeProfil
 /// A target no test reaches unless it means to.
 const UNREACHED: WattHours = WattHours(1_000_000.0);
 
-fn clock_in(timezone: Tz, (y, mo, d): (i32, u32, u32), hour: u32, minute: u32) -> Clock {
+fn clock_in(timezone: Tz, (y, mo, d): (i32, u32, u32), hour: u32, minute: u32) -> Timestamp {
     let local = timezone
         .with_ymd_and_hms(y, mo, d, hour, minute, 0)
         .single()
         .expect("an unambiguous local time");
-    Clock {
-        now: Timestamp::from(local),
-        ..Clock::test_at(0)
-    }
+    Timestamp::from(local)
 }
 
-fn utc(hour: u32, minute: u32) -> Clock {
+fn utc(hour: u32, minute: u32) -> Timestamp {
     clock_in(chrono_tz::UTC, (2026, 6, 15), hour, minute)
 }
 
 #[test]
 fn before_the_window_no_car_is_plugged_in() {
-    let state = overnight(chrono_tz::UTC, PhaseMode::Three, UNREACHED).at(&utc(17, 59));
+    let state = overnight(chrono_tz::UTC, PhaseMode::Three, UNREACHED).at(utc(17, 59));
 
     assert_eq!(state.status, ChargePointStatus::Available);
     assert_eq!(state.cable, CableState::NoCable);
@@ -46,7 +43,7 @@ fn before_the_window_no_car_is_plugged_in() {
 /// 3 × 16 A × 230 V, half an hour in.
 #[test]
 fn during_the_window_three_phases_draw_their_current_on_every_phase() {
-    let state = overnight(chrono_tz::UTC, PhaseMode::Three, UNREACHED).at(&utc(18, 30));
+    let state = overnight(chrono_tz::UTC, PhaseMode::Three, UNREACHED).at(utc(18, 30));
 
     assert_eq!(state.status, ChargePointStatus::Charging);
     assert_eq!(state.cable, CableState::VehicleLocked);
@@ -63,7 +60,7 @@ fn during_the_window_three_phases_draw_their_current_on_every_phase() {
 
 #[test]
 fn one_phase_draws_on_the_first_phase_only() {
-    let state = overnight(chrono_tz::UTC, PhaseMode::One, UNREACHED).at(&utc(19, 0));
+    let state = overnight(chrono_tz::UTC, PhaseMode::One, UNREACHED).at(utc(19, 0));
 
     assert_eq!(state.currents, [AMPS_16, MilliAmps::ZERO, MilliAmps::ZERO]);
     assert_eq!(state.power, ChargerDraw::new(3_680));
@@ -76,9 +73,9 @@ fn one_phase_draws_on_the_first_phase_only() {
 fn once_the_target_is_reached_the_car_suspends() {
     let profile = overnight(chrono_tz::UTC, PhaseMode::Three, WattHours(11_040.0));
 
-    assert_eq!(profile.at(&utc(18, 59)).status, ChargePointStatus::Charging);
+    assert_eq!(profile.at(utc(18, 59)).status, ChargePointStatus::Charging);
 
-    let state = profile.at(&utc(21, 0));
+    let state = profile.at(utc(21, 0));
     assert_eq!(state.status, ChargePointStatus::SuspendedEv);
     assert_eq!(state.cable, CableState::VehicleLocked);
     assert_eq!(state.power, ChargerDraw::ZERO);
@@ -96,15 +93,15 @@ fn once_the_target_is_reached_the_car_suspends() {
 fn a_window_that_wraps_midnight_carries_the_session_across_it() {
     let profile = overnight(chrono_tz::UTC, PhaseMode::One, UNREACHED);
 
-    let state = profile.at(&utc(2, 0));
+    let state = profile.at(utc(2, 0));
     assert_eq!(state.status, ChargePointStatus::Charging);
     assert_eq!(
         state.session_duration,
         Some(SessionDuration::new(Duration::from_secs(8 * 3600)))
     );
 
-    assert_eq!(profile.at(&utc(6, 59)).cable, CableState::VehicleLocked);
-    let unplugged = profile.at(&utc(7, 0));
+    assert_eq!(profile.at(utc(6, 59)).cable, CableState::VehicleLocked);
+    let unplugged = profile.at(utc(7, 0));
     assert_eq!(unplugged.status, ChargePointStatus::Available);
     assert_eq!(unplugged.cable, CableState::NoCable);
 }
@@ -120,11 +117,11 @@ fn a_daytime_window_is_open_from_plug_in_until_unplug() {
         chrono_tz::UTC,
     );
 
-    assert_eq!(profile.at(&utc(8, 59)).cable, CableState::NoCable);
-    assert_eq!(profile.at(&utc(9, 0)).cable, CableState::VehicleLocked);
-    assert_eq!(profile.at(&utc(16, 59)).cable, CableState::VehicleLocked);
-    assert_eq!(profile.at(&utc(17, 0)).cable, CableState::NoCable);
-    assert_eq!(profile.at(&utc(23, 0)).cable, CableState::NoCable);
+    assert_eq!(profile.at(utc(8, 59)).cable, CableState::NoCable);
+    assert_eq!(profile.at(utc(9, 0)).cable, CableState::VehicleLocked);
+    assert_eq!(profile.at(utc(16, 59)).cable, CableState::VehicleLocked);
+    assert_eq!(profile.at(utc(17, 0)).cable, CableState::NoCable);
+    assert_eq!(profile.at(utc(23, 0)).cable, CableState::NoCable);
 }
 
 /// The night the clocks go back has an extra hour: 18:00 to 06:00 local is
@@ -133,7 +130,7 @@ fn a_daytime_window_is_open_from_plug_in_until_unplug() {
 fn the_night_the_clocks_go_back_charges_for_the_extra_hour() {
     let profile = overnight(Amsterdam, PhaseMode::One, UNREACHED);
 
-    let state = profile.at(&clock_in(Amsterdam, (2026, 10, 25), 6, 0));
+    let state = profile.at(clock_in(Amsterdam, (2026, 10, 25), 6, 0));
     assert_eq!(
         state.session_duration,
         Some(SessionDuration::new(Duration::from_secs(13 * 3600)))
@@ -146,7 +143,7 @@ fn the_night_the_clocks_go_back_charges_for_the_extra_hour() {
 fn the_night_the_clocks_go_forward_charges_an_hour_less() {
     let profile = overnight(Amsterdam, PhaseMode::One, UNREACHED);
 
-    let state = profile.at(&clock_in(Amsterdam, (2026, 3, 29), 6, 0));
+    let state = profile.at(clock_in(Amsterdam, (2026, 3, 29), 6, 0));
     assert_eq!(
         state.session_duration,
         Some(SessionDuration::new(Duration::from_secs(11 * 3600)))
@@ -166,7 +163,7 @@ fn a_plug_in_time_skipped_by_the_clocks_going_forward_starts_at_the_jump() {
         Amsterdam,
     );
 
-    let state = profile.at(&clock_in(Amsterdam, (2026, 3, 29), 3, 10));
+    let state = profile.at(clock_in(Amsterdam, (2026, 3, 29), 3, 10));
     assert_eq!(state.status, ChargePointStatus::Charging);
     assert_eq!(
         state.session_duration,
