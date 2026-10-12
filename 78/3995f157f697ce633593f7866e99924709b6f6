@@ -1,0 +1,51 @@
+src/source/synthetic.rs
+  s_1eb51bc5cbf150::t_788a713fcc6ce0 225
+  s_1eb51bc5cbf150::t_0552e18e01aa9e 202
+  s_1eb51bc5cbf150::t_eefed481b350bb 102-103,105,107-108,140,142,145-146
+  s_1eb51bc5cbf150::t_41076ffb5c4812 455
+src/units.rs
+  s_1eb51bc5cbf150::t_8da7d278269a9d 786-790
+  s_1eb51bc5cbf150::t_eefed481b350bb 990-993
+src/charger/state.rs
+  s_1eb51bc5cbf150::t_8da7d278269a9d 160-195
+src/run.rs
+  s_1eb51bc5cbf150::t_a804307b070938 814-817
+src/charger/simulated_tests.rs
+  s_1eb51bc5cbf150::t_788a713fcc6ce0 4
+src/web/state_tests.rs
+  s_1eb51bc5cbf150::t_788a713fcc6ce0 8
+src/web/charger.rs
+  s_1eb51bc5cbf150::t_8da7d278269a9d 70,202
+src/charger/mod.rs
+  s_1eb51bc5cbf150::t_a804307b070938 73-82
+src/source/mod.rs
+  s_1eb51bc5cbf150::t_a804307b070938 12,92,94-98
+  s_1eb51bc5cbf150::t_2d8536b73925ef 10-11
+src/mqtt/discovery.rs
+  s_1eb51bc5cbf150::t_9a5bd761702eba 36,48,87-94,107,230-263,289-290,358,535-538,568-569,596-597,614
+src/fixtures.rs
+  s_1eb51bc5cbf150::t_788a713fcc6ce0 24-28,154-174,195
+src/web/charger_tests.rs
+  s_1eb51bc5cbf150::t_788a713fcc6ce0 11,64,71,266
+  s_1eb51bc5cbf150::t_c8dad9c9971dd4 12
+src/web/view_tests.rs
+  s_1eb51bc5cbf150::t_788a713fcc6ce0 12
+src/web/intervals_tests.rs
+  s_1eb51bc5cbf150::t_c8dad9c9971dd4 7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "783995f157f697ce633593f7866e99924709b6f6",
+  "prompts": {},
+  "sessions": {
+    "s_1eb51bc5cbf150": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "240820dc-c6c0-4a01-b8ce-f8f066dd22a3",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Beekman <robert@matsimitsu.nl>"
+    }
+  }
+}
