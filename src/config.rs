@@ -590,6 +590,13 @@ pub enum ChargerKind {
         phases: PhaseMode,
         session_target: WattHours,
     },
+    /// A Vestel EVC04 read over Modbus TCP; see `charger::vestel`.
+    Vestel {
+        host: String,
+        port: u16,
+        /// 255 on every EVC04 documented so far.
+        unit_id: u8,
+    },
 }
 
 /// Which meter feeds the engine its grid readings. Defaults to `Shelly`,
@@ -899,7 +906,7 @@ fn take_device_packs(table: &mut toml::Table, key: &str) -> Result<Vec<WattHours
 
 /// `[charger]`, if present. Same presence-gates-the-feature rule as
 /// `[car_battery]`; the simulated car's knobs are lenient, but the two
-/// relationships to other tables are fatal.
+/// relationships to other tables are fatal, as is a Vestel with no host.
 fn take_charger(
     taker: &mut Taker,
     device: &DeviceConfig,
@@ -945,9 +952,14 @@ fn take_charger(
                 session_target: taker.lenient("charger.session_target", WattHours(20_000.0))?,
             }
         }
+        "vestel" => ChargerKind::Vestel {
+            host: taker.required("charger.host")?,
+            port: taker.optional("charger.port")?.unwrap_or(502),
+            unit_id: taker.optional("charger.unit_id")?.unwrap_or(255),
+        },
         other => {
             return Err(format!(
-                "charger.kind must be \"simulated\", found {other:?}"
+                "charger.kind must be \"vestel\" or \"simulated\", found {other:?}"
             ));
         }
     };

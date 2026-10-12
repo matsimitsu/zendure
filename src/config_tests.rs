@@ -1117,13 +1117,63 @@ fn a_simulated_charger_takes_every_knob() {
     );
 }
 
-/// `vestel` included: it is refused until its adapter exists.
 #[test]
 fn an_unknown_charger_kind_is_fatal() {
-    for kind in ["vestel", "telepathic"] {
-        let err = Config::from_toml_str(&charger_toml(&format!("kind = \"{kind}\""))).unwrap_err();
-        assert!(err.contains("charger.kind"), "{err}");
-    }
+    let err = Config::from_toml_str(&charger_toml("kind = \"telepathic\"")).unwrap_err();
+    assert!(err.contains("charger.kind"), "{err}");
+}
+
+#[test]
+fn a_vestel_charger_parses_with_defaults() {
+    let (config, warnings) =
+        Config::from_toml_str(&charger_toml("kind = \"vestel\"\nhost = \"10.0.0.5\"")).unwrap();
+
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        config.charger,
+        Some(ChargerConfig {
+            id: DeviceId::new("charger"),
+            kind: ChargerKind::Vestel {
+                host: "10.0.0.5".to_string(),
+                port: 502,
+                unit_id: 255,
+            },
+        })
+    );
+}
+
+#[test]
+fn a_vestel_charger_takes_its_port_and_unit_id() {
+    let (config, _) = Config::from_toml_str(&charger_toml(
+        "kind = \"vestel\"\nhost = \"evc04.lan\"\nport = 5020\nunit_id = 1",
+    ))
+    .unwrap();
+
+    assert_eq!(
+        config.charger.map(|charger| charger.kind),
+        Some(ChargerKind::Vestel {
+            host: "evc04.lan".to_string(),
+            port: 5020,
+            unit_id: 1,
+        })
+    );
+}
+
+#[test]
+fn a_vestel_charger_without_a_host_is_fatal() {
+    let err = Config::from_toml_str(&charger_toml("kind = \"vestel\"")).unwrap_err();
+    assert!(err.contains("charger.host"), "{err}");
+}
+
+/// A unit id past 255 does not fit the Modbus frame, so it is a typo, not a
+/// knob to guess past.
+#[test]
+fn a_vestel_unit_id_out_of_range_is_fatal() {
+    let err = Config::from_toml_str(&charger_toml(
+        "kind = \"vestel\"\nhost = \"10.0.0.5\"\nunit_id = 256",
+    ))
+    .unwrap_err();
+    assert!(err.contains("charger.unit_id"), "{err}");
 }
 
 #[test]

@@ -35,6 +35,10 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # scraping the VW portal's login flow needs (form fields, the templateModel
 # JSON blob, the csrf token) — see `src/car_battery/vw_portal.rs`.
 regex = "1"
+# TCP client only: the Vestel charger is reached over the network. The serial
+# side (`rtu-sync`, `rtu-server`) pulls in `tokio-serial` and with it
+# `libudev-sys`, a C dependency the static musl release build cannot link.
+tokio-modbus = { version = "0.17.0", default-features = false, features = ["tcp"] }
 
 [dev-dependencies]
 tempfile = "3"

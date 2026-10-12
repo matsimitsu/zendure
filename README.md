@@ -90,13 +90,17 @@ solar_phase = "A"           # A, B or C — which phase the solar inverter feeds
 # solar_peak = 3000            # synthetic only, watts; required for it
 
 # An EV charger, sampled every scan round beside the battery and journalled
-# as a `device_update` with `class: charger`. Absent changes nothing. Only
-# kind = "simulated" exists so far, and only beside a synthetic meter; see
+# as a `device_update` with `class: charger`. Absent changes nothing.
+# kind = "vestel" reads a Vestel EVC04 over Modbus TCP (see "Vestel EVC04"
+# below); kind = "simulated" runs only beside a synthetic meter, see
 # config.example.virtual.toml for its knobs. The charger's id must differ
 # from the battery's. A charger that stops answering is logged once per
 # outage and never forces the battery idle.
 # [charger]
-# kind = "simulated"
+# kind = "vestel"              # or "simulated"
+# host = "192.168.1.30"        # vestel only, required for it
+# port = 502                   # vestel only, default
+# unit_id = 255                # vestel only, default
 # id = "charger"               # default
 
 [homeassistant]
@@ -292,6 +296,35 @@ validation:
 ```bash
 zendure --check --config /etc/zendure/config.toml
 ```
+
+### Vestel EVC04
+
+`[charger] kind = "vestel"` reads the charger over Modbus TCP every scan round
+and never writes a register. The register map comes from evcc's Vestel driver
+and has not yet been checked against hardware; every poll's raw registers are
+journalled as a `vestel_modbus` capture (a JSON map of each read's start
+register to its words), so a wrong guess can be fixed from recorded data.
+
+To let the controller in:
+
+1. In the charger's web UI (or the installer app), enable **Modbus TCP
+   server** and note the charger's IP address. Give it a fixed lease.
+2. The unit id is 255 unless the installer changed it; set `unit_id` if so.
+3. Keep the connection to this one client: an EVC04 often accepts only a
+   single Modbus client at a time, so a second one (evcc, Home Assistant)
+   will fail one or both. The controller keeps one connection open and
+   reconnects after any failure.
+
+**Keep Modbus/EMS load management OFF.** With load management on, the charger
+expects its controller to write a heartbeat (register 6000) regularly, and
+falls back to its failsafe current when that stops. This adapter is
+read-only, so it never writes the heartbeat. Leave load management off until
+the controller can set the charging current itself.
+
+The brand, model, serial and firmware are logged at `info` once per
+connection; status and cable changes are logged at `info` as they happen.
+The lifetime energy counter (register 1036) is read but its unit is
+unverified, so it appears only in the per-poll `debug` line and feeds nothing.
 
 ## Journal
 
