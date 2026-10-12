@@ -52,6 +52,7 @@ fn config() -> Config {
         rte_state_path: PathBuf::from("/SECRET/rte_state.json"),
         balance_weekday: Some(Weekday::Mon),
         solar_discharge_block_threshold: SolarPower::new(0.0),
+        charger_discharge_block_threshold: ChargerDraw::new(750),
         min_idle_before_discharge: Duration::from_secs(300),
         timezone: Tz::UTC,
         mqtt_timeout: Duration::from_secs(60),
@@ -92,7 +93,7 @@ fn the_session_config_carries_no_connection_settings() {
 fn the_session_config_serializes_to_the_exact_pinned_shape() {
     assert_eq!(
         serde_json::to_string(&config().session()).unwrap(),
-        r#"{"charge_margin":50,"discharge_margin":5,"charge_deadband":25,"discharge_deadband":25,"gain":100,"slew_limit":400,"charge_start_threshold":-100.0,"discharge_start_threshold":0.0,"min_mode_duration_secs":10,"min_decision_interval_secs":5,"idle_timeout_secs":300,"min_idle_before_discharge_secs":300,"cycle_warn_threshold":200,"min_soc":10,"max_soc":100,"balance_weekday":"Mon","solar_discharge_block_threshold":0.0,"mqtt_timeout_secs":60}"#
+        r#"{"charge_margin":50,"discharge_margin":5,"charge_deadband":25,"discharge_deadband":25,"gain":100,"slew_limit":400,"charge_start_threshold":-100.0,"discharge_start_threshold":0.0,"min_mode_duration_secs":10,"min_decision_interval_secs":5,"idle_timeout_secs":300,"min_idle_before_discharge_secs":300,"cycle_warn_threshold":200,"min_soc":10,"max_soc":100,"balance_weekday":"Mon","solar_discharge_block_threshold":0.0,"charger_discharge_block_threshold":750,"mqtt_timeout_secs":60}"#
     );
 }
 
@@ -116,6 +117,17 @@ fn a_session_config_journalled_without_deadbands_still_reads() {
 
     assert_eq!(decoded.charge_deadband, PowerMargin::default());
     assert_eq!(decoded.discharge_deadband, PowerMargin::default());
+}
+
+/// A row from before the car guard decodes with it off, which is how that
+/// build decided.
+#[test]
+fn a_session_config_journalled_without_the_charger_guard_still_reads() {
+    let without_the_guard = r#"{"charge_margin":50,"discharge_margin":5,"charge_start_threshold":-100.0,"discharge_start_threshold":0.0,"min_mode_duration_secs":10,"min_decision_interval_secs":5,"idle_timeout_secs":300,"min_idle_before_discharge_secs":300,"cycle_warn_threshold":200,"min_soc":10,"max_soc":100,"balance_weekday":"Mon","solar_discharge_block_threshold":0.0,"mqtt_timeout_secs":60}"#;
+
+    let decoded: SessionConfig = serde_json::from_str(without_the_guard).unwrap();
+
+    assert_eq!(decoded.charger_discharge_block_threshold, ChargerDraw::ZERO);
 }
 
 /// Same, for `gain`/`slew_limit`: a pre-A3 row never had `K` or a slew limit
@@ -161,6 +173,10 @@ fn the_session_config_matches_what_the_controller_was_built_with() {
     assert_eq!(
         session.solar_discharge_block_threshold,
         config.solar_discharge_block_threshold
+    );
+    assert_eq!(
+        session.charger_discharge_block_threshold,
+        config.charger_discharge_block_threshold
     );
     assert_eq!(
         session.min_mode_duration_secs,
@@ -637,6 +653,7 @@ fn the_example_config_is_what_production_runs() {
         max_soc: Soc::new(95),
         balance_weekday: Some(Weekday::Mon),
         solar_discharge_block_threshold: SolarPower::new(200.0),
+        charger_discharge_block_threshold: ChargerDraw::new(500),
         min_idle_before_discharge: Duration::from_secs(300),
         timezone: "Europe/Amsterdam".parse().unwrap(),
         mqtt_timeout: Duration::from_secs(60),

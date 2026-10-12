@@ -13,8 +13,8 @@ use crate::charger::state::PhaseMode;
 use crate::schedule::TimeOfDay;
 use crate::source::shelly::SolarPhase;
 use crate::units::{
-    BackfillDays, CentsPerKwh, Efficiency, Gain, GridPower, MilliAmps, Percent, PowerMargin,
-    RetentionDays, SlewLimit, Soc, SolarPower, WattHours, Watts,
+    BackfillDays, CentsPerKwh, ChargerDraw, Efficiency, Gain, GridPower, MilliAmps, Percent,
+    PowerMargin, RetentionDays, SlewLimit, Soc, SolarPower, WattHours, Watts,
 };
 use crate::world::DeviceId;
 use crate::zendure::POLL_INTERVAL_FLOOR;
@@ -56,6 +56,10 @@ const DEFAULT_VIRTUAL_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// neither yet measured, so it errs wide: too wide only delays a start by the
 /// band's worth of import, because once discharging only 0 W stops it.
 pub const DEFAULT_DISCHARGE_START_THRESHOLD: GridPower = GridPower(50.0);
+
+/// Clear of a charger's standby draw and a finished car's trickle, well
+/// below the 1.4 kW of the slowest real charge.
+const DEFAULT_CHARGER_DISCHARGE_BLOCK_THRESHOLD: ChargerDraw = ChargerDraw::new(500);
 
 fn parse_weekday(s: &str) -> Result<Weekday, String> {
     match s.trim().to_ascii_lowercase().as_str() {
@@ -1022,9 +1026,13 @@ pub struct Config {
     /// full charge. `None` disables the override (default: Monday).
     pub balance_weekday: Option<Weekday>,
     /// Solar inverter export on the Shelly's solar phase at or above which discharge is
-    /// skipped, so large loads (e.g. EV charging) pull from grid+solar instead
-    /// of draining the home battery. 0 disables the guard (default).
+    /// skipped, for loads the controller can't see (a granny charger), so they
+    /// pull from grid+solar instead of draining the home battery. 0 disables
+    /// the guard (default).
     pub solar_discharge_block_threshold: SolarPower,
+    /// A fresh `[charger]` reading drawing at least this holds discharge, so
+    /// the car isn't charged out of the home battery. 0 disables the guard.
+    pub charger_discharge_block_threshold: ChargerDraw,
     /// Minimum idle duration before discharge is allowed (prevents charge→discharge
     /// oscillation)
     pub min_idle_before_discharge: Duration,
@@ -1082,6 +1090,10 @@ impl std::fmt::Debug for Config {
                 "solar_discharge_block_threshold",
                 &self.solar_discharge_block_threshold,
             )
+            .field(
+                "charger_discharge_block_threshold",
+                &self.charger_discharge_block_threshold,
+            )
             .field("min_idle_before_discharge", &self.min_idle_before_discharge)
             .field("timezone", &self.timezone)
             .field("mqtt_timeout", &self.mqtt_timeout)
@@ -1132,6 +1144,11 @@ pub struct SessionConfig {
     pub max_soc: Soc,
     pub balance_weekday: Option<Weekday>,
     pub solar_discharge_block_threshold: SolarPower,
+    /// Defaulted to off for a session row journalled before the guard
+    /// existed: that build never held discharge for the car, and replay
+    /// must decide as it did.
+    #[serde(default)]
+    pub charger_discharge_block_threshold: ChargerDraw,
     pub mqtt_timeout_secs: u64,
 }
 
@@ -1169,6 +1186,7 @@ impl SessionConfig {
             max_soc: Soc::new(100),
             balance_weekday: None,
             solar_discharge_block_threshold: SolarPower::ZERO,
+            charger_discharge_block_threshold: DEFAULT_CHARGER_DISCHARGE_BLOCK_THRESHOLD,
             mqtt_timeout_secs: 120,
         }
     }
@@ -1217,6 +1235,7 @@ impl Config {
             max_soc,
             balance_weekday,
             solar_discharge_block_threshold,
+            charger_discharge_block_threshold,
             min_idle_before_discharge,
             mqtt_timeout,
         } = self;
@@ -1239,6 +1258,7 @@ impl Config {
             max_soc: *max_soc,
             balance_weekday: *balance_weekday,
             solar_discharge_block_threshold: *solar_discharge_block_threshold,
+            charger_discharge_block_threshold: *charger_discharge_block_threshold,
             mqtt_timeout_secs: mqtt_timeout.as_secs(),
         }
     }
@@ -1509,6 +1529,10 @@ impl Config {
             .0;
         let solar_discharge_block_threshold = taker
             .lenient::<SolarPower>("tuning.solar_discharge_block_threshold", SolarPower::ZERO)?;
+        let charger_discharge_block_threshold = taker.lenient::<ChargerDraw>(
+            "tuning.charger_discharge_block_threshold",
+            DEFAULT_CHARGER_DISCHARGE_BLOCK_THRESHOLD,
+        )?;
         let mqtt_timeout = take_mqtt_timeout(&mut taker, device.poll_interval(), &mut warnings)?;
 
         warnings.extend(taker.finish());
@@ -1541,6 +1565,7 @@ impl Config {
                 max_soc,
                 balance_weekday,
                 solar_discharge_block_threshold,
+                charger_discharge_block_threshold,
                 min_idle_before_discharge,
                 timezone,
                 mqtt_timeout,

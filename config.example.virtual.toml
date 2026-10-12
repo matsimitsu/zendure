@@ -154,6 +154,8 @@ min_soc = 10
 max_soc = 100
 balance_weekday = "none"
 solar_discharge_block_threshold = 0.0
+# Holds discharge while the simulated car above draws at least this (W).
+charger_discharge_block_threshold = 500
 # The failsafe window: how long without a usable reading from any source
 # before the engine forces idle, and — divided by the tick above — how many
 # failed rounds in a row amount to the same thing. The synthetic meter answers

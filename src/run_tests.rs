@@ -10,7 +10,8 @@ use crate::registry::Battery;
 use crate::simulation::VirtualBattery;
 use crate::source::shelly::SolarPhase;
 use crate::units::{
-    Efficiency, Gain, GridPower, PowerMargin, RetentionDays, SlewLimit, SolarPower, Watts,
+    ChargerDraw, Efficiency, Gain, GridPower, PowerMargin, RetentionDays, SlewLimit, SolarPower,
+    Watts,
 };
 
 /// The two signal arms became one, so the wording an operator greps for is
@@ -139,6 +140,7 @@ fn virtual_config(dir: &tempfile::TempDir, capacity: WattHours) -> Config {
         max_soc: Soc::new(100),
         balance_weekday: None,
         solar_discharge_block_threshold: SolarPower::ZERO,
+        charger_discharge_block_threshold: ChargerDraw::new(500),
         min_idle_before_discharge: Duration::from_secs(0),
         timezone: chrono_tz::Tz::UTC,
         mqtt_timeout: Duration::from_secs(60),
@@ -708,6 +710,92 @@ async fn a_charger_found_down_never_stands_the_battery_down() {
         ) > 0,
         "the objective kept deciding through the charger's outage"
     );
+}
+
+/// A car plugged in at the top of this minute that finishes `charge_for`
+/// from now: the simulator reads the wall clock, so the session is placed
+/// around it rather than the other way round.
+fn a_car_finishing_in(config: &mut Config, charge_for: Duration) -> crate::charger::Charger {
+    use chrono::Timelike;
+
+    let now = chrono::Utc::now();
+    let plugged_in = now.with_second(0).unwrap().with_nanosecond(0).unwrap();
+    let unplugged = plugged_in + chrono::Duration::minutes(2);
+    let time_of_day = |at: chrono::DateTime<chrono::Utc>| {
+        crate::schedule::TimeOfDay::new(at.hour(), at.minute()).unwrap()
+    };
+    let current = crate::units::MilliAmps::from_whole_amps(16);
+    let draw: ChargerDraw = (0..3)
+        .map(|_| current.draw_at(crate::units::Volts(230)))
+        .sum();
+    let elapsed = (now - plugged_in).to_std().unwrap() + charge_for;
+
+    let charger = crate::config::ChargerConfig {
+        id: DeviceId::new("charger"),
+        kind: crate::config::ChargerKind::Simulated {
+            plug_in: time_of_day(plugged_in),
+            unplug: time_of_day(unplugged),
+            current,
+            phases: crate::charger::state::PhaseMode::Three,
+            session_target: draw.over(elapsed),
+        },
+    };
+    let built = crate::charger::from_config(&charger, config.timezone);
+    config.charger = Some(charger);
+    built
+}
+
+/// The guard end to end: the simulated car's draw reaches the synthetic
+/// meter as import, its reading reaches the world, and the battery idles
+/// with the car named until the car is full, then discharges again.
+#[tokio::test]
+async fn a_charging_car_holds_the_battery_idle_until_it_is_full() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut config = virtual_config(&dir, WattHours(1_000.0));
+    with_tick(&mut config, Duration::from_millis(50));
+    let charger = a_car_finishing_in(&mut config, Duration::from_millis(1_500));
+    let journal_path = config.journal_path.clone();
+    let (devices, battery) = virtual_devices(&config);
+
+    run(
+        config,
+        devices,
+        Some(charger),
+        stop_after(Duration::from_millis(3_500)),
+    )
+    .await
+    .expect("run must exit cleanly");
+
+    let conn = rusqlite::Connection::open(&journal_path).unwrap();
+    let mut statement = conn
+        .prepare("SELECT payload_json FROM decisions WHERE kind = 'decision' ORDER BY seq")
+        .unwrap();
+    let decisions: Vec<crate::models::ControlDecision> = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|json| serde_json::from_str(&json.unwrap()).unwrap())
+        .collect();
+
+    let held = |decision: &crate::models::ControlDecision| {
+        decision.mode == crate::models::ControlMode::Idle
+            && decision.reason.contains("car charging at")
+    };
+    let last_held = decisions
+        .iter()
+        .rposition(held)
+        .expect("the battery was never held for the car");
+    assert!(
+        decisions[last_held].grid_power > GridPower(10_000.0),
+        "the car's draw never reached the meter: {:?}",
+        decisions[last_held],
+    );
+    assert!(
+        decisions[last_held + 1..]
+            .iter()
+            .any(|decision| decision.mode == crate::models::ControlMode::Discharge),
+        "discharge never resumed once the car was full",
+    );
+    assert!(battery.flow().discharging() > Watts::ZERO);
 }
 
 /// The matched-age invariant as the journal records it: a decision has to land

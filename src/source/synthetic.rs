@@ -8,12 +8,19 @@
 //! harder, and pins at its cap while looking alive. Subtracting
 //! `battery.flow()` closes the loop — a charging battery pushes the grid figure toward
 //! import, and the controller backs off.
+//!
+//! A simulated EV charger, when one is configured, is the same car `run`
+//! samples as a charger, so its draw shows on this meter as it would on a
+//! real one.
 
 use std::sync::Arc;
 
 use chrono::{TimeZone, Timelike};
 use chrono_tz::Tz;
 
+use crate::charger::ChargerState;
+use crate::charger::simulated::SimulatedCharger;
+use crate::charger::state::PhaseMode;
 use crate::clock::Clock;
 use crate::device::PollError;
 use crate::simulation::VirtualBattery;
@@ -86,15 +93,34 @@ const SOLAR_PHASE: usize = 0;
 /// back.
 const PHASE_WEIGHTS: [f64; 3] = [0.4, 0.35, 0.25];
 
+/// Where a one-phase car lands: off the solar phase, the way an installer
+/// spreads a big load away from the inverter's.
+const CAR_PHASE: usize = 1;
+
+/// The car's draw on each synthetic phase: even across all three when it
+/// charges three-phase, all on [`CAR_PHASE`] when one-phase.
+fn car_phases(car: &ChargerState) -> [f64; 3] {
+    let draw = car.power.as_f64();
+    match car.phases {
+        PhaseMode::Three => [draw / 3.0; 3],
+        PhaseMode::One => {
+            let mut phases = [0.0; 3];
+            phases[CAR_PHASE] = draw;
+            phases
+        }
+    }
+}
+
 /// Folds the battery's own flow into a [`HouseProfile`] reading: `grid.total =
-/// load - solar - battery.flow()` (see the module doc for why that term can't
-/// be dropped). A free function taking flow as a plain [`BatteryPower`], not
+/// load + car - solar - battery.flow()` (see the module doc for why the battery
+/// term can't be dropped). A free function taking flow as a plain [`BatteryPower`], not
 /// a method on the battery, so the arithmetic is testable against a chosen flow without
 /// constructing or ticking a real [`VirtualBattery`].
 pub(crate) fn observation(
     profile: &HouseProfile,
     clock: &Clock,
     flow: BatteryPower,
+    car: Option<&ChargerState>,
 ) -> MeterObservation {
     let (load, solar) = profile.at(clock);
 
@@ -111,7 +137,12 @@ pub(crate) fn observation(
     ];
     phases[SOLAR_PHASE] = GridPower(phases[SOLAR_PHASE].get() - solar.get());
 
-    let total = GridPower(net_of_battery - solar.get());
+    let car = car.map(car_phases).unwrap_or([0.0; 3]);
+    for (phase, draw) in phases.iter_mut().zip(car) {
+        *phase = GridPower(phase.get() + draw);
+    }
+
+    let total = GridPower(net_of_battery + car.iter().sum::<f64>() - solar.get());
 
     MeterObservation {
         grid: MeterReading::new(total, phases),
@@ -122,15 +153,25 @@ pub(crate) fn observation(
 /// A [`HouseProfile`] wired to the battery whose flow it nets out. `battery`
 /// is the device registry's own `Arc`: read-only here, only
 /// [`crate::device`]'s `BatteryController::apply` writes it, so a read sees
-/// whatever the loop last commanded.
+/// whatever the loop last commanded. `charger` is shared with `run`'s charger
+/// sampler the same way.
 pub struct SyntheticMeter {
     profile: HouseProfile,
     battery: Arc<VirtualBattery>,
+    charger: Option<Arc<SimulatedCharger>>,
 }
 
 impl SyntheticMeter {
-    pub fn new(profile: HouseProfile, battery: Arc<VirtualBattery>) -> Self {
-        SyntheticMeter { profile, battery }
+    pub fn new(
+        profile: HouseProfile,
+        battery: Arc<VirtualBattery>,
+        charger: Option<Arc<SimulatedCharger>>,
+    ) -> Self {
+        SyntheticMeter {
+            profile,
+            battery,
+            charger,
+        }
     }
 
     pub fn id(&self) -> &str {
@@ -141,9 +182,10 @@ impl SyntheticMeter {
     /// between the house and the reader.
     pub async fn sample(&self) -> Result<MeterSample, PollError> {
         let clock = Clock::now(self.profile.timezone);
+        let car = self.charger.as_ref().map(|charger| charger.at(&clock));
 
         Ok(MeterSample {
-            observation: observation(&self.profile, &clock, self.battery.flow()),
+            observation: observation(&self.profile, &clock, self.battery.flow(), car.as_ref()),
             raw: None,
         })
     }
@@ -261,7 +303,7 @@ mod tests {
 
     #[test]
     fn phases_sum_to_the_total() {
-        let obs = observation(&profile(), &clock_at(9), BatteryPower::ZERO);
+        let obs = observation(&profile(), &clock_at(9), BatteryPower::ZERO, None);
         let summed: f64 = obs.grid.phases.iter().map(|p| p.get()).sum();
         assert!(
             (summed - obs.grid.total.get()).abs() < 1e-9,
@@ -275,7 +317,7 @@ mod tests {
     fn solar_lands_on_the_designated_phase_only() {
         // At noon, with a battery held idle, only the solar phase should
         // differ from the other two's even split of the (unchanged) load.
-        let obs = observation(&profile(), &clock_at(12), BatteryPower::ZERO);
+        let obs = observation(&profile(), &clock_at(12), BatteryPower::ZERO, None);
         let untouched: Vec<f64> = obs
             .grid
             .phases
@@ -323,15 +365,15 @@ mod tests {
 
         let idle = battery(Soc::new(50));
         idle.apply_at(t0, &Command::SetIdle);
-        let idle_reading = observation(&house, &clock, idle.flow_at(arrived));
+        let idle_reading = observation(&house, &clock, idle.flow_at(arrived), None);
 
         let charging = battery(Soc::new(50));
         charging.apply_at(t0, &Command::SetCharge(Setpoint::new(1_000)));
-        let charging_reading = observation(&house, &clock, charging.flow_at(arrived));
+        let charging_reading = observation(&house, &clock, charging.flow_at(arrived), None);
 
         let discharging = battery(Soc::new(50));
         discharging.apply_at(t0, &Command::SetDischarge(Setpoint::new(1_000)));
-        let discharging_reading = observation(&house, &clock, discharging.flow_at(arrived));
+        let discharging_reading = observation(&house, &clock, discharging.flow_at(arrived), None);
 
         assert!(
             charging_reading.grid.total.get() > idle_reading.grid.total.get(),
@@ -346,6 +388,80 @@ mod tests {
              export relative to idle ({} W)",
             discharging_reading.grid.total,
             idle_reading.grid.total,
+        );
+    }
+
+    fn car(draw: u32, phases: PhaseMode) -> ChargerState {
+        ChargerState {
+            power: crate::units::ChargerDraw::new(draw),
+            phases,
+            ..ChargerState::test_sample()
+        }
+    }
+
+    fn phase_sum(obs: &MeterObservation) -> f64 {
+        obs.grid.phases.iter().map(|p| p.get()).sum()
+    }
+
+    #[test]
+    fn phases_still_sum_to_the_total_with_a_car_charging() {
+        for phases in [PhaseMode::One, PhaseMode::Three] {
+            let car = car(7_200, phases);
+            let obs = observation(&profile(), &clock_at(9), BatteryPower::ZERO, Some(&car));
+            assert!(
+                (phase_sum(&obs) - obs.grid.total.get()).abs() < 1e-9,
+                "{phases:?}: phases {:?} did not sum to total {}",
+                obs.grid.phases,
+                obs.grid.total
+            );
+        }
+    }
+
+    #[test]
+    fn the_cars_draw_raises_the_grid_figure_by_exactly_its_draw() {
+        let without = observation(&profile(), &clock_at(20), BatteryPower::ZERO, None);
+        let car = car(7_200, PhaseMode::Three);
+        let with = observation(&profile(), &clock_at(20), BatteryPower::ZERO, Some(&car));
+
+        assert_eq!(with.grid.total.get() - without.grid.total.get(), 7_200.0);
+        for (with, without) in with.grid.phases.iter().zip(without.grid.phases) {
+            assert!((with.get() - without.get() - 2_400.0).abs() < 1e-9);
+        }
+        assert_eq!(with.solar, without.solar);
+    }
+
+    #[test]
+    fn a_one_phase_car_lands_off_the_solar_phase() {
+        let without = observation(&profile(), &clock_at(12), BatteryPower::ZERO, None);
+        let car = car(3_680, PhaseMode::One);
+        let with = observation(&profile(), &clock_at(12), BatteryPower::ZERO, Some(&car));
+
+        assert_ne!(CAR_PHASE, SOLAR_PHASE);
+        for phase in 0..3 {
+            let added = with.grid.phases[phase].get() - without.grid.phases[phase].get();
+            let expected = if phase == CAR_PHASE { 3_680.0 } else { 0.0 };
+            assert!((added - expected).abs() < 1e-9, "phase {phase} got {added}");
+        }
+    }
+
+    /// A car that isn't drawing leaves the house as it was.
+    #[test]
+    fn an_idle_car_changes_nothing() {
+        let without = observation(&profile(), &clock_at(9), BatteryPower(300), None);
+        let parked = car(0, PhaseMode::Three);
+        let with = observation(&profile(), &clock_at(9), BatteryPower(300), Some(&parked));
+        assert_eq!(with.grid.total, without.grid.total);
+        assert_eq!(with.grid.phases, without.grid.phases);
+    }
+
+    /// Pinned to the figures the meter produced before it knew about a car.
+    #[test]
+    fn with_no_charger_the_output_is_unchanged() {
+        let obs = observation(&profile(), &clock_at(12), BatteryPower(200), None);
+        assert_eq!(obs.grid.total.get(), 500.0 - 200.0 - 3_000.0);
+        assert_eq!(
+            obs.grid.phases.map(|p| p.get()),
+            [300.0 * 0.4 - 3_000.0, 300.0 * 0.35, 300.0 * 0.25]
         );
     }
 }

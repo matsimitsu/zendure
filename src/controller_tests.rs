@@ -1,5 +1,5 @@
 use super::*;
-use crate::units::{BatteryPower, PowerCap, Timestamp, Watts};
+use crate::units::{BatteryPower, ChargerDraw, PowerCap, Timestamp, Watts};
 use crate::world::{DeviceId, Measurement, MeterReading};
 
 /// A snapshot whose every field differs from a freshly built controller's,
@@ -1644,6 +1644,190 @@ fn solar_block_does_not_affect_charging() {
         &clock(12),
     );
     assert_eq!(decision.mode, ControlMode::Charge);
+}
+
+// --- Car charging discharge hold tests ---
+
+/// `world` with a charger drawing `draw`, sampled `age` before [`NOW_MS`].
+fn with_car(mut world: World, draw: u32, age: Duration) -> World {
+    let state = crate::charger::ChargerState {
+        power: ChargerDraw::new(draw),
+        ..crate::charger::ChargerState::test_sample()
+    };
+    world.observe_device(
+        DeviceId::new("charger"),
+        Timestamp::from_millis(NOW_MS) - Elapsed::of(age),
+        Measurement::Charger(state),
+    );
+    world
+}
+
+/// The house importing, so everything but the car says discharge.
+fn evening_with_car(draw: u32, age: Duration) -> World {
+    with_car(
+        world(GridPower(7_600.0), SolarPower::ZERO, &battery(80)),
+        draw,
+        age,
+    )
+}
+
+const FRESH: Duration = Duration::from_secs(3);
+
+#[test]
+fn a_fresh_car_reading_above_threshold_holds_discharge() {
+    let mut ctrl = controller_no_cooldown();
+    let decision = decide_at(&mut ctrl, &evening_with_car(7_200, FRESH), &clock(20));
+    assert_eq!(decision.mode, ControlMode::Idle);
+    assert_eq!(decision.power_watts, Setpoint::ZERO);
+}
+
+#[test]
+fn a_car_drawing_below_threshold_still_discharges() {
+    let mut ctrl = controller_no_cooldown();
+    let decision = decide_at(&mut ctrl, &evening_with_car(499, FRESH), &clock(20));
+    assert_eq!(decision.mode, ControlMode::Discharge);
+}
+
+#[test]
+fn a_car_drawing_exactly_the_threshold_holds_discharge() {
+    let mut ctrl = controller_no_cooldown();
+    let decision = decide_at(&mut ctrl, &evening_with_car(500, FRESH), &clock(20));
+    assert_eq!(decision.mode, ControlMode::Idle);
+}
+
+#[test]
+fn a_stale_car_reading_fails_open() {
+    let mut ctrl = controller_no_cooldown();
+    let stale = ctrl.charger_guard.max_age + Duration::from_secs(1);
+    let decision = decide_at(&mut ctrl, &evening_with_car(7_200, stale), &clock(20));
+    assert_eq!(decision.mode, ControlMode::Discharge);
+}
+
+#[test]
+fn a_reading_at_the_edge_of_the_blind_window_still_holds() {
+    let mut ctrl = controller_no_cooldown();
+    let edge = ctrl.charger_guard.max_age;
+    let decision = decide_at(&mut ctrl, &evening_with_car(7_200, edge), &clock(20));
+    assert_eq!(decision.mode, ControlMode::Idle);
+}
+
+#[test]
+fn no_charger_discharges_as_before() {
+    let mut ctrl = controller_no_cooldown();
+    let decision = decide_at(
+        &mut ctrl,
+        &world(GridPower(7_600.0), SolarPower::ZERO, &battery(80)),
+        &clock(20),
+    );
+    assert_eq!(decision.mode, ControlMode::Discharge);
+}
+
+#[test]
+fn a_zero_charger_threshold_disables_the_hold() {
+    let mut ctrl = controller_no_cooldown();
+    ctrl.charger_guard.threshold = ChargerDraw::ZERO;
+    let decision = decide_at(&mut ctrl, &evening_with_car(7_200, FRESH), &clock(20));
+    assert_eq!(decision.mode, ControlMode::Discharge);
+}
+
+#[test]
+fn a_charging_car_still_lets_the_battery_charge_from_export() {
+    let mut ctrl = controller_no_cooldown();
+    let exporting = with_car(
+        world(GridPower(-1_500.0), SolarPower::new(9_000.0), &battery(50)),
+        7_200,
+        FRESH,
+    );
+    let decision = decide_at(&mut ctrl, &exporting, &clock(13));
+    assert_eq!(decision.mode, ControlMode::Charge);
+}
+
+#[test]
+fn a_car_starting_to_charge_drops_an_ongoing_discharge_to_idle() {
+    let mut ctrl = controller_in_mode(ControlMode::Discharge, Duration::from_secs(60));
+    let world = with_car(
+        world(
+            GridPower(7_000.0),
+            SolarPower::ZERO,
+            &battery_discharging(80, 600),
+        ),
+        7_200,
+        FRESH,
+    );
+    let decision = decide_at(&mut ctrl, &world, &clock(20));
+    assert_eq!(decision.mode, ControlMode::Idle);
+    assert_eq!(decision.power_watts, Setpoint::ZERO);
+}
+
+#[test]
+fn a_held_discharge_names_the_car() {
+    let mut ctrl = controller_no_cooldown();
+    let decision = decide_at(&mut ctrl, &evening_with_car(7_200, FRESH), &clock(20));
+    assert!(
+        decision
+            .reason
+            .contains("car charging at 7200W, discharge held"),
+        "{}",
+        decision.reason
+    );
+}
+
+/// A hold that outlasts the idle timeout still names the car once the
+/// battery goes to standby.
+#[test]
+fn a_hold_past_the_idle_timeout_still_names_the_car() {
+    let mut ctrl = controller_in_mode(ControlMode::Idle, Duration::from_secs(600));
+    let decision = decide_at(&mut ctrl, &evening_with_car(7_200, FRESH), &clock(20));
+    assert_eq!(decision.mode, ControlMode::Standby);
+    assert!(
+        decision
+            .reason
+            .contains("car charging at 7200W, discharge held"),
+        "{}",
+        decision.reason
+    );
+}
+
+/// The reason blames the car only when the car is what held discharge.
+#[test]
+fn an_idle_with_nothing_to_discharge_does_not_blame_the_car() {
+    let mut ctrl = controller_no_cooldown();
+    let world = with_car(
+        world(GridPower(7_600.0), SolarPower::ZERO, &battery(10)),
+        7_200,
+        FRESH,
+    );
+    let decision = decide_at(&mut ctrl, &world, &clock(20));
+    assert_eq!(decision.mode, ControlMode::Idle);
+    assert!(!decision.reason.contains("car"), "{}", decision.reason);
+}
+
+/// Either guard alone holds discharge; it runs only when both let it.
+#[test]
+fn the_solar_and_car_guards_combine_with_and() {
+    let cases = [
+        (SolarPower::ZERO, 0, ControlMode::Discharge),
+        (SolarPower::new(2_000.0), 0, ControlMode::Idle),
+        (SolarPower::ZERO, 7_200, ControlMode::Idle),
+        (SolarPower::new(2_000.0), 7_200, ControlMode::Idle),
+    ];
+    for (solar, draw, expected) in cases {
+        let mut ctrl = controller_no_cooldown();
+        ctrl.solar_discharge_block_threshold = SolarPower::new(1_000.0);
+        let world = with_car(world(GridPower(7_600.0), solar, &battery(80)), draw, FRESH);
+        let decision = decide_at(&mut ctrl, &world, &clock(20));
+        assert_eq!(decision.mode, expected, "solar {solar}, car {draw}W");
+    }
+}
+
+#[test]
+fn car_charging_reports_the_draw_it_held_for() {
+    let guard = ChargerGuard::from_session(&SessionConfig::test_default());
+    let world = evening_with_car(7_200, FRESH);
+    assert_eq!(
+        car_charging(&world, &clock(20), guard),
+        Some(ChargerDraw::new(7_200))
+    );
 }
 
 // --- Balance weekday tests ---

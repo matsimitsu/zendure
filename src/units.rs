@@ -973,11 +973,12 @@ forward_display!(ChargerDraw, u32);
 impl ChargerDraw {
     pub const ZERO: ChargerDraw = ChargerDraw(0);
 
-    /// A charger's own power register. The simulator derives its draw from its
-    /// currents instead, so only tests call this until a real adapter does.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub const fn new(watts: u32) -> Self {
         ChargerDraw(watts)
+    }
+
+    pub fn as_f64(self) -> f64 {
+        f64::from(self.0)
     }
 
     /// The energy drawn at this power over `elapsed`.

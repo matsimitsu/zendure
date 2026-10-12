@@ -7,6 +7,7 @@
 pub mod shelly;
 pub mod synthetic;
 
+use crate::charger::Charger;
 use crate::config::{Config, MeterConfig};
 use crate::device::{PollError, RawCapture};
 use crate::registry::{Battery, Devices};
@@ -85,9 +86,10 @@ impl Sampler for Meter {
 /// [`MeterConfig`] becomes a live adapter, mirroring
 /// [`crate::registry::from_config`] on the device side. The synthetic arm
 /// reaches back into the registry for the battery it folds into its readings,
-/// which is why it takes `devices`; `Config::from_toml_str`'s coherence
-/// checks are what make the other arms unreachable.
-pub fn from_config(config: &Config, devices: &Devices) -> Meter {
+/// which is why it takes `devices`, and for a simulated car, which is why it
+/// takes `charger`; `Config::from_toml_str`'s coherence checks are what make
+/// the other arms unreachable.
+pub fn from_config(config: &Config, devices: &Devices, charger: Option<&Charger>) -> Meter {
     match &config.meter {
         MeterConfig::Shelly => {
             let Some(shelly) = &config.shelly else {
@@ -109,9 +111,16 @@ pub fn from_config(config: &Config, devices: &Devices) -> Meter {
                     "Config::from_toml_str requires a virtual device when the meter is synthetic"
                 ),
             };
+            // A real charger beside a synthetic meter draws on a house this
+            // meter doesn't model, so only a simulated car is folded in.
+            let car = match charger {
+                Some(Charger::Simulated(car)) => Some(car.clone()),
+                _ => None,
+            };
             Meter::Synthetic(synthetic::SyntheticMeter::new(
                 synthetic::HouseProfile::new(*base_load, *solar_peak, config.timezone),
                 battery,
+                car,
             ))
         }
     }

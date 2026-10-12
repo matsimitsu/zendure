@@ -175,7 +175,6 @@ impl World {
 
     /// The EV charger, if one has reported, with when its reading was taken:
     /// a reading is only worth acting on while it is recent.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn charger(&self) -> Option<(&DeviceId, &ChargerState, Timestamp)> {
         self.devices
             .iter()

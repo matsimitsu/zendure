@@ -94,7 +94,7 @@ solar_phase = "A"           # A, B or C — which phase the solar inverter feeds
 # kind = "simulated" exists so far, and only beside a synthetic meter; see
 # config.example.virtual.toml for its knobs. The charger's id must differ
 # from the battery's. A charger that stops answering is logged once per
-# outage and never forces the battery idle.
+# outage and never forces the battery idle. See "EV charger" below.
 # [charger]
 # kind = "simulated"
 # id = "charger"               # default
@@ -167,7 +167,8 @@ cycle_warn_threshold = 200
 min_soc = 10
 max_soc = 100
 balance_weekday = "Mon"     # or "none"/"off" to disable the full-charge day
-solar_discharge_block_threshold = 0.0
+solar_discharge_block_threshold = 0.0   # for loads the controller can't see (granny charger)
+charger_discharge_block_threshold = 500 # W the car draws before discharge is held; 0 disables
 mqtt_timeout_secs = 60
 ```
 
@@ -540,10 +541,48 @@ both absent from it); briefly, `[[device]] kind = "virtual"` picks the
 simulated battery and `[meter] kind = "synthetic"` picks the simulated house,
 in place of `kind = "zendure"` and a real Shelly to poll. `[charger] kind =
 "simulated"` adds a car that plugs in every evening and charges until its
-session target is reached. With no
+session target is reached; its draw is added to the synthetic meter, so the
+grid jumps and the battery holds discharge while it charges (see "EV
+charger"). With no
 `[mqtt]`, `run.rs` publishes through a `NullPublisher` instead of a real
 queued sink — decisions and telemetry are made exactly as they would be
 against real hardware, they just have nowhere to go over MQTT.
+
+### EV charger
+
+An optional `[charger]` table adds an EV charger, read every scan round beside
+the battery and journalled as a `device_update` with `class: charger`. Without
+the table nothing changes. Only `kind = "simulated"` exists so far, and only
+beside the synthetic meter: a car that plugs in at `plug_in`, charges at
+`current_amps` on `phases` phases until it has taken `session_target` Wh, sits
+full, and is unplugged at `unplug`. The synthetic meter adds its draw to the
+house load, spread evenly over all three phases for a three-phase car or on
+one non-solar phase for a one-phase car.
+
+**The discharge hold.** While a charger reading shows the car drawing at least
+`[tuning] charger_discharge_block_threshold` (500 W by default), the battery
+won't discharge, so the car isn't charged out of the home battery at
+round-trip loss. The decision reason says so: `car charging at 7200W,
+discharge held`. Charging from export still runs while the car charges. The
+rule reads measured power, not the charger's status, because a charger can
+report Charging at 0 W. `0` disables the hold.
+
+**Fail open.** A reading older than the blind window (`mqtt_timeout_secs`), a
+charger that never answered, or no `[charger]` at all leaves the battery
+behaving as it would without one, so a dead network link can't park the
+battery indefinitely.
+
+**Relation to `solar_discharge_block_threshold`.** That knob is for loads the
+controller can't see, such as a granny charger plugged into a socket: it
+blocks discharge whenever the inverter exports at or above it, car or not.
+The two guards combine: discharge runs only when neither holds it.
+
+To watch it with `config.example.virtual.toml`, set `plug_in` a few minutes
+ahead: when it passes, the dashboard's grid figure jumps by the car's draw and
+the battery goes idle with the car named as the reason.
+
+Journals with charger readings can't be read by a build from before the
+charger existed.
 
 ## HomeAssistant
 
