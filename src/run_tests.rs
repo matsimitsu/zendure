@@ -771,7 +771,8 @@ fn a_car_finishing_in(config: &mut Config, charge_for: Duration) -> crate::charg
             session_target: draw.over(elapsed),
         },
     };
-    let built = crate::charger::from_config(&charger, config.timezone);
+    let built =
+        crate::charger::from_config(&charger, config.timezone, config.device.poll_interval());
     config.charger = Some(charger);
     built
 }
