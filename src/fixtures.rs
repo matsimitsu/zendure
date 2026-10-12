@@ -21,6 +21,11 @@ pub mod journey {
     pub const DAY: u32 = 100;
     pub const BATTERY_ID: &str = "test-battery";
 
+    /// `secs` after the journey's start.
+    pub fn at(secs: i64) -> Timestamp {
+        Timestamp::from_millis(NOW_MS + secs * 1000)
+    }
+
     pub fn clock_at(secs: i64) -> Clock {
         Clock {
             day_ordinal: DAY,
@@ -146,6 +151,27 @@ pub fn amsterdam() -> chrono_tz::Tz {
     chrono_tz::Europe::Amsterdam
 }
 
+/// Wall-clock `hour:minute` on `y-m-d` in `timezone`.
+pub fn clock_in(
+    timezone: chrono_tz::Tz,
+    (y, mo, d): (i32, u32, u32),
+    hour: u32,
+    minute: u32,
+) -> Timestamp {
+    use chrono::TimeZone;
+    Timestamp::from(
+        timezone
+            .with_ymd_and_hms(y, mo, d, hour, minute, 0)
+            .single()
+            .expect("an unambiguous local time"),
+    )
+}
+
+/// A `TimeOfDay` literal.
+pub fn time_of_day(hour: u32, minute: u32) -> crate::schedule::TimeOfDay {
+    crate::schedule::TimeOfDay::new(hour, minute).expect("a valid time of day")
+}
+
 /// A date in 2026, the year every local-day helper here shares.
 pub fn date(month: u32, day: u32) -> chrono::NaiveDate {
     chrono::NaiveDate::from_ymd_opt(YEAR, month, day).expect("a valid date")
@@ -166,6 +192,6 @@ pub fn local(month: u32, day: u32, hour: u32, minute: u32) -> Timestamp {
 pub fn local_now(y: i32, m: u32, d: u32, hour: u32, minute: u32) -> crate::schedule::LocalNow {
     crate::schedule::LocalNow {
         date: chrono::NaiveDate::from_ymd_opt(y, m, d).expect("a valid date"),
-        time: crate::schedule::TimeOfDay::new(hour, minute).expect("a valid time of day"),
+        time: time_of_day(hour, minute),
     }
 }

@@ -99,13 +99,13 @@ const CAR_PHASE: usize = 1;
 
 /// The car's draw on each synthetic phase: even across all three when it
 /// charges three-phase, all on [`CAR_PHASE`] when one-phase.
-fn car_phases(car: &ChargerState) -> [f64; 3] {
-    let draw = car.power.as_f64();
+fn car_phases(car: &ChargerState) -> [GridPower; 3] {
+    let draw = car.power.as_import().get();
     match car.phases {
-        Some(PhaseMode::Three) | None => [draw / 3.0; 3],
+        Some(PhaseMode::Three) | None => [GridPower(draw / 3.0); 3],
         Some(PhaseMode::One) => {
-            let mut phases = [0.0; 3];
-            phases[CAR_PHASE] = draw;
+            let mut phases = [GridPower::ZERO; 3];
+            phases[CAR_PHASE] = GridPower(draw);
             phases
         }
     }
@@ -137,12 +137,13 @@ pub(crate) fn observation(
     ];
     phases[SOLAR_PHASE] = GridPower(phases[SOLAR_PHASE].get() - solar.get());
 
-    let car = car.map(car_phases).unwrap_or([0.0; 3]);
+    let car = car.map(car_phases).unwrap_or([GridPower::ZERO; 3]);
     for (phase, draw) in phases.iter_mut().zip(car) {
-        *phase = GridPower(phase.get() + draw);
+        *phase = GridPower(phase.get() + draw.get());
     }
 
-    let total = GridPower(net_of_battery + car.iter().sum::<f64>() - solar.get());
+    let car_total: f64 = car.iter().map(|draw| draw.get()).sum();
+    let total = GridPower(net_of_battery + car_total - solar.get());
 
     MeterObservation {
         grid: MeterReading::new(total, phases),
@@ -198,7 +199,7 @@ mod tests {
     use super::*;
     use crate::command::Command;
     use crate::device::BatterySpec;
-    use crate::units::{Efficiency, PowerCap, Setpoint, Soc, Timestamp, WattHours};
+    use crate::units::{Efficiency, PowerCap, Setpoint, Soc, WattHours};
     use crate::world::DeviceId;
 
     fn profile() -> HouseProfile {
@@ -219,12 +220,9 @@ mod tests {
 
     /// `at` reads the timestamp, in the profile's zone; `hour` only agrees with it.
     fn clock_in(timezone: Tz, hour: u32, minute: u32) -> Clock {
-        let local = timezone
-            .with_ymd_and_hms(2026, 6, 15, hour, minute, 0)
-            .unwrap();
         Clock {
             hour,
-            now: Timestamp::from(local),
+            now: crate::fixtures::clock_in(timezone, (2026, 6, 15), hour, minute),
             ..Clock::test_at(0)
         }
     }
@@ -454,7 +452,7 @@ mod tests {
         assert_eq!(with.grid.phases, without.grid.phases);
     }
 
-    /// Pinned to the figures the meter produced before it knew about a car.
+    /// Without a car the output is the house profile alone.
     #[test]
     fn with_no_charger_the_output_is_unchanged() {
         let obs = observation(&profile(), &clock_at(12), BatteryPower(200), None);

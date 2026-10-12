@@ -157,3 +157,39 @@ impl ChargerState {
         }
     }
 }
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+
+    #[test]
+    fn every_status_label_is_an_announced_option() {
+        let all = [
+            ChargePointStatus::Available,
+            ChargePointStatus::Preparing,
+            ChargePointStatus::Charging,
+            ChargePointStatus::SuspendedEvse,
+            ChargePointStatus::SuspendedEv,
+            ChargePointStatus::Finishing,
+            ChargePointStatus::Reserved,
+            ChargePointStatus::Unavailable,
+            ChargePointStatus::Faulted,
+            ChargePointStatus::Unknown(99),
+        ];
+        let labels: Vec<_> = all.iter().map(|s| s.label()).collect();
+        assert_eq!(labels, ChargePointStatus::LABELS);
+    }
+
+    #[test]
+    fn every_cable_label_is_an_announced_option() {
+        let all = [
+            CableState::NoCable,
+            CableState::ChargerOnly,
+            CableState::VehicleConnected,
+            CableState::VehicleLocked,
+            CableState::Unknown(99),
+        ];
+        let labels: Vec<_> = all.iter().map(|s| s.label()).collect();
+        assert_eq!(labels, CableState::LABELS);
+    }
+}

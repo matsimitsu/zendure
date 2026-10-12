@@ -1,12 +1,9 @@
 use chrono_tz::Europe::Amsterdam;
 
 use super::*;
+use crate::fixtures::{clock_in, time_of_day as time};
 
 const AMPS_16: MilliAmps = MilliAmps(16_000);
-
-fn time(hour: u32, minute: u32) -> TimeOfDay {
-    TimeOfDay::new(hour, minute).unwrap()
-}
 
 /// An evening-to-morning window, so most of these cross midnight.
 fn overnight(timezone: Tz, phases: PhaseMode, target: WattHours) -> ChargeProfile {
@@ -15,14 +12,6 @@ fn overnight(timezone: Tz, phases: PhaseMode, target: WattHours) -> ChargeProfil
 
 /// A target no test reaches unless it means to.
 const UNREACHED: WattHours = WattHours(1_000_000.0);
-
-fn clock_in(timezone: Tz, (y, mo, d): (i32, u32, u32), hour: u32, minute: u32) -> Timestamp {
-    let local = timezone
-        .with_ymd_and_hms(y, mo, d, hour, minute, 0)
-        .single()
-        .expect("an unambiguous local time");
-    Timestamp::from(local)
-}
 
 fn utc(hour: u32, minute: u32) -> Timestamp {
     clock_in(chrono_tz::UTC, (2026, 6, 15), hour, minute)

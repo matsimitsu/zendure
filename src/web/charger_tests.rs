@@ -8,19 +8,12 @@ use super::*;
 use crate::charger::state::{CableState, ChargePointStatus};
 use crate::controller::ChargerGuard;
 use crate::engine::EngineState;
-use crate::fixtures::journey;
+use crate::fixtures::journey::at;
+use crate::fixtures::{amsterdam, journey};
 use crate::units::{ChargerDraw, GridPower, SolarPower};
 use crate::web::templates::{charger_panel, layout};
 use crate::web::view::{PanelDays, dashboard_view};
 use crate::world::{DeviceId, Measurement, MeterReading, World};
-
-fn tz() -> chrono_tz::Tz {
-    chrono_tz::Europe::Amsterdam
-}
-
-fn at(secs: i64) -> Timestamp {
-    Timestamp::from_millis(journey::NOW_MS + secs * 1000)
-}
 
 fn guard() -> ChargerGuard {
     ChargerGuard {
@@ -68,14 +61,14 @@ fn reading(status: ChargePointStatus, cable: CableState, watts: u32) -> ChargerS
 }
 
 fn ev_detail(state: &DashboardState) -> String {
-    dashboard_view(state, PanelDays::default(), tz())
+    dashboard_view(state, PanelDays::default(), amsterdam())
         .stat_cards
         .ev
         .detail
 }
 
 fn panel_html(state: &DashboardState) -> String {
-    charger_panel::contents(&dashboard_view(state, PanelDays::default(), tz()).charger)
+    charger_panel::contents(&dashboard_view(state, PanelDays::default(), amsterdam()).charger)
         .into_string()
 }
 
@@ -270,7 +263,7 @@ fn the_page_carries_the_panel_in_the_charger_fragment() {
         0,
         5,
     );
-    let view = dashboard_view(&s, PanelDays::default(), tz());
+    let view = dashboard_view(&s, PanelDays::default(), amsterdam());
 
     assert!(
         layout::page(&view)

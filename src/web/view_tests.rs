@@ -9,6 +9,7 @@ use crate::controller::SocLimits;
 use crate::device::PackStatus;
 use crate::engine::EngineState;
 use crate::fixtures::journey;
+use crate::fixtures::journey::at;
 use crate::models::ControlDecision;
 use crate::units::{BatteryPower, Elapsed, GridPower, Soc, SolarPower, Timestamp, Watts};
 use crate::web::sse::{FRAGMENTS, SentFragments};
@@ -18,10 +19,6 @@ use crate::world::{DeviceId, Measurement, MeterReading, World};
 
 fn tz() -> chrono_tz::Tz {
     chrono_tz::Europe::Amsterdam
-}
-
-fn at(secs: i64) -> Timestamp {
-    Timestamp::from_millis(journey::NOW_MS + secs * 1000)
 }
 
 /// A world with one battery and a meter reading, which is what the battery

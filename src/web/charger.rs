@@ -67,7 +67,7 @@ fn seen(state: &DashboardState) -> Option<Seen<'_>> {
 pub(super) fn ev_card_detail(state: &DashboardState) -> Option<String> {
     let seen = seen(state)?;
     Some(if seen.offline() {
-        format!("Charger offline ({} min)", minutes(seen.age))
+        format!("Charger offline ({} min)", seen.age.as_minutes())
     } else if seen.state.status == ChargePointStatus::Charging {
         format!(
             "Charging · {} kW",
@@ -199,15 +199,11 @@ fn joined(figures: impl Iterator<Item = String>) -> String {
 }
 
 fn amps(current: MilliAmps) -> String {
-    format!("{:.1}", f64::from(current.0) / 1000.0)
+    format!("{:.1}", current.as_amps())
 }
 
 fn volts(voltage: Volts) -> String {
     voltage.to_string()
-}
-
-fn minutes(age: Elapsed) -> i64 {
-    age.as_millis().max(0) / 60_000
 }
 
 fn duration(session: SessionDuration) -> String {
