@@ -1,0 +1,81 @@
+README.md
+  s_1eb51bc5cbf150::t_6e244d94d65927 92-101,303-306,541-543
+CLAUDE.md
+  s_1eb51bc5cbf150::t_6e244d94d65927 73
+config.example.virtual.toml
+  s_1eb51bc5cbf150::t_5bb7f62cd12e23 60-79
+src/scan.rs
+  s_1eb51bc5cbf150::t_624545394cbebe 24,202-204,212,222,226-239
+  s_1eb51bc5cbf150::t_8a990f7f29dd29 240
+src/charger/simulated.rs
+  s_1eb51bc5cbf150::t_3e529c0afee56e 1-13,15-181
+  s_1eb51bc5cbf150::t_532f4e902e8808 14
+src/scan_tests.rs
+  s_1eb51bc5cbf150::t_624545394cbebe 258,316
+  s_1eb51bc5cbf150::t_b0ede47b646d7b 278-309
+src/world.rs
+  s_1eb51bc5cbf150::t_4f732f523b51d9 14,87,164-166,170-179
+  s_1eb51bc5cbf150::t_532f4e902e8808 180-187
+  s_1eb51bc5cbf150::t_f126c655b940dd 503-618
+src/units_tests.rs
+  s_1eb51bc5cbf150::t_f3ea1a9d9b039c 11-74
+src/charger/state.rs
+  s_1eb51bc5cbf150::t_27a2bc6c0378df 1-83
+  s_1eb51bc5cbf150::t_cedc8085a2fa9a 84-102
+src/main.rs
+  s_1eb51bc5cbf150::t_7b715458a1c600 138-141,143
+  s_1eb51bc5cbf150::t_4f732f523b51d9 7
+src/charger/simulated_tests.rs
+  s_1eb51bc5cbf150::t_532f4e902e8808 79
+  s_1eb51bc5cbf150::t_ef0f241020449e 1-78,80-175
+src/units.rs
+  s_1eb51bc5cbf150::t_7f8936586a9879 978
+  s_1eb51bc5cbf150::t_cfd11562268b41 925,933
+  s_1eb51bc5cbf150::t_be5bdd8665a5de 896-924,926-932,934-975,979-1016
+  s_1eb51bc5cbf150::t_390ee5efbc052e 976-977
+src/charger/mod.rs
+  s_1eb51bc5cbf150::t_f7ebc62d53f058 1-61,65-70,73-78,84-136
+  s_1eb51bc5cbf150::t_47b4aedeb73d31 62-64,71-72,79-83
+src/analyze.rs
+  s_1eb51bc5cbf150::t_4a5e8029b5822d 312-317
+src/web/intervals.rs
+  s_1eb51bc5cbf150::t_4a5e8029b5822d 293-294
+src/schedule.rs
+  s_1eb51bc5cbf150::t_8ef9efc5357501 7,36-39
+  s_1eb51bc5cbf150::t_ce3b1f1814283c 40
+src/run_tests.rs
+  s_1eb51bc5cbf150::t_5f83c5815e38ea 612-646,655-657,662-691,700-712
+  s_1eb51bc5cbf150::t_7b715458a1c600 215,294,848
+  s_1eb51bc5cbf150::t_532f4e902e8808 342-349,388-395,598-605,647-654,658-661,692-699,725-732,775-782
+  s_1eb51bc5cbf150::t_8d377c3f5ca558 120
+  s_1eb51bc5cbf150::t_624545394cbebe 478
+src/run.rs
+  s_1eb51bc5cbf150::t_7b715458a1c600 14,518,780
+  s_1eb51bc5cbf150::t_fc3629f1c2faae 127-165,789-791,806-816,863,891-895
+  s_1eb51bc5cbf150::t_2bd43a8c941f7d 514
+src/config_tests.rs
+  s_1eb51bc5cbf150::t_8d377c3f5ca558 36,622
+  s_1eb51bc5cbf150::t_e318bd211aa312 1056-1138,1140-1145,1148-1156,1161-1175,1180-1204
+  s_1eb51bc5cbf150::t_532f4e902e8808 1139,1146-1147,1157-1160,1176-1179
+src/event.rs
+  s_1eb51bc5cbf150::t_a75203535eb862 131-145
+src/config.rs
+  s_1eb51bc5cbf150::t_532f4e902e8808 945
+  s_1eb51bc5cbf150::t_2d5b5ee75cdffa 12,16-17,19,571-594,900-944,946-961,987-988,1064,1194,1454-1455,1526
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bc37bea7aff98889b9d83485ff871c1be15537ba",
+  "prompts": {},
+  "sessions": {
+    "s_1eb51bc5cbf150": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "240820dc-c6c0-4a01-b8ce-f8f066dd22a3",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Beekman <robert@matsimitsu.nl>"
+    }
+  }
+}
