@@ -8,8 +8,8 @@ use crate::clock::Clock;
 use crate::config::{Config, SessionConfig};
 use crate::models::{ControlDecision, ControlMode, CycleCounts};
 use crate::units::{
-    Elapsed, Gain, GridPower, PowerMargin, RampFactor, Setpoint, SlewLimit, Soc, SolarPower,
-    Timestamp, Watts,
+    ChargerDraw, Elapsed, Gain, GridPower, PowerMargin, RampFactor, Setpoint, SlewLimit, Soc,
+    SolarPower, Timestamp, Watts,
 };
 use crate::world::World;
 
@@ -46,6 +46,46 @@ impl Default for SocLimits {
 /// power is a battery-safety measure, and the convention most BMS
 /// implementations follow.
 const RAMP_FACTOR: RampFactor = RampFactor::new(75);
+
+/// The knobs [`car_charging`] reads, so the controller, the dashboard and Home
+/// Assistant all hold discharge on the same rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChargerGuard {
+    /// 0 disables the guard.
+    pub threshold: ChargerDraw,
+    /// The inbox's blind window: a reading older than this no longer says
+    /// what the car is doing now.
+    pub max_age: Duration,
+}
+
+impl ChargerGuard {
+    pub fn from_session(session: &SessionConfig) -> Self {
+        ChargerGuard {
+            threshold: session.charger_discharge_block_threshold,
+            max_age: Duration::from_secs(session.mqtt_timeout_secs),
+        }
+    }
+}
+
+/// What the car is drawing, when that is enough to hold battery discharge.
+/// Measured power rather than status, because a charger can report Charging
+/// at 0 W, and power is what would drain the battery. `None` (fail open) when
+/// the guard is off, no charger has reported, or its reading is stale.
+pub fn car_charging(world: &World, clock: &Clock, guard: ChargerGuard) -> Option<ChargerDraw> {
+    if guard.threshold == ChargerDraw::ZERO {
+        return None;
+    }
+    let (_, state, sampled_at) = world.charger()?;
+    let fresh = clock.now - sampled_at <= guard.max_age;
+    (fresh && state.power >= guard.threshold).then_some(state.power)
+}
+
+/// The mode `target_mode` settled on, and the car's draw when the car is the
+/// only thing that kept it from discharging, so the reason can say so.
+struct Target {
+    mode: ControlMode,
+    held_for_car: Option<ChargerDraw>,
+}
 
 /// Mutable history, split from the config fields (which live in the journal's
 /// `sessions` row) so a decision can be replayed: hysteresis/cooldown history,
@@ -116,6 +156,7 @@ pub struct Controller {
     max_soc: Soc,
     balance_weekday: Option<Weekday>,
     solar_discharge_block_threshold: SolarPower,
+    charger_guard: ChargerGuard,
 }
 
 impl Controller {
@@ -160,6 +201,7 @@ impl Controller {
             max_soc: session.max_soc,
             balance_weekday: session.balance_weekday,
             solar_discharge_block_threshold: session.solar_discharge_block_threshold,
+            charger_guard: ChargerGuard::from_session(session),
         }
     }
 
@@ -262,12 +304,12 @@ impl Controller {
             };
         }
 
-        let mode = self.target_mode(world, battery, clock);
+        let target = self.target_mode(world, battery, clock);
 
-        let power = self.target_power(mode, grid_power, battery);
+        let power = self.target_power(target.mode, grid_power, battery);
 
         // 3. Apply guards (cooldown, ramp, standby timeout)
-        self.apply_guards(mode, power, grid_power, clock)
+        self.apply_guards(target, power, grid_power, clock)
     }
 
     /// Drop to idle without going through the guards — used by the overrides
@@ -286,7 +328,7 @@ impl Controller {
     /// once active only crossing back past 0W stops it, since the meter
     /// reading includes the battery's own effect and would otherwise oscillate near the
     /// start threshold.
-    fn target_mode(&self, world: &World, battery: &BatteryState, clock: &Clock) -> ControlMode {
+    fn target_mode(&self, world: &World, battery: &BatteryState, clock: &Clock) -> Target {
         // Adjust for battery's own grid effect: the meter reading includes
         // the battery's consumption (charging) or production (discharging).
         let underlying_grid = world.underlying_grid();
@@ -304,7 +346,10 @@ impl Controller {
         let max_soc = self.effective_max_soc(clock.weekday);
         if battery.soc < max_soc && !battery.soc_limit_reached && underlying_grid < charge_threshold
         {
-            return ControlMode::Charge;
+            return Target {
+                mode: ControlMode::Charge,
+                held_for_car: None,
+            };
         }
 
         // Hysteresis: once discharging, keep going as long as we're still importing (>
@@ -330,21 +375,33 @@ impl Controller {
             true
         };
 
-        // Solar production guard: while the solar inverter is exporting at or
-        // above the configured threshold, skip discharge so large loads (e.g. an
-        // EV charger) pull from grid+solar instead of draining the home battery.
+        // Solar production guard, for loads the controller can't see (a
+        // granny charger): while the inverter exports at or above the
+        // threshold, those loads pull from grid+solar instead of the battery.
         let solar_below_block = self.solar_below_block(world.solar);
 
         // Importing from grid and battery above min SOC → discharge
-        if idle_long_enough
+        let would_discharge = idle_long_enough
             && solar_below_block
             && battery.soc > self.min_soc
-            && underlying_grid > discharge_threshold
-        {
-            return ControlMode::Discharge;
+            && underlying_grid > discharge_threshold;
+        if !would_discharge {
+            return Target {
+                mode: ControlMode::Idle,
+                held_for_car: None,
+            };
         }
 
-        ControlMode::Idle
+        match car_charging(world, clock, self.charger_guard) {
+            Some(draw) => Target {
+                mode: ControlMode::Idle,
+                held_for_car: Some(draw),
+            },
+            None => Target {
+                mode: ControlMode::Discharge,
+                held_for_car: None,
+            },
+        }
     }
 
     pub fn soc_limits(&self, weekday: Weekday, device_min: Soc) -> SocLimits {
@@ -368,6 +425,8 @@ impl Controller {
 
     /// True when the solar discharge-block guard doesn't apply: either it's
     /// disabled (0 is the sentinel) or production is below the threshold.
+    /// For loads the controller can't see (a granny charger); a charger it
+    /// reads is [`car_charging`]'s.
     fn solar_below_block(&self, solar_power: SolarPower) -> bool {
         self.solar_discharge_block_threshold == SolarPower::ZERO
             || solar_power < self.solar_discharge_block_threshold
@@ -456,12 +515,12 @@ impl Controller {
     /// if it were.
     fn apply_guards(
         &mut self,
-        mode: ControlMode,
+        target: Target,
         power: Setpoint,
         grid_power: GridPower,
         clock: &Clock,
     ) -> ControlDecision {
-        let decision = self.apply_guards_inner(mode, power, grid_power, clock);
+        let decision = self.apply_guards_inner(target, power, grid_power, clock);
         self.state.commanded_power = match decision.mode {
             ControlMode::Charge | ControlMode::Discharge => Watts(decision.power_watts.get()),
             ControlMode::Idle | ControlMode::Standby => Watts::ZERO,
@@ -471,7 +530,7 @@ impl Controller {
 
     fn apply_guards_inner(
         &mut self,
-        mode: ControlMode,
+        Target { mode, held_for_car }: Target,
         power: Setpoint,
         grid_power: GridPower,
         clock: &Clock,
@@ -558,18 +617,27 @@ impl Controller {
             && let Some(idle_start) = self.state.last_idle_start
             && clock.now - idle_start >= self.idle_timeout
         {
-            return ControlDecision {
-                mode: ControlMode::Standby,
-                power_watts: Setpoint::ZERO,
-                reason: format!(
+            // A car session outlasts the idle timeout, and the car is still
+            // the reason the battery sits out.
+            let reason = match held_for_car {
+                Some(draw) => held_reason(draw, grid_power),
+                None => format!(
                     "Idle for {}+ minutes, entering standby",
                     self.idle_timeout.as_secs() / 60,
                 ),
+            };
+            return ControlDecision {
+                mode: ControlMode::Standby,
+                power_watts: Setpoint::ZERO,
+                reason,
                 grid_power,
             };
         }
 
-        let reason = build_reason(mode, final_power, grid_power, clock.hour, ramped);
+        let reason = match held_for_car {
+            Some(draw) => held_reason(draw, grid_power),
+            None => build_reason(mode, final_power, grid_power, clock.hour, ramped),
+        };
         ControlDecision {
             mode,
             power_watts: final_power,
@@ -577,6 +645,10 @@ impl Controller {
             grid_power,
         }
     }
+}
+
+fn held_reason(draw: ChargerDraw, grid_power: GridPower) -> String {
+    format!("car charging at {draw}W, discharge held (grid: {grid_power:.0}W)")
 }
 
 fn build_reason(

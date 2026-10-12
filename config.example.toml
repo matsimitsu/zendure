@@ -155,7 +155,11 @@ max_soc = 95
 # "none", "off" or "" disables the periodic cell-balancing full charge.
 balance_weekday = "Mon"
 # Solar export (W) on the solar phase at or above which discharge is skipped,
-# so large loads (e.g. EV charging) pull from grid+solar instead of draining the
-# home battery. 0 disables the guard.
+# for loads the controller can't see (a granny charger), so they pull from
+# grid+solar instead of draining the home battery. 0 disables the guard.
 solar_discharge_block_threshold = 200.0
+# Car draw (W) from a fresh [charger] reading at or above which discharge is
+# held, so the car isn't charged out of the home battery. Charging from export
+# still runs. 0 disables the guard; without [charger] it never applies.
+charger_discharge_block_threshold = 500
 mqtt_timeout_secs = 60

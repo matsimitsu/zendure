@@ -776,7 +776,7 @@ pub async fn run(
 
     let tick = config.device.poll_interval();
 
-    let meter = Arc::new(source::from_config(&config, &devices));
+    let meter = Arc::new(source::from_config(&config, &devices, charger.as_ref()));
     let charger = charger.map(Arc::new);
 
     // Opened before the samplers are asked for anything, so a source that

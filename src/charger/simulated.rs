@@ -164,12 +164,16 @@ impl SimulatedCharger {
         &self.id
     }
 
+    pub fn at(&self, clock: &Clock) -> ChargerState {
+        self.profile.at(clock)
+    }
+
     /// Infallible, and with nothing to capture: there is no wire format
     /// between the car and the reader.
     pub async fn poll(&self) -> Result<ChargerReading, PollError> {
         let clock = Clock::now(self.profile.timezone);
         Ok(ChargerReading {
-            state: self.profile.at(&clock),
+            state: self.at(&clock),
             telemetry: ChargerTelemetry::default(),
             raw: None,
         })

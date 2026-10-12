@@ -98,7 +98,7 @@ impl Scenario {
         let sample = |round: usize| -> (BatteryState, MeterObservation) {
             let at = instant(round);
             let reading = battery.reading_at(at);
-            let meter = observation(&self.profile, &clock(round), battery.flow_at(at));
+            let meter = observation(&self.profile, &clock(round), battery.flow_at(at), None);
             (reading, meter)
         };
 
