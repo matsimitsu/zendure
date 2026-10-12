@@ -11,6 +11,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::battery::BatteryState;
+use crate::charger::ChargerState;
 use crate::units::{BatteryPower, GridPower, SolarPower, Timestamp, Watts, forward_display};
 
 /// One meter observation: signed net total plus each phase. `total` is the
@@ -83,6 +84,7 @@ forward_display!(DeviceId, str);
 #[serde(tag = "class", rename_all = "snake_case")]
 pub enum Measurement {
     Battery(BatteryState),
+    Charger(ChargerState),
 }
 
 /// A projection of the event log: what the controller knows right now.
@@ -159,15 +161,30 @@ impl World {
         self.devices.insert(id, measurement);
     }
 
-    /// Every device that is a battery, in id order. The `match` is exhaustive
-    /// today deliberately, as a tripwire: the day a charger variant is added,
-    /// this stops compiling here — the one place that would otherwise quietly
-    /// hand the objective a car charger to discharge.
+    /// Every device that is a battery, in id order. The `match` names every
+    /// class rather than using `_`, as a tripwire: a new class stops this
+    /// compiling until someone decides whether the objective may discharge it.
     pub fn batteries(&self) -> impl Iterator<Item = (&DeviceId, &BatteryState)> {
         self.devices
             .iter()
-            .map(|(id, measurement)| match measurement {
-                Measurement::Battery(state) => (id, state),
+            .filter_map(|(id, measurement)| match measurement {
+                Measurement::Battery(state) => Some((id, state)),
+                Measurement::Charger(_) => None,
+            })
+    }
+
+    /// The EV charger, if one has reported, with when its reading was taken:
+    /// a reading is only worth acting on while it is recent.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn charger(&self) -> Option<(&DeviceId, &ChargerState, Timestamp)> {
+        self.devices
+            .iter()
+            .find_map(|(id, measurement)| match measurement {
+                Measurement::Charger(state) => {
+                    let sampled_at = *self.sampled_at.devices.get(id)?;
+                    Some((id, state, sampled_at))
+                }
+                Measurement::Battery(_) => None,
             })
     }
 
@@ -482,5 +499,121 @@ mod tests {
         );
 
         assert_eq!(world.battery().unwrap().current_power, BatteryPower(-100));
+    }
+
+    fn with_charger(mut world: World) -> World {
+        world.observe_device(
+            DeviceId::new("charger"),
+            Timestamp::from_millis(1_757_000_002_300),
+            Measurement::Charger(ChargerState::test_sample()),
+        );
+        world
+    }
+
+    /// The charger's half of the compatibility contract
+    /// `serializes_to_the_exact_pinned_shape` describes: a new class beside
+    /// the battery, internally tagged `"class":"charger"`, leaving the
+    /// battery's bytes as they were.
+    #[test]
+    fn a_charger_serializes_to_the_exact_pinned_shape() {
+        let world = with_charger(sample_world());
+        assert_eq!(
+            serde_json::to_string(&world).unwrap(),
+            r#"{"grid":{"total":150.5,"phases":[10.0,-200.0,340.5]},"solar":200.0,"devices":{"SN123":{"class":"battery","soc":50,"max_discharge_power":800,"max_charge_power":2400,"current_power":-300,"soc_calibrating":true,"soc_limit_reached":false,"fault":true},"charger":{"class":"charger","status":"charging","cable":"vehicle_locked","power":3650,"currents":[15900,20,10],"voltages":[229,231,233],"phases":"one","session_energy":4200.5,"session_duration":4140}},"sampled_at":{"meter":1757000000400,"devices":{"SN123":1757000001900,"charger":1757000002300}}}"#
+        );
+    }
+
+    #[test]
+    fn a_world_with_a_charger_round_trips() {
+        let world = with_charger(sample_world());
+        let json = serde_json::to_string(&world).unwrap();
+        assert_eq!(serde_json::from_str::<World>(&json).unwrap(), world);
+    }
+
+    /// A status this build cannot name still reads, as its raw number.
+    #[test]
+    fn an_unknown_charger_status_round_trips_as_its_number() {
+        let state = ChargerState {
+            status: crate::charger::state::ChargePointStatus::Unknown(42),
+            cable: crate::charger::state::CableState::Unknown(7),
+            ..ChargerState::test_sample()
+        };
+        let json = serde_json::to_string(&Measurement::Charger(state.clone())).unwrap();
+        assert!(json.contains(r#""status":{"unknown":42}"#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<Measurement>(&json).unwrap(),
+            Measurement::Charger(state)
+        );
+    }
+
+    /// The battery-only shape every row was journalled with before a
+    /// charger existed reads exactly as it did.
+    #[test]
+    fn a_world_journalled_before_chargers_still_reads() {
+        let json = serde_json::to_string(&sample_world()).unwrap();
+        let world: World = serde_json::from_str(&json).unwrap();
+        assert_eq!(world, sample_world());
+        assert!(world.charger().is_none());
+    }
+
+    /// The tripwire's purpose: the objective is never handed a charger to
+    /// discharge, and a charger sorting before the battery does not displace
+    /// it as `battery()`.
+    #[test]
+    fn batteries_exclude_the_charger() {
+        let mut world = World::new();
+        world.observe_device(
+            DeviceId::new("a-charger"),
+            Timestamp::from_millis(0),
+            Measurement::Charger(ChargerState::test_sample()),
+        );
+        world.observe_device(
+            DeviceId::new("b-battery"),
+            Timestamp::from_millis(0),
+            Measurement::Battery(battery_with_power(BatteryPower(300))),
+        );
+
+        let ids: Vec<&str> = world.batteries().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["b-battery"]);
+        assert_eq!(world.battery().unwrap().current_power, BatteryPower(300));
+        assert_eq!(world.battery_flow(), BatteryPower(300));
+    }
+
+    /// The car's draw is demand the meter already sees; subtracting it out
+    /// would make the house look smaller than it is.
+    #[test]
+    fn underlying_grid_ignores_the_charger() {
+        let mut world = World::new();
+        world.observe_meter(
+            None,
+            MeterReading::total_only(GridPower(4000.0)),
+            SolarPower::ZERO,
+        );
+        world.observe_device(
+            DeviceId::new("SN1"),
+            Timestamp::from_millis(0),
+            Measurement::Battery(battery_with_power(BatteryPower(-500))),
+        );
+        let without = world.underlying_grid();
+
+        let world = with_charger(world);
+        assert_eq!(world.underlying_grid(), without);
+        assert_eq!(world.underlying_grid(), GridPower(3500.0));
+    }
+
+    #[test]
+    fn charger_returns_its_reading_and_when_it_was_sampled() {
+        let world = with_charger(sample_world());
+        let (id, state, sampled_at) = world.charger().expect("a charger reported");
+
+        assert_eq!(id, &DeviceId::new("charger"));
+        assert_eq!(state, &ChargerState::test_sample());
+        assert_eq!(sampled_at, Timestamp::from_millis(1_757_000_002_300));
+    }
+
+    #[test]
+    fn charger_of_a_world_without_one_is_none() {
+        assert!(sample_world().charger().is_none());
+        assert!(World::new().charger().is_none());
     }
 }

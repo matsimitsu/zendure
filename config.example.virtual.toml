@@ -57,6 +57,26 @@ kind = "synthetic"
 base_load = 500
 solar_peak = 3000
 
+[charger]
+# A simulated EV charger (`src/charger/simulated.rs`): a car that plugs in
+# every evening and charges at a fixed current until it has taken its session
+# target, then sits full until it is unplugged in the morning. Its readings are
+# journalled as `device_update` rows with `class: charger`. Only allowed
+# beside the synthetic meter above.
+kind = "simulated"
+# The charger's key in the world and the journal; must differ from the
+# battery's id. "charger" is the default.
+id = "charger"
+# Local times in [clock] timezone. A window that wraps midnight is fine.
+plug_in = "17:00"
+unplug = "07:00"
+# Per phase, in whole amps, drawn at 230 V on each of `phases` (1 or 3):
+# 3 x 16 A is 11 kW.
+current_amps = 16
+phases = 3
+# Wh the car takes before it stops drawing.
+session_target = 20000
+
 [web]
 # The live dashboard: http://127.0.0.1:8080 once running. See README.md's
 # "Dashboard" section.

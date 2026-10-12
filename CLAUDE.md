@@ -70,6 +70,7 @@ crossed a boundary without anyone saying what the conversion meant.
 - `src/mqtt/` — The broker: `publisher` (queue + task), `discovery` (wire
   format), `connection` (the broker connection and its eventloop)
 - `src/source/` — Where a meter reading comes from: the `Meter` enum over one adapter per wire format (`shelly`, `synthetic`), out comes a `MeterSample`
+- `src/charger/` — An EV charger as a device class: `state` (`ChargerState`, the journalled measurement), `mod.rs` (the `ChargerMonitor` read-side trait, the `Charger` enum over the adapters, `ChargerReading`, `from_config`), `simulated` (a clock-driven car on a daily plug-in schedule)
 - `src/zendure/` — Zendure REST API client: `mod.rs` (the shell — `Wire`,
   `ZendureClient`, report parsing), `mode.rs` (the pure fold over commands
   and reports), `ledger.rs` (the tracked device state those folds run

@@ -9,12 +9,14 @@ use serde::{Deserialize, Serialize};
 
 // `SolarPhase` is the meter's own idea of how many wires it watches, so it
 // belongs to the adapter that reads them, not here.
+use crate::charger::state::PhaseMode;
 use crate::schedule::TimeOfDay;
 use crate::source::shelly::SolarPhase;
 use crate::units::{
-    BackfillDays, CentsPerKwh, Efficiency, Gain, GridPower, Percent, PowerMargin, RetentionDays,
-    SlewLimit, Soc, SolarPower, WattHours, Watts,
+    BackfillDays, CentsPerKwh, Efficiency, Gain, GridPower, MilliAmps, Percent, PowerMargin,
+    RetentionDays, SlewLimit, Soc, SolarPower, WattHours, Watts,
 };
+use crate::world::DeviceId;
 use crate::zendure::POLL_INTERVAL_FLOOR;
 
 /// Where the journal lives unless `[journal] path` says otherwise.
@@ -566,6 +568,30 @@ impl CarBatteryConfig {
     }
 }
 
+/// `[charger]`, present or not: no table means no charger is sampled and
+/// nothing about a run changes. `kind` selects the adapter the same way
+/// `car_battery.kind` does.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChargerConfig {
+    /// The charger's key in the world and the journal, distinct from the
+    /// battery's.
+    pub id: DeviceId,
+    pub kind: ChargerKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChargerKind {
+    /// A car on a daily schedule, for a run with a synthetic meter; see
+    /// `charger::simulated`.
+    Simulated {
+        plug_in: TimeOfDay,
+        unplug: TimeOfDay,
+        current: MilliAmps,
+        phases: PhaseMode,
+        session_target: WattHours,
+    },
+}
+
 /// Which meter feeds the engine its grid readings. Defaults to `Shelly`,
 /// selected by leaving `[meter]` out. `Synthetic` lets a laptop with no
 /// broker feed the engine — see `source::synthetic` for why the battery's own flow must
@@ -871,6 +897,68 @@ fn take_device_packs(table: &mut toml::Table, key: &str) -> Result<Vec<WattHours
     }
 }
 
+/// `[charger]`, if present. Same presence-gates-the-feature rule as
+/// `[car_battery]`; the simulated car's knobs are lenient, but the two
+/// relationships to other tables are fatal.
+fn take_charger(
+    taker: &mut Taker,
+    device: &DeviceConfig,
+    meter: &MeterConfig,
+    warnings: &mut Vec<String>,
+) -> Result<Option<ChargerConfig>, String> {
+    if !taker.has_table("charger")? {
+        return Ok(None);
+    }
+
+    let kind = taker.required::<String>("charger.kind")?;
+    let id = DeviceId::new(taker.lenient::<String>("charger.id", "charger".to_string())?);
+    if id.as_str() == device.identity() {
+        return Err(format!(
+            "charger.id {:?} is the battery's id too — each device needs its own key in the \
+             world and the journal",
+            id.as_str()
+        ));
+    }
+
+    let kind = match kind.as_str() {
+        "simulated" => {
+            // A simulated car drawing on a real meter would hold a real
+            // battery to a load that does not exist.
+            if !matches!(meter, MeterConfig::Synthetic { .. }) {
+                return Err(
+                    "charger kind = \"simulated\" requires [meter] kind = \"synthetic\""
+                        .to_string(),
+                );
+            }
+            let phases = taker.lenient::<u8>("charger.phases", 3)?;
+            let phases = PhaseMode::try_from(phases).unwrap_or_else(|e| {
+                warnings.push(format!("charger.phases ignored ({e}); keeping 3"));
+                PhaseMode::Three
+            });
+            ChargerKind::Simulated {
+                plug_in: taker.lenient("charger.plug_in", default_time(18, 0))?,
+                unplug: taker.lenient("charger.unplug", default_time(7, 0))?,
+                current: MilliAmps::from_whole_amps(
+                    taker.lenient::<u32>("charger.current_amps", 16)?,
+                ),
+                phases,
+                session_target: taker.lenient("charger.session_target", WattHours(20_000.0))?,
+            }
+        }
+        other => {
+            return Err(format!(
+                "charger.kind must be \"simulated\", found {other:?}"
+            ));
+        }
+    };
+
+    Ok(Some(ChargerConfig { id, kind }))
+}
+
+fn default_time(hour: u32, minute: u32) -> TimeOfDay {
+    TimeOfDay::new(hour, minute).expect("a default time of day is valid")
+}
+
 #[cfg_attr(test, derive(PartialEq))]
 pub struct Config {
     /// `None` when `[mqtt]` is absent from the file — brokerless, per
@@ -896,6 +984,8 @@ pub struct Config {
     /// `None` when `[car_battery]` is absent — no car-battery poller runs,
     /// and the dashboard's EV card stays a placeholder.
     pub car_battery: Option<CarBatteryConfig>,
+    /// `None` when `[charger]` is absent — no charger is sampled.
+    pub charger: Option<ChargerConfig>,
     pub ha_publish_prefix: String,
     /// Safety margin subtracted from charge power to avoid grid import
     pub charge_margin: PowerMargin,
@@ -971,6 +1061,7 @@ impl std::fmt::Debug for Config {
             .field("prediction", &self.prediction)
             .field("prices", &self.prices)
             .field("car_battery", &self.car_battery)
+            .field("charger", &self.charger)
             .field("ha_publish_prefix", &self.ha_publish_prefix)
             .field("charge_margin", &self.charge_margin)
             .field("discharge_margin", &self.discharge_margin)
@@ -1100,6 +1191,7 @@ impl Config {
             prediction: _,
             prices: _,
             car_battery: _,
+            charger: _,
             ha_publish_prefix: _,
             journal_path: _,
             journal_retention_days: _,
@@ -1359,6 +1451,8 @@ impl Config {
             None
         };
 
+        let charger = take_charger(&mut taker, &device, &meter, &mut warnings)?;
+
         let ha_publish_prefix =
             taker.lenient::<String>("homeassistant.publish_prefix", "zendure".to_string())?;
 
@@ -1429,6 +1523,7 @@ impl Config {
                 prediction,
                 prices,
                 car_battery,
+                charger,
                 ha_publish_prefix,
                 charge_margin,
                 discharge_margin,

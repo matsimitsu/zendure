@@ -893,6 +893,127 @@ impl BackfillDays {
 
 forward_display!(BackfillDays, u16);
 
+// --- EV charger -----------------------------------------------------------
+
+/// A measured current, in milliamps, which is how a charger reports each
+/// phase. Distinct from [`Amps`]: a setpoint in one read as the other is a
+/// 1000x error that reaches the car.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MilliAmps(pub u32);
+
+forward_display!(MilliAmps, u32);
+
+impl MilliAmps {
+    pub const ZERO: MilliAmps = MilliAmps(0);
+
+    pub fn from_whole_amps(amps: u32) -> Self {
+        MilliAmps(amps.saturating_mul(1000))
+    }
+
+    /// The power this current draws through one phase at `voltage`.
+    pub fn draw_at(self, voltage: Volts) -> ChargerDraw {
+        ChargerDraw(self.0.saturating_mul(voltage.0) / 1000)
+    }
+}
+
+/// A charge-current setpoint in whole amps: off, or the 6–16 A an EV accepts
+/// on one phase. The constructor is the only way in, so a value outside that
+/// range never reaches a charger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub struct Amps(u32);
+
+validating_deserialize_result!(Amps, u32, Amps::new);
+
+forward_display!(Amps, u32);
+
+// The charger write side is what sets one; until it exists only tests do.
+#[cfg_attr(not(test), allow(dead_code))]
+impl Amps {
+    pub const OFF: Amps = Amps(0);
+    pub const MIN_CHARGING: u32 = 6;
+    pub const MAX_CHARGING: u32 = 16;
+
+    pub fn new(amps: u32) -> Result<Self, String> {
+        if amps == 0 || (Self::MIN_CHARGING..=Self::MAX_CHARGING).contains(&amps) {
+            Ok(Amps(amps))
+        } else {
+            Err(format!(
+                "must be 0 or {}-{} A, got {amps}",
+                Self::MIN_CHARGING,
+                Self::MAX_CHARGING
+            ))
+        }
+    }
+
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// A phase voltage, in whole volts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Volts(pub u32);
+
+forward_display!(Volts, u32);
+
+/// What an EV charger is drawing from the house, in watts. Never negative,
+/// and its own role: it is demand the meter already sees, never a flow the
+/// controller commands, so it does not convert into [`BatteryPower`] or
+/// [`GridPower`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ChargerDraw(u32);
+
+forward_display!(ChargerDraw, u32);
+
+impl ChargerDraw {
+    pub const ZERO: ChargerDraw = ChargerDraw(0);
+
+    /// A charger's own power register. The simulator derives its draw from its
+    /// currents instead, so only tests call this until a real adapter does.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub const fn new(watts: u32) -> Self {
+        ChargerDraw(watts)
+    }
+
+    /// The energy drawn at this power over `elapsed`.
+    pub fn over(self, elapsed: Duration) -> WattHours {
+        WattHours(f64::from(self.0) * elapsed.as_secs_f64() / 3600.0)
+    }
+}
+
+impl Add for ChargerDraw {
+    type Output = ChargerDraw;
+    fn add(self, rhs: ChargerDraw) -> ChargerDraw {
+        ChargerDraw(self.0.saturating_add(rhs.0))
+    }
+}
+
+impl std::iter::Sum for ChargerDraw {
+    fn sum<I: Iterator<Item = ChargerDraw>>(iter: I) -> ChargerDraw {
+        iter.fold(ChargerDraw::ZERO, Add::add)
+    }
+}
+
+/// How long the current charging session has run. Whole seconds on the
+/// wire, which is how a charger reports it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SessionDuration(u64);
+
+impl SessionDuration {
+    pub const ZERO: SessionDuration = SessionDuration(0);
+
+    /// Truncated to whole seconds, the resolution a charger reports.
+    pub fn new(elapsed: Duration) -> Self {
+        SessionDuration(elapsed.as_secs())
+    }
+}
+
 // --- Money ----------------------------------------------------------------
 
 /// Whole euro-cents: a settled amount of money, never a rate. Integer so sums

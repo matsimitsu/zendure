@@ -255,7 +255,7 @@ fn battery_reading() -> BatteryReading {
 #[test]
 fn devices_are_taken_in_id_order_whatever_order_they_answered() {
     let ids = ["zzz", "aaa", "mmm"];
-    let inbox = Inbox::new(ids.map(DeviceId::new), epoch(), WINDOW);
+    let inbox = Inbox::new(ids.map(DeviceId::new), None, epoch(), WINDOW);
 
     for id in ids {
         inbox
@@ -275,13 +275,45 @@ fn devices_are_taken_in_id_order_whatever_order_they_answered() {
     );
 }
 
+/// A silent charger is found `Down` in its own slot, and nowhere a tick
+/// reads to decide whether to stand the fleet down.
+#[test]
+fn a_down_charger_stays_out_of_the_fleet() {
+    let battery = DeviceId::new("battery");
+    let charger = DeviceId::new("charger");
+    let inbox = Inbox::new([battery.clone()], Some(charger.clone()), epoch(), WINDOW);
+
+    inbox
+        .device_slot(&battery)
+        .expect("the battery was registered")
+        .deliver(ROUND, Clock::test_at(1_000), aged_out(), battery_reading());
+    assert!(inbox.device_slot(&charger).is_none());
+
+    let devices = inbox.take_devices(ROUND, aged_out());
+    assert_eq!(devices.len(), 1);
+    assert!(devices.iter().all(|(_, d)| d.down().is_none()));
+
+    let (id, delivery) = inbox
+        .take_charger(ROUND, aged_out())
+        .expect("a charger was registered");
+    assert_eq!(id, charger);
+    assert!(delivery.down().is_some());
+}
+
+#[test]
+fn an_inbox_without_a_charger_has_nothing_to_take() {
+    let inbox = Inbox::new([DeviceId::new("battery")], None, epoch(), WINDOW);
+    assert!(inbox.take_charger(ROUND, epoch()).is_none());
+    assert!(inbox.charger_slot().is_none());
+}
+
 /// The matched-age invariant at its narrowest: a sample that arrived too late
 /// for its round must not be served beside one taken for the round that just
 /// completed, or the two terms a setpoint subtracts are a tick apart.
 #[test]
 fn a_sample_stamped_with_an_earlier_round_is_not_fresh_for_this_one() {
     let ids = ["early", "ontime"];
-    let inbox = Inbox::new(ids.map(DeviceId::new), epoch(), WINDOW);
+    let inbox = Inbox::new(ids.map(DeviceId::new), None, epoch(), WINDOW);
     let round = TickSeq::FIRST.next();
 
     inbox

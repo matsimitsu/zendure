@@ -128,6 +128,21 @@ mod tests {
         }
     }
 
+    /// A charger rides on `DeviceUpdate` like a battery, so it has to survive
+    /// the same trip, and its kind is the battery's.
+    #[test]
+    fn a_charger_device_update_round_trips_through_json() {
+        let event = Event::DeviceUpdate {
+            at: clock(),
+            id: DeviceId::new("charger"),
+            measurement: Measurement::Charger(crate::charger::ChargerState::test_sample()),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""class":"charger""#), "{json}");
+        assert_eq!(serde_json::from_str::<Event>(&json).unwrap(), event);
+        assert_eq!(event.kind(), "device_update");
+    }
+
     /// `kind()` and the serde tag are two sources of truth for one string, and
     /// the journal uses both — `kind()` fills the indexed `kind` column, the tag
     /// lands inside `payload_json`. If they drift, a query by column silently

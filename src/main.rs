@@ -4,6 +4,7 @@ mod announce;
 mod backpressure;
 mod battery;
 mod car_battery;
+mod charger;
 mod cli;
 mod clock;
 mod command;
@@ -134,6 +135,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // already gets, so something outside `run::run` can hold the device it constructs.
     // See `run::run`'s own doc comment for why that seam matters to a test.
     let devices = registry::from_config(&config);
+    let charger = config
+        .charger
+        .as_ref()
+        .map(|charger| charger::from_config(charger, config.timezone));
 
-    run::run(config, devices, stop).await
+    run::run(config, devices, charger, stop).await
 }

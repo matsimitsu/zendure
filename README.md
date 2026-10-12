@@ -89,6 +89,16 @@ solar_phase = "A"           # A, B or C — which phase the solar inverter feeds
 # base_load = 500              # synthetic only, watts; required for it
 # solar_peak = 3000            # synthetic only, watts; required for it
 
+# An EV charger, sampled every scan round beside the battery and journalled
+# as a `device_update` with `class: charger`. Absent changes nothing. Only
+# kind = "simulated" exists so far, and only beside a synthetic meter; see
+# config.example.virtual.toml for its knobs. The charger's id must differ
+# from the battery's. A charger that stops answering is logged once per
+# outage and never forces the battery idle.
+# [charger]
+# kind = "simulated"
+# id = "charger"               # default
+
 [homeassistant]
 publish_prefix = "zendure"
 
@@ -289,6 +299,10 @@ Every Shelly reading, every Zendure poll response, every event the engine folds
 in, and every decision (with the world and controller state it was decided
 from, and the outcome of the command sent to each device) is recorded to a
 SQLite database at `[journal] path`.
+
+A journal holding charger readings cannot be read by a build from before
+chargers existed: its `device_update` rows carry a measurement class that
+build does not know.
 
 ```sql
 sessions  (id, started_ms, version, config_json)
@@ -524,7 +538,9 @@ cargo run -- --config config.example.virtual.toml
 See that file for what each table means (and why `[mqtt]` and `[shelly]` are
 both absent from it); briefly, `[[device]] kind = "virtual"` picks the
 simulated battery and `[meter] kind = "synthetic"` picks the simulated house,
-in place of `kind = "zendure"` and a real Shelly to poll. With no
+in place of `kind = "zendure"` and a real Shelly to poll. `[charger] kind =
+"simulated"` adds a car that plugs in every evening and charges until its
+session target is reached. With no
 `[mqtt]`, `run.rs` publishes through a `NullPublisher` instead of a real
 queued sink — decisions and telemetry are made exactly as they would be
 against real hardware, they just have nowhere to go over MQTT.

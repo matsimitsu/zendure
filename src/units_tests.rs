@@ -8,6 +8,70 @@ use std::time::Duration;
 
 use super::*;
 
+// --- EV charger -----------------------------------------------------------
+
+#[test]
+fn an_amps_setpoint_is_off_or_what_a_car_accepts_on_one_phase() {
+    assert_eq!(Amps::new(0), Ok(Amps::OFF));
+    assert_eq!(Amps::new(Amps::MIN_CHARGING).unwrap().get(), 6);
+    assert_eq!(Amps::new(Amps::MAX_CHARGING).unwrap().get(), 16);
+    for refused in [1, 5, 17, 32] {
+        assert!(Amps::new(refused).is_err(), "{refused} A was accepted");
+    }
+}
+
+/// A config file or a journal row is a wire too: an out-of-range setpoint
+/// must not decode around the constructor.
+#[test]
+fn an_amps_setpoint_out_of_range_does_not_deserialize() {
+    assert_eq!(serde_json::from_str::<Amps>("10").unwrap().get(), 10);
+    assert!(serde_json::from_str::<Amps>("20").is_err());
+}
+
+#[test]
+fn milliamps_are_a_thousandth_of_an_amp() {
+    assert_eq!(MilliAmps::from_whole_amps(16), MilliAmps(16_000));
+}
+
+/// 16 A at 230 V is 3,680 W, not 3,680,000.
+#[test]
+fn a_phase_current_draws_current_times_voltage() {
+    assert_eq!(
+        MilliAmps(16_000).draw_at(Volts(230)),
+        ChargerDraw::new(3_680)
+    );
+    assert_eq!(MilliAmps(500).draw_at(Volts(230)), ChargerDraw::new(115));
+}
+
+#[test]
+fn a_charger_draw_over_an_hour_is_its_watts_in_watt_hours() {
+    assert_eq!(
+        ChargerDraw::new(7_400).over(Duration::from_secs(3_600)),
+        WattHours(7_400.0)
+    );
+    assert_eq!(
+        ChargerDraw::new(7_400).over(Duration::from_secs(1_800)),
+        WattHours(3_700.0)
+    );
+}
+
+#[test]
+fn a_session_duration_is_whole_seconds_on_the_wire() {
+    let duration = SessionDuration::new(Duration::from_millis(90_999));
+    assert_eq!(serde_json::to_string(&duration).unwrap(), "90");
+}
+
+#[test]
+fn charger_quantities_serialize_as_bare_numbers() {
+    assert_eq!(serde_json::to_string(&MilliAmps(16_000)).unwrap(), "16000");
+    assert_eq!(serde_json::to_string(&Volts(231)).unwrap(), "231");
+    assert_eq!(
+        serde_json::to_string(&ChargerDraw::new(11_040)).unwrap(),
+        "11040"
+    );
+    assert_eq!(serde_json::to_string(&Amps::new(6).unwrap()).unwrap(), "6");
+}
+
 // --- Display forwards the caller's format spec ----------------------------
 // A hand-written `write!(f, "{}", self.0)` drops `f.precision()`, so
 // `format!("{v:.1}")` in `publish_rte` would silently emit 85.23456789
