@@ -1,0 +1,56 @@
+README.md
+  s_1eb51bc5cbf150::t_961f4a1c2b3e67 327
+  s_1eb51bc5cbf150::t_98cf9df2cf7ffb 300-326,328
+  s_1eb51bc5cbf150::t_300e945a5d0ed7 93-95,100-103
+src/run_tests.rs
+  s_1eb51bc5cbf150::t_341a607b4a71bb 684-714
+  s_1eb51bc5cbf150::t_e98aa5cd065190 623-624
+src/config_tests.rs
+  s_1eb51bc5cbf150::t_538666b86dcb60 1122-1176
+config.example.toml
+  s_1eb51bc5cbf150::t_cf201857f5694a 91-100
+src/charger/vestel_tests.rs
+  s_1eb51bc5cbf150::t_50eb1db890a02f 1-58,61-144,149-197,199-280,282-314
+  s_1eb51bc5cbf150::t_851aa2ca269e60 59-60
+  s_1eb51bc5cbf150::t_29eddb02aab5b3 145-148,281
+  s_1eb51bc5cbf150::t_7ba478247ed7a0 198
+src/config.rs
+  s_1eb51bc5cbf150::t_834ca7160860d6 955-959,962
+  s_1eb51bc5cbf150::t_d2adabe1cfda31 593-599
+  s_1eb51bc5cbf150::t_99b29639b6ba20 909
+src/main.rs
+  s_1eb51bc5cbf150::t_29eddb02aab5b3 138-140
+Cargo.toml
+  s_1eb51bc5cbf150::t_ac967f7ebdb0dd 38-40
+  s_1eb51bc5cbf150::t_40684899e85a9d 41
+CLAUDE.md
+  s_1eb51bc5cbf150::t_9efb87065fe3ba 73
+src/charger/vestel.rs
+  s_1eb51bc5cbf150::t_29eddb02aab5b3 183-187,189-193,332
+  s_1eb51bc5cbf150::t_78fd5cf4bc6105 1-182,188,194-308,313-315,317,319,321-331,333-339
+  s_1eb51bc5cbf150::t_67c737e061e287 309-312,316,318,320
+src/charger/mod.rs
+  s_1eb51bc5cbf150::t_62cf9b5f973c4d 121-122,124-134
+  s_1eb51bc5cbf150::t_2f2b025654041b 74
+  s_1eb51bc5cbf150::t_aa80ec95de8ac6 10,14
+  s_1eb51bc5cbf150::t_6124cab55c6dc6 64
+  s_1eb51bc5cbf150::t_d6e0b33fe88b83 83
+Cargo.lock
+  s_1eb51bc5cbf150::t_fa9dfc9b559505 56-66,158-163,293-307,511,2043-2060,2103,2633
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9ad286351b82d759146b965b1fa9fbed785315aa",
+  "prompts": {},
+  "sessions": {
+    "s_1eb51bc5cbf150": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "240820dc-c6c0-4a01-b8ce-f8f066dd22a3",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Beekman <robert@matsimitsu.nl>"
+    }
+  }
+}
