@@ -33,8 +33,7 @@ struct Sensor {
 }
 
 impl Sensor {
-    /// A sensor with a device class is a `measurement`, as every one announced
-    /// before `state_class` was a field.
+    /// A sensor with a device class is a `measurement` unless told otherwise.
     const fn new(
         id: &'static str,
         name: &'static str,
@@ -46,11 +45,7 @@ impl Sensor {
             name,
             unit,
             device_class,
-            state_class: if device_class.is_some() {
-                Some(MEASUREMENT)
-            } else {
-                None
-            },
+            state_class: default_state_class(device_class),
             options: &[],
         }
     }
@@ -89,6 +84,14 @@ impl Sensor {
 }
 
 const MEASUREMENT: &str = "measurement";
+
+const fn default_state_class(device_class: Option<&str>) -> Option<&'static str> {
+    if device_class.is_some() {
+        Some(MEASUREMENT)
+    } else {
+        None
+    }
+}
 const TOTAL_INCREASING: &str = "total_increasing";
 
 /// The document itself, for sensors whose id is only known at runtime (pack
@@ -101,7 +104,7 @@ fn sensor_discovery(
     unit: &str,
     device_class: Option<&str>,
 ) -> Message {
-    let state_class = device_class.map(|_| MEASUREMENT);
+    let state_class = default_state_class(device_class);
     let config = sensor_config(
         prefix,
         id,
@@ -224,9 +227,40 @@ const SENSORS: &[Sensor] = &[
     DAILY_COOLDOWN_SUPPRESSIONS,
 ];
 
-/// The one binary sensor. Its own type of discovery document, hence its own
-/// constant rather than a row in the table above.
-const SOC_CALIBRATING: &str = "soc_calibrating";
+/// A Home Assistant binary sensor: its own type of discovery document, hence
+/// not a row in the `Sensor` tables.
+struct BinarySensor {
+    id: &'static str,
+    name: &'static str,
+}
+
+impl BinarySensor {
+    fn discovery_on(&self, prefix: &str, device: serde_json::Value) -> Message {
+        let id = self.id;
+        let config = serde_json::json!({
+            "name": self.name,
+            "state_topic": format!("{prefix}/{id}"),
+            "unique_id": format!("zendure_{id}"),
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "device": device,
+        });
+        Message::discovery(
+            format!("homeassistant/binary_sensor/zendure_{id}/config"),
+            config.to_string(),
+        )
+    }
+
+    /// Home Assistant's payload for a binary sensor, not `true`/`false`.
+    fn payload(on: bool) -> String {
+        if on { "ON" } else { "OFF" }.to_string()
+    }
+}
+
+const SOC_CALIBRATING: BinarySensor = BinarySensor {
+    id: "soc_calibrating",
+    name: "Battery SOC Calibrating",
+};
 
 /// The car's own HA device — separate from `ha_device()`'s "Zendure
 /// Controller", since this reading describes a different physical thing
@@ -252,19 +286,8 @@ pub fn publish_ha_discovery(publisher: &dyn Publisher, announcer: &Announcer, pr
         announcer.announce(publisher, sensor.id, || sensor.discovery(prefix));
     }
 
-    announcer.announce(publisher, SOC_CALIBRATING, || {
-        let config = serde_json::json!({
-            "name": "Battery SOC Calibrating",
-            "state_topic": format!("{prefix}/{SOC_CALIBRATING}"),
-            "unique_id": format!("zendure_{SOC_CALIBRATING}"),
-            "payload_on": "ON",
-            "payload_off": "OFF",
-            "device": ha_device(),
-        });
-        Message::discovery(
-            format!("homeassistant/binary_sensor/zendure_{SOC_CALIBRATING}/config"),
-            config.to_string(),
-        )
+    announcer.announce(publisher, SOC_CALIBRATING.id, || {
+        SOC_CALIBRATING.discovery_on(prefix, ha_device())
     });
 }
 
@@ -329,11 +352,10 @@ pub fn publish_rte(
 }
 
 pub fn publish_soc_calibrating(publisher: &dyn Publisher, prefix: &str, calibrating: bool) {
-    let value = if calibrating { "ON" } else { "OFF" };
     publish_values(
         publisher,
         prefix,
-        vec![(SOC_CALIBRATING, value.to_string())],
+        vec![(SOC_CALIBRATING.id, BinarySensor::payload(calibrating))],
     );
 }
 
@@ -510,7 +532,10 @@ const CHARGER_SESSION_DURATION: Sensor = Sensor::new(
 .with_state_class(None);
 const CHARGER_PHASES: Sensor = Sensor::new("ev_charger_phases", "EV Charger Phases", "", None);
 
-const CHARGER_DISCHARGE_HOLD: &str = "ev_charger_discharge_hold";
+const CHARGER_DISCHARGE_HOLD: BinarySensor = BinarySensor {
+    id: "ev_charger_discharge_hold",
+    name: "EV Charger Discharge Hold",
+};
 
 /// Announced and published together from the scan round that read the
 /// charger, as `publish_car_battery_soc` is from its poller: the charger is
@@ -540,19 +565,8 @@ pub fn publish_charger(
             sensor.discovery_on(prefix, charger_ha_device())
         });
     }
-    announcer.announce(publisher, CHARGER_DISCHARGE_HOLD, || {
-        let config = serde_json::json!({
-            "name": "EV Charger Discharge Hold",
-            "state_topic": format!("{prefix}/{CHARGER_DISCHARGE_HOLD}"),
-            "unique_id": format!("zendure_{CHARGER_DISCHARGE_HOLD}"),
-            "payload_on": "ON",
-            "payload_off": "OFF",
-            "device": charger_ha_device(),
-        });
-        Message::discovery(
-            format!("homeassistant/binary_sensor/zendure_{CHARGER_DISCHARGE_HOLD}/config"),
-            config.to_string(),
-        )
+    announcer.announce(publisher, CHARGER_DISCHARGE_HOLD.id, || {
+        CHARGER_DISCHARGE_HOLD.discovery_on(prefix, charger_ha_device())
     });
 
     let mut values = vec![
@@ -579,8 +593,8 @@ pub fn publish_charger(
         values.push((sensor.id, voltage.to_string()));
     }
     values.push((
-        CHARGER_DISCHARGE_HOLD,
-        if discharge_hold { "ON" } else { "OFF" }.to_string(),
+        CHARGER_DISCHARGE_HOLD.id,
+        BinarySensor::payload(discharge_hold),
     ));
     publish_values(publisher, prefix, values);
 }
@@ -597,10 +611,7 @@ pub fn publish_charger_discharge_hold(publisher: &dyn Publisher, prefix: &str, h
     publish_values(
         publisher,
         prefix,
-        vec![(
-            CHARGER_DISCHARGE_HOLD,
-            if hold { "ON" } else { "OFF" }.to_string(),
-        )],
+        vec![(CHARGER_DISCHARGE_HOLD.id, BinarySensor::payload(hold))],
     );
 }
 

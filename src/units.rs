@@ -783,6 +783,11 @@ impl Elapsed {
     pub const fn as_millis(self) -> i64 {
         self.0
     }
+
+    /// Whole minutes, never negative.
+    pub const fn as_minutes(self) -> i64 {
+        if self.0 < 0 { 0 } else { self.0 / 60_000 }
+    }
 }
 
 /// All three saturating, because `Elapsed::of` saturates: a cooldown stamp
@@ -982,8 +987,10 @@ impl ChargerDraw {
         ChargerDraw(watts)
     }
 
-    pub fn as_f64(self) -> f64 {
-        f64::from(self.0)
+    /// The draw as the import it adds to a grid reading: the one role
+    /// conversion from a charger's draw to a signed grid flow.
+    pub fn as_import(self) -> GridPower {
+        GridPower(f64::from(self.0))
     }
 
     /// The draw as the unsigned-by-role `Watts` the dashboard formats.

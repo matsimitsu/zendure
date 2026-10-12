@@ -811,7 +811,10 @@ pub async fn run(
 
     let tick = config.device.poll_interval();
 
-    let meter = Arc::new(source::from_config(&config, &devices, charger.as_ref()));
+    // A real charger beside a synthetic meter draws on a house this meter
+    // doesn't model, so only a simulated car is folded in.
+    let car = charger.as_ref().and_then(Charger::simulated);
+    let meter = Arc::new(source::from_config(&config, &devices, car));
     let charger = charger.map(Arc::new);
 
     // Opened before the samplers are asked for anything, so a source that

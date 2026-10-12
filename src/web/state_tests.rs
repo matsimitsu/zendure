@@ -5,12 +5,9 @@ use super::*;
 
 use crate::battery::BatteryState;
 use crate::fixtures::journey;
+use crate::fixtures::journey::at;
 use crate::units::{BatteryPower, GridPower, SolarPower, Timestamp};
 use crate::world::{DeviceId, Measurement, MeterReading, World};
-
-fn at(secs: i64) -> Timestamp {
-    Timestamp::from_millis(journey::NOW_MS + secs * 1000)
-}
 
 fn engine_state(grid: GridPower, solar: SolarPower) -> EngineState {
     let mut world = World::new();

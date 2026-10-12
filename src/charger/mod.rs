@@ -70,6 +70,16 @@ pub enum Charger {
     Panicking(DeviceId),
 }
 
+impl Charger {
+    /// The simulated car, for the synthetic meter to draw on the same house.
+    pub fn simulated(&self) -> Option<Arc<simulated::SimulatedCharger>> {
+        match self {
+            Charger::Simulated(car) => Some(car.clone()),
+            _ => None,
+        }
+    }
+}
+
 impl ChargerMonitor for Charger {
     fn id(&self) -> &DeviceId {
         match self {

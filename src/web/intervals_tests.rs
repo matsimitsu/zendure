@@ -4,6 +4,7 @@
 use super::*;
 
 use crate::battery::BatteryState;
+use crate::fixtures::journey::at;
 use crate::fixtures::journey::{
     self, battery_event, device_update, interval_ring, meter_event, poll_body,
 };
@@ -11,10 +12,6 @@ use crate::fixtures::utc;
 use crate::units::{DeciKelvin, WattHours};
 use crate::web::pack_intervals::{Extent, PackId};
 use crate::world::DeviceId;
-
-fn at(secs: i64) -> Timestamp {
-    Timestamp::from_millis(journey::NOW_MS + secs * 1000)
-}
 
 fn configured() -> [DeviceId; 1] {
     [DeviceId::new(journey::BATTERY_ID)]
