@@ -50,9 +50,9 @@ impl ChargeProfile {
         }
     }
 
-    pub fn at(&self, clock: &Clock) -> ChargerState {
-        match self.plugged_in_since(clock.now) {
-            Some(since) => self.session(clock.now, since),
+    pub fn at(&self, now: Timestamp) -> ChargerState {
+        match self.plugged_in_since(now) {
+            Some(since) => self.session(now, since),
             None => self.unplugged(),
         }
     }
@@ -164,16 +164,15 @@ impl SimulatedCharger {
         &self.id
     }
 
-    pub fn at(&self, clock: &Clock) -> ChargerState {
-        self.profile.at(clock)
+    pub fn at(&self, now: Timestamp) -> ChargerState {
+        self.profile.at(now)
     }
 
     /// Infallible, and with nothing to capture: there is no wire format
     /// between the car and the reader.
     pub async fn poll(&self) -> Result<ChargerReading, PollError> {
-        let clock = Clock::now(self.profile.timezone);
         Ok(ChargerReading {
-            state: self.at(&clock),
+            state: self.at(Clock::now(self.profile.timezone).now),
             telemetry: ChargerTelemetry::default(),
             raw: None,
         })

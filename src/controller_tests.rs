@@ -1802,6 +1802,56 @@ fn an_idle_with_nothing_to_discharge_does_not_blame_the_car() {
     assert!(!decision.reason.contains("car"), "{}", decision.reason);
 }
 
+/// When the car and another guard both keep discharge off, the reason names
+/// the car: Home Assistant and the dashboard report the hold at that moment,
+/// and the reason must not say "No action needed" beside them.
+#[test]
+fn the_car_is_named_over_the_guards_it_coincides_with() {
+    let post_charge = {
+        let mut ctrl = controller_no_cooldown();
+        ctrl.state.last_active_mode = Some(ControlMode::Charge);
+        ctrl.state.last_idle_start = Some(Timestamp::from_millis(NOW_MS - 60_000));
+        ctrl.min_idle_before_discharge = Duration::from_secs(300);
+        (ctrl, SolarPower::ZERO)
+    };
+    let solar_block = {
+        let mut ctrl = controller_no_cooldown();
+        ctrl.solar_discharge_block_threshold = SolarPower::new(1_000.0);
+        (ctrl, SolarPower::new(2_000.0))
+    };
+
+    for (name, (mut ctrl, solar)) in [
+        ("post-charge idle", post_charge),
+        ("solar block", solar_block),
+    ] {
+        let world = with_car(world(GridPower(7_600.0), solar, &battery(80)), 7_200, FRESH);
+        let decision = decide_at(&mut ctrl, &world, &clock(20));
+        assert_eq!(decision.mode, ControlMode::Idle, "{name}");
+        assert!(
+            decision
+                .reason
+                .contains("car charging at 7200W, discharge held"),
+            "{name}: {}",
+            decision.reason
+        );
+    }
+}
+
+/// With the house exporting nothing would discharge, so a charging car is
+/// not what keeps the battery idle.
+#[test]
+fn a_car_with_no_demand_to_hold_is_not_blamed() {
+    let mut ctrl = controller_no_cooldown();
+    let world = with_car(
+        world(GridPower(0.0), SolarPower::ZERO, &battery(100)),
+        7_200,
+        FRESH,
+    );
+    let decision = decide_at(&mut ctrl, &world, &clock(20));
+    assert_eq!(decision.mode, ControlMode::Idle);
+    assert!(!decision.reason.contains("car"), "{}", decision.reason);
+}
+
 /// Either guard alone holds discharge; it runs only when both let it.
 #[test]
 fn the_solar_and_car_guards_combine_with_and() {
@@ -1825,7 +1875,7 @@ fn car_charging_reports_the_draw_it_held_for() {
     let guard = ChargerGuard::from_session(&SessionConfig::test_default());
     let world = evening_with_car(7_200, FRESH);
     assert_eq!(
-        car_charging(&world, &clock(20), guard),
+        car_charging(&world, clock(20).now, guard),
         Some(ChargerDraw::new(7_200))
     );
 }

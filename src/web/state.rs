@@ -8,7 +8,7 @@ use std::path::Path;
 
 use crate::command::Command;
 use crate::config::{DynamicTariff, PricesConfig};
-use crate::controller::{ChargerGuard, SocLimits};
+use crate::controller::{ChargerStanding, SocLimits};
 use crate::device::PackStatus;
 use crate::engine::EngineState;
 use crate::event::Event;
@@ -217,10 +217,12 @@ pub struct DashboardState {
     /// that poller's own schedule. A failed poll leaves this as it was, so
     /// its age (not a fallback value) is what tells a viewer it's stale.
     pub car_soc: Option<(Soc, Timestamp)>,
-    /// The rule the controller holds discharge by, when `[charger]` is
-    /// configured: the panel names the hold through the same predicate, and
-    /// `None` tells "not set up" from "not read yet".
-    pub charger: Option<ChargerGuard>,
+    /// Whether `[charger]` is configured, so an empty charger panel can tell
+    /// "not set up" from "not read yet".
+    pub charger_feed: bool,
+    /// The engine's verdict on the charger's last reading, as of the tick
+    /// that last changed it. `None` until a reading has been folded.
+    pub charger: Option<ChargerStanding>,
     pub as_of: Timestamp,
 }
 
@@ -258,6 +260,7 @@ impl DashboardState {
             price_feed: false,
             forecast_feed: false,
             car_soc: None,
+            charger_feed: false,
             charger: None,
             as_of,
         };
@@ -285,8 +288,8 @@ impl DashboardState {
         self
     }
 
-    pub fn with_charger(mut self, guard: Option<ChargerGuard>) -> Self {
-        self.charger = guard;
+    pub fn with_charger(mut self, configured: bool) -> Self {
+        self.charger_feed = configured;
         self
     }
 
@@ -332,9 +335,16 @@ impl DashboardState {
         self.car_soc = Some((soc, at));
     }
 
-    /// A charger reading folded into `engine`. It carries no history of its
-    /// own, so it only refreshes the snapshot the panel reads from.
-    pub fn charger_tick(&mut self, engine: &EngineState, as_of: Timestamp) {
+    /// A charger reading folded into `engine`, or the engine's verdict on the
+    /// last one changing as it ages. It carries no history of its own, so it
+    /// only refreshes the snapshot the panel reads from.
+    pub fn charger_tick(
+        &mut self,
+        engine: &EngineState,
+        standing: Option<ChargerStanding>,
+        as_of: Timestamp,
+    ) {
+        self.charger = standing;
         self.refresh(engine, None, as_of);
     }
 

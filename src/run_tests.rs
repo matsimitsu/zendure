@@ -505,7 +505,6 @@ async fn a_device_found_down_is_written_to_once_per_outage() {
         prefix: "test",
         dashboard: None,
         blind_window: config.mqtt_timeout,
-        charger_guard: controller::ChargerGuard::from_session(&config.session()),
     };
     let at = Clock::now(config.timezone);
 
@@ -1015,16 +1014,14 @@ fn the_discharge_hold_sensor_follows_the_guard() {
         prefix: "test",
         dashboard: None,
         blind_window: Duration::from_secs(60),
-        charger_guard: controller::ChargerGuard {
-            threshold: ChargerDraw::new(750),
-            max_age: Duration::from_secs(60),
-        },
+    };
+    let session = SessionConfig {
+        charger_discharge_block_threshold: ChargerDraw::new(750),
+        mqtt_timeout_secs: 60,
+        ..SessionConfig::test_default()
     };
     let mut engine = Engine::new(
-        controller::Controller::from_session(
-            &SessionConfig::test_default(),
-            &Clock::test_at(1_000_000),
-        ),
+        controller::Controller::from_session(&session, &Clock::test_at(1_000_000)),
         World::new(),
         Duration::from_secs(60),
     );
@@ -1037,41 +1034,37 @@ fn the_discharge_hold_sensor_follows_the_guard() {
         telemetry: ChargerTelemetry::default(),
         raw: None,
     };
-    let mut silent = false;
+    let mut charger = ChargerTick::default();
     let hold = || publisher.payload("test/ev_charger_discharge_hold").unwrap();
+    let at = |ms| Clock::test_at(ms);
 
-    tick.fold_charger(
+    charger.fold(
+        &tick,
         &mut engine,
-        &mut silent,
-        Some((
-            id.clone(),
-            Delivery::Fresh(Clock::test_at(1_000_000), reading(3_650)),
-        )),
+        at(1_000_000).now,
+        Some((id.clone(), Delivery::Fresh(at(1_000_000), reading(3_650)))),
     );
     assert_eq!(hold(), "ON");
 
-    tick.fold_charger(
+    charger.fold(
+        &tick,
         &mut engine,
-        &mut silent,
-        Some((
-            id.clone(),
-            Delivery::Fresh(Clock::test_at(1_005_000), reading(100)),
-        )),
+        at(1_005_000).now,
+        Some((id.clone(), Delivery::Fresh(at(1_005_000), reading(100)))),
     );
     assert_eq!(hold(), "OFF", "below the threshold");
 
-    tick.fold_charger(
+    charger.fold(
+        &tick,
         &mut engine,
-        &mut silent,
-        Some((
-            id.clone(),
-            Delivery::Fresh(Clock::test_at(1_010_000), reading(3_650)),
-        )),
+        at(1_010_000).now,
+        Some((id.clone(), Delivery::Fresh(at(1_010_000), reading(3_650)))),
     );
     assert_eq!(hold(), "ON");
-    tick.fold_charger(
+    charger.fold(
+        &tick,
         &mut engine,
-        &mut silent,
+        at(1_015_000).now,
         Some((id, Delivery::Down(Failures::test(5)))),
     );
     assert_eq!(hold(), "OFF", "a silent charger fails open");

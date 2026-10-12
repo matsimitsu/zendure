@@ -1,12 +1,10 @@
 //! The charger as the dashboard shows it: the EV card's detail line and the
-//! charger panel, both read from the engine snapshot's `World::charger()`.
-
-use chrono::Weekday;
+//! charger panel, both read from the engine snapshot's `World::charger()` and
+//! the engine's verdict on it.
 
 use crate::charger::ChargerState;
 use crate::charger::state::{CableState, ChargePointStatus, PhaseMode};
-use crate::clock::Clock;
-use crate::controller::{ChargerGuard, car_charging};
+use crate::controller::ChargerStanding;
 use crate::units::{Elapsed, MilliAmps, SessionDuration, Timestamp, Volts};
 
 use super::state::DashboardState;
@@ -41,23 +39,26 @@ struct Seen<'a> {
     state: &'a ChargerState,
     sampled_at: Timestamp,
     age: Elapsed,
-    guard: ChargerGuard,
+    standing: ChargerStanding,
 }
 
 impl Seen<'_> {
     fn offline(&self) -> bool {
-        self.age > self.guard.max_age
+        !self.standing.fresh
     }
 }
 
 fn seen(state: &DashboardState) -> Option<Seen<'_>> {
-    let guard = state.charger?;
+    if !state.charger_feed {
+        return None;
+    }
+    let standing = state.charger?;
     let (_, charger, sampled_at) = state.engine.world.charger()?;
     Some(Seen {
         state: charger,
         sampled_at,
         age: state.as_of - sampled_at,
-        guard,
+        standing,
     })
 }
 
@@ -83,24 +84,16 @@ pub(super) fn charger_panel_view(
     state: &DashboardState,
     timezone: chrono_tz::Tz,
 ) -> ChargerPanelView {
-    let Some(guard) = state.charger else {
+    if !state.charger_feed {
         return ChargerPanelView::NotConfigured;
-    };
+    }
     let Some(seen) = seen(state) else {
         return ChargerPanelView::Waiting;
     };
     let charger = seen.state;
     let phases = charger.phases.count();
 
-    // Only the clock's instant matters to the guard; the calendar fields are
-    // for the controller's own decisions.
-    let clock = Clock {
-        now: state.as_of,
-        hour: 0,
-        day_ordinal: 0,
-        weekday: Weekday::Mon,
-    };
-    let discharge_hold = car_charging(&state.engine.world, &clock, guard).map(|draw| {
+    let discharge_hold = seen.standing.hold.map(|draw| {
         format!(
             "Battery discharge held — car charging at {} kW",
             format_kw(draw.into_watts(), 1, SignStyle::Magnitude)
