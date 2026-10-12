@@ -25,6 +25,38 @@ pub enum ChargePointStatus {
     Unknown(u16),
 }
 
+impl ChargePointStatus {
+    /// What Home Assistant's `enum` sensor shows; every status this build
+    /// cannot name collapses to `"unknown"`, so the option list stays closed.
+    pub const LABELS: &'static [&'static str] = &[
+        "available",
+        "preparing",
+        "charging",
+        "suspended_evse",
+        "suspended_ev",
+        "finishing",
+        "reserved",
+        "unavailable",
+        "faulted",
+        "unknown",
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ChargePointStatus::Available => "available",
+            ChargePointStatus::Preparing => "preparing",
+            ChargePointStatus::Charging => "charging",
+            ChargePointStatus::SuspendedEvse => "suspended_evse",
+            ChargePointStatus::SuspendedEv => "suspended_ev",
+            ChargePointStatus::Finishing => "finishing",
+            ChargePointStatus::Reserved => "reserved",
+            ChargePointStatus::Unavailable => "unavailable",
+            ChargePointStatus::Faulted => "faulted",
+            ChargePointStatus::Unknown(_) => "unknown",
+        }
+    }
+}
+
 /// What is plugged into what.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -35,6 +67,27 @@ pub enum CableState {
     VehicleConnected,
     VehicleLocked,
     Unknown(u16),
+}
+
+impl CableState {
+    /// As [`ChargePointStatus::LABELS`].
+    pub const LABELS: &'static [&'static str] = &[
+        "no_cable",
+        "charger_only",
+        "vehicle_connected",
+        "vehicle_locked",
+        "unknown",
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CableState::NoCable => "no_cable",
+            CableState::ChargerOnly => "charger_only",
+            CableState::VehicleConnected => "vehicle_connected",
+            CableState::VehicleLocked => "vehicle_locked",
+            CableState::Unknown(_) => "unknown",
+        }
+    }
 }
 
 /// How many phases the charger is drawing on.

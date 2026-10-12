@@ -643,6 +643,19 @@ battery:
 **Binary sensors:**
 - `Zendure Controller Battery SOC Calibrating` — ON when SOC calibration is in progress
 
+When `[charger]` is configured, an "EV Charger (via Zendure Controller)" device
+is announced too, separate from the battery's. Its sensors are
+`ev_charger_status` (an `enum`: available, preparing, charging, suspended_evse,
+suspended_ev, finishing, reserved, unavailable, faulted, unknown),
+`ev_charger_cable` (an `enum`: no_cable, charger_only, vehicle_connected,
+vehicle_locked, unknown), `ev_charger_power` (W), `ev_charger_current_l1`–`l3`
+(A), `ev_charger_voltage_l1`–`l3` (V), `ev_charger_session_energy` (kWh,
+`total_increasing`), `ev_charger_session_duration` (s) and `ev_charger_phases`.
+The binary sensor `ev_charger_discharge_hold` is ON while the controller is
+holding battery discharge for the car (the same rule as
+`charger_discharge_block_threshold`), and OFF when the charger stops answering.
+The charger's lifetime energy register is not published.
+
 ## Dashboard
 
 Add `[web]` to run a live browser dashboard (`src/web/`) — solar/home/grid

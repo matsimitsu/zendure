@@ -102,6 +102,7 @@ struct Tick<'a> {
     /// How long the loop may go without a usable reading, for the line that
     /// says so.
     blind_window: Duration,
+    charger_guard: controller::ChargerGuard,
 }
 
 /// What a tick's device slots said, once every sample taken for its round has
@@ -146,14 +147,25 @@ impl Tick<'_> {
                 let event = Event::DeviceUpdate {
                     at: sampled_at,
                     id,
-                    measurement: Measurement::Charger(reading.state),
+                    measurement: Measurement::Charger(reading.state.clone()),
                 };
                 self.journal.event(&event);
                 engine.step(&event);
+                let hold =
+                    controller::car_charging(engine.world(), &sampled_at, self.charger_guard)
+                        .is_some();
+                mqtt::publish_charger(
+                    self.publisher,
+                    self.announcer,
+                    self.prefix,
+                    &reading.state,
+                    hold,
+                );
             }
             Delivery::Quiet => {}
             Delivery::Down(failures) => {
                 if !std::mem::replace(silent, true) {
+                    mqtt::publish_charger_discharge_hold(self.publisher, self.prefix, false);
                     tracing::warn!(
                         "{id} is not answering ({} consecutive failures) — carrying on without it",
                         failures.get(),
@@ -853,6 +865,7 @@ pub async fn run(
         prefix: &ha_prefix,
         dashboard: dashboard_tx.as_ref(),
         blind_window: mqtt_timeout,
+        charger_guard: controller::ChargerGuard::from_session(&config.session()),
     };
 
     // The round every slot is currently answering. A tick reads only the

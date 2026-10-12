@@ -1,6 +1,8 @@
 //! What Home Assistant is told, and the bytes it reads.
 
 use crate::announce::Announcer;
+use crate::charger::ChargerState;
+use crate::charger::state::{CableState, ChargePointStatus};
 use crate::models::{ControlDecision, CycleCounts};
 use crate::publish::{Message, Publisher};
 use crate::units::{DeciKelvin, KiloWattHours, PackTemperature, Percent, Soc, Watts};
@@ -25,9 +27,14 @@ struct Sensor {
     name: &'static str,
     unit: &'static str,
     device_class: Option<&'static str>,
+    state_class: Option<&'static str>,
+    /// The closed set of values an `enum` sensor can show.
+    options: &'static [&'static str],
 }
 
 impl Sensor {
+    /// A sensor with a device class is a `measurement`, as every one announced
+    /// before `state_class` was a field.
     const fn new(
         id: &'static str,
         name: &'static str,
@@ -39,14 +46,50 @@ impl Sensor {
             name,
             unit,
             device_class,
+            state_class: if device_class.is_some() {
+                Some(MEASUREMENT)
+            } else {
+                None
+            },
+            options: &[],
         }
+    }
+
+    const fn with_state_class(self, state_class: Option<&'static str>) -> Self {
+        Sensor {
+            state_class,
+            ..self
+        }
+    }
+
+    const fn with_options(self, options: &'static [&'static str]) -> Self {
+        Sensor { options, ..self }
     }
 
     /// This sensor's discovery document, as the bytes Home Assistant expects.
     fn discovery(&self, prefix: &str) -> Message {
-        sensor_discovery(prefix, self.id, self.name, self.unit, self.device_class)
+        self.discovery_on(prefix, ha_device())
+    }
+
+    fn discovery_on(&self, prefix: &str, device: serde_json::Value) -> Message {
+        let mut config = sensor_config(
+            prefix,
+            self.id,
+            self.name,
+            self.unit,
+            self.device_class,
+            self.state_class,
+            device,
+        );
+        if !self.options.is_empty() {
+            config["options"] = serde_json::json!(self.options);
+        }
+        sensor_message(self.id, &config)
     }
 }
+
+const MEASUREMENT: &str = "measurement";
+const TOTAL_INCREASING: &str = "total_increasing";
 
 /// The document itself, for sensors whose id is only known at runtime (pack
 /// temperatures: the pack count comes from a poll). The table's static rows delegate
@@ -58,11 +101,33 @@ fn sensor_discovery(
     unit: &str,
     device_class: Option<&str>,
 ) -> Message {
+    let state_class = device_class.map(|_| MEASUREMENT);
+    let config = sensor_config(
+        prefix,
+        id,
+        name,
+        unit,
+        device_class,
+        state_class,
+        ha_device(),
+    );
+    sensor_message(id, &config)
+}
+
+fn sensor_config(
+    prefix: &str,
+    id: &str,
+    name: &str,
+    unit: &str,
+    device_class: Option<&str>,
+    state_class: Option<&str>,
+    device: serde_json::Value,
+) -> serde_json::Value {
     let mut config = serde_json::json!({
         "name": name,
         "state_topic": format!("{prefix}/{id}"),
         "unique_id": format!("zendure_{id}"),
-        "device": ha_device(),
+        "device": device,
     });
 
     if !unit.is_empty() {
@@ -70,9 +135,14 @@ fn sensor_discovery(
     }
     if let Some(dc) = device_class {
         config["device_class"] = serde_json::json!(dc);
-        config["state_class"] = serde_json::json!("measurement");
     }
+    if let Some(sc) = state_class {
+        config["state_class"] = serde_json::json!(sc);
+    }
+    config
+}
 
+fn sensor_message(id: &str, config: &serde_json::Value) -> Message {
     Message::discovery(
         format!("homeassistant/sensor/zendure_{id}/config"),
         config.to_string(),
@@ -367,6 +437,164 @@ pub fn publish_car_battery_soc(
     );
 }
 
+/// The EV charger's own HA device, apart from the stationary battery's, for
+/// the reason `car_ha_device` is.
+fn charger_ha_device() -> serde_json::Value {
+    serde_json::json!({
+        "identifiers": ["zendure_ev_charger"],
+        "name": "EV Charger (via Zendure Controller)",
+    })
+}
+
+const CHARGER_STATUS: Sensor =
+    Sensor::new("ev_charger_status", "EV Charger Status", "", Some("enum"))
+        .with_state_class(None)
+        .with_options(ChargePointStatus::LABELS);
+const CHARGER_CABLE: Sensor = Sensor::new("ev_charger_cable", "EV Charger Cable", "", Some("enum"))
+    .with_state_class(None)
+    .with_options(CableState::LABELS);
+const CHARGER_POWER: Sensor = Sensor::new("ev_charger_power", "EV Charger Power", "W", POWER);
+const CHARGER_CURRENTS: [Sensor; 3] = [
+    Sensor::new(
+        "ev_charger_current_l1",
+        "EV Charger Current L1",
+        "A",
+        Some("current"),
+    ),
+    Sensor::new(
+        "ev_charger_current_l2",
+        "EV Charger Current L2",
+        "A",
+        Some("current"),
+    ),
+    Sensor::new(
+        "ev_charger_current_l3",
+        "EV Charger Current L3",
+        "A",
+        Some("current"),
+    ),
+];
+const CHARGER_VOLTAGES: [Sensor; 3] = [
+    Sensor::new(
+        "ev_charger_voltage_l1",
+        "EV Charger Voltage L1",
+        "V",
+        Some("voltage"),
+    ),
+    Sensor::new(
+        "ev_charger_voltage_l2",
+        "EV Charger Voltage L2",
+        "V",
+        Some("voltage"),
+    ),
+    Sensor::new(
+        "ev_charger_voltage_l3",
+        "EV Charger Voltage L3",
+        "V",
+        Some("voltage"),
+    ),
+];
+const CHARGER_SESSION_ENERGY: Sensor = Sensor::new(
+    "ev_charger_session_energy",
+    "EV Charger Session Energy",
+    "kWh",
+    ENERGY,
+)
+.with_state_class(Some(TOTAL_INCREASING));
+const CHARGER_SESSION_DURATION: Sensor = Sensor::new(
+    "ev_charger_session_duration",
+    "EV Charger Session Duration",
+    "s",
+    Some("duration"),
+)
+.with_state_class(None);
+const CHARGER_PHASES: Sensor = Sensor::new("ev_charger_phases", "EV Charger Phases", "", None);
+
+const CHARGER_DISCHARGE_HOLD: &str = "ev_charger_discharge_hold";
+
+/// Announced and published together from the scan round that read the
+/// charger, as `publish_car_battery_soc` is from its poller: the charger is
+/// optional, so its documents are not in `publish_ha_discovery`'s on-connect
+/// table. `discharge_hold` is `controller::car_charging`'s answer, so the
+/// binary sensor says what the controller did rather than re-deriving it.
+pub fn publish_charger(
+    publisher: &dyn Publisher,
+    announcer: &Announcer,
+    prefix: &str,
+    state: &ChargerState,
+    discharge_hold: bool,
+) {
+    let sensors = [
+        CHARGER_STATUS,
+        CHARGER_CABLE,
+        CHARGER_POWER,
+        CHARGER_SESSION_ENERGY,
+        CHARGER_SESSION_DURATION,
+        CHARGER_PHASES,
+    ]
+    .into_iter()
+    .chain(CHARGER_CURRENTS)
+    .chain(CHARGER_VOLTAGES);
+    for sensor in sensors {
+        announcer.announce(publisher, sensor.id, || {
+            sensor.discovery_on(prefix, charger_ha_device())
+        });
+    }
+    announcer.announce(publisher, CHARGER_DISCHARGE_HOLD, || {
+        let config = serde_json::json!({
+            "name": "EV Charger Discharge Hold",
+            "state_topic": format!("{prefix}/{CHARGER_DISCHARGE_HOLD}"),
+            "unique_id": format!("zendure_{CHARGER_DISCHARGE_HOLD}"),
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "device": charger_ha_device(),
+        });
+        Message::discovery(
+            format!("homeassistant/binary_sensor/zendure_{CHARGER_DISCHARGE_HOLD}/config"),
+            config.to_string(),
+        )
+    });
+
+    let mut values = vec![
+        (CHARGER_STATUS.id, state.status.label().to_string()),
+        (CHARGER_CABLE.id, state.cable.label().to_string()),
+        (CHARGER_POWER.id, state.power.to_string()),
+        (
+            CHARGER_SESSION_ENERGY.id,
+            format!("{:.3}", state.session_energy.to_kwh()),
+        ),
+        (
+            CHARGER_SESSION_DURATION.id,
+            state.session_duration.as_secs().to_string(),
+        ),
+        (CHARGER_PHASES.id, state.phases.count().to_string()),
+    ];
+    for (sensor, current) in CHARGER_CURRENTS.iter().zip(state.currents) {
+        values.push((sensor.id, format!("{:.2}", current.as_amps())));
+    }
+    for (sensor, voltage) in CHARGER_VOLTAGES.iter().zip(state.voltages) {
+        values.push((sensor.id, voltage.to_string()));
+    }
+    values.push((
+        CHARGER_DISCHARGE_HOLD,
+        if discharge_hold { "ON" } else { "OFF" }.to_string(),
+    ));
+    publish_values(publisher, prefix, values);
+}
+
+/// The hold's value alone, for a charger that has stopped answering: the
+/// guard fails open, so the sensor must not stay ON for a car nobody can see.
+pub fn publish_charger_discharge_hold(publisher: &dyn Publisher, prefix: &str, hold: bool) {
+    publish_values(
+        publisher,
+        prefix,
+        vec![(
+            CHARGER_DISCHARGE_HOLD,
+            if hold { "ON" } else { "OFF" }.to_string(),
+        )],
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,6 +725,117 @@ mod tests {
             discovery_docs, 1,
             "the second call re-offers, not re-announces"
         );
+    }
+
+    fn config_of(p: &RecordingPublisher, topic: &str) -> serde_json::Value {
+        let sent = p.sent();
+        let doc = sent
+            .iter()
+            .find(|m| m.topic == topic)
+            .unwrap_or_else(|| panic!("{topic} is announced"));
+        serde_json::from_str(&doc.payload).unwrap()
+    }
+
+    #[test]
+    fn charger_sensors_announce_under_their_own_device_with_their_classes() {
+        let p = RecordingPublisher::new();
+        let announcer = Announcer::new();
+        publish_charger(
+            &p,
+            &announcer,
+            "zendure",
+            &ChargerState::test_sample(),
+            false,
+        );
+
+        let sensor = |id: &str| config_of(&p, &format!("homeassistant/sensor/zendure_{id}/config"));
+
+        let energy = sensor("ev_charger_session_energy");
+        assert_eq!(energy["device"]["identifiers"][0], "zendure_ev_charger");
+        assert_eq!(energy["device_class"], "energy");
+        assert_eq!(energy["state_class"], "total_increasing");
+
+        let duration = sensor("ev_charger_session_duration");
+        assert_eq!(duration["device_class"], "duration");
+        assert_eq!(duration["unit_of_measurement"], "s");
+
+        let status = sensor("ev_charger_status");
+        assert_eq!(status["device_class"], "enum");
+        assert!(status.get("state_class").is_none());
+        assert!(
+            status["options"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("suspended_ev"))
+        );
+
+        assert_eq!(sensor("ev_charger_current_l3")["device_class"], "current");
+        assert_eq!(sensor("ev_charger_voltage_l2")["unit_of_measurement"], "V");
+        assert_eq!(sensor("ev_charger_power")["state_class"], "measurement");
+
+        let hold = config_of(
+            &p,
+            "homeassistant/binary_sensor/zendure_ev_charger_discharge_hold/config",
+        );
+        assert_eq!(hold["device"]["identifiers"][0], "zendure_ev_charger");
+    }
+
+    #[test]
+    fn charger_values_are_published_in_the_units_the_sensors_announce() {
+        let p = RecordingPublisher::new();
+        publish_charger(
+            &p,
+            &Announcer::new(),
+            "zendure",
+            &ChargerState::test_sample(),
+            true,
+        );
+
+        let value = |id: &str| p.payload(&format!("zendure/{id}")).unwrap();
+        assert_eq!(value("ev_charger_status"), "charging");
+        assert_eq!(value("ev_charger_cable"), "vehicle_locked");
+        assert_eq!(value("ev_charger_power"), "3650");
+        assert_eq!(value("ev_charger_current_l1"), "15.90");
+        assert_eq!(value("ev_charger_voltage_l3"), "233");
+        assert_eq!(value("ev_charger_session_energy"), "4.200");
+        assert_eq!(value("ev_charger_session_duration"), "4140");
+        assert_eq!(value("ev_charger_phases"), "1");
+        assert_eq!(value("ev_charger_discharge_hold"), "ON");
+    }
+
+    #[test]
+    fn charger_is_announced_once_per_connection_and_again_after_a_reset() {
+        let p = RecordingPublisher::new();
+        let announcer = Announcer::new();
+        let state = ChargerState::test_sample();
+        let docs = |p: &RecordingPublisher| {
+            p.sent()
+                .iter()
+                .filter(|m| m.topic.starts_with("homeassistant/"))
+                .count()
+        };
+
+        publish_charger(&p, &announcer, "zendure", &state, false);
+        let first = docs(&p);
+        assert_eq!(first, 13, "twelve sensors and the hold");
+        publish_charger(&p, &announcer, "zendure", &state, false);
+        assert_eq!(docs(&p), first);
+
+        announcer.reset();
+        publish_charger(&p, &announcer, "zendure", &state, false);
+        assert_eq!(docs(&p), 2 * first);
+    }
+
+    #[test]
+    fn existing_sensors_keep_their_state_class() {
+        let power = config_of_message(&DECISION_POWER.discovery("zendure"));
+        assert_eq!(power["state_class"], "measurement");
+        let mode = config_of_message(&DECISION_MODE.discovery("zendure"));
+        assert!(mode.get("state_class").is_none());
+    }
+
+    fn config_of_message(message: &Message) -> serde_json::Value {
+        serde_json::from_str(&message.payload).unwrap()
     }
 
     /// A binary sensor, so the payload is HA's `ON`/`OFF`, not `true`/`false`.
