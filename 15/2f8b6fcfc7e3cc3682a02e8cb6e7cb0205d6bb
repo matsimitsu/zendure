@@ -1,0 +1,44 @@
+src/ceiling.rs
+  s_37980e1d12b6a9::t_e9172814e1a2de 7-9,17-19,27-30,37-61,63,68-71,73,79,81,86-92,94-96
+src/simulation.rs
+  s_37980e1d12b6a9::t_fe4c84dd947d19 423
+src/zendure/mod.rs
+  s_37980e1d12b6a9::t_7d605bd24517fb 273
+  s_37980e1d12b6a9::t_fe4c84dd947d19 566
+src/run.rs
+  s_37980e1d12b6a9::t_6cdd2390be87e9 943
+  s_37980e1d12b6a9::t_859ec78be1b484 979
+  s_37980e1d12b6a9::t_ab8237d4ae6061 227-229
+  s_37980e1d12b6a9::t_969c50f7e74c97 206
+  s_37980e1d12b6a9::t_4d084c304a6e82 976-978
+src/registry.rs
+  s_37980e1d12b6a9::t_16184dc83d0c46 69
+src/device.rs
+  s_37980e1d12b6a9::t_ea03d5458f34b0 245,256,263-271,279-289
+  s_37980e1d12b6a9::t_81c7e0a57f165e 73-75
+src/run_tests.rs
+  s_37980e1d12b6a9::t_6b9cc31fce5783 496,523,543
+  s_37980e1d12b6a9::t_fe4c84dd947d19 455
+src/scan_tests.rs
+  s_37980e1d12b6a9::t_fe4c84dd947d19 248
+src/units.rs
+  s_37980e1d12b6a9::t_392337fe14cda8 769
+src/ceiling_tests.rs
+  s_37980e1d12b6a9::t_de1fb5b9405fe0 10,13,63,65,84-101,103,113-146
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "152f8b6fcfc7e3cc3682a02e8cb6e7cb0205d6bb",
+  "prompts": {},
+  "sessions": {
+    "s_37980e1d12b6a9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3ad34704-64be-47af-a7a2-4307c0988c9d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Beekman <robert@matsimitsu.nl>"
+    }
+  }
+}
