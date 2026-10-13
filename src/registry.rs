@@ -23,6 +23,7 @@ use crate::device::{
 };
 use crate::scan::Sampler;
 use crate::simulation::VirtualBattery;
+use crate::units::Soc;
 use crate::world::DeviceId;
 use crate::zendure::ZendureClient;
 
@@ -44,6 +45,32 @@ impl Battery {
     /// routed through `actuate`.
     pub fn zendure(ip: &str, sn: String, poll_interval: Duration) -> Self {
         Battery::Zendure(ZendureClient::new(ip, sn, poll_interval))
+    }
+
+    /// Whether the device keeps a charge ceiling of its own that stops it
+    /// short of what the controller allows. A virtual battery has none: it
+    /// charges to whatever it is commanded.
+    pub fn holds_charge_ceiling(&self) -> bool {
+        match self {
+            Battery::Zendure(_) => true,
+            Battery::Virtual(_) => false,
+            #[cfg(test)]
+            Battery::Recording(_) => true,
+        }
+    }
+
+    /// Sets the device's own charge ceiling. A no-op for a device that
+    /// [doesn't hold one](Self::holds_charge_ceiling).
+    pub async fn write_charge_ceiling(&self, max: Soc) -> Result<(), String> {
+        match self {
+            Battery::Zendure(client) => client.write_soc_set(max).await.map_err(|e| e.to_string()),
+            Battery::Virtual(_) => Ok(()),
+            #[cfg(test)]
+            Battery::Recording(battery) => {
+                battery.write_charge_ceiling(max);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -231,6 +258,14 @@ impl Devices {
         self.batteries
             .iter()
             .map(|(id, battery)| (id.clone(), battery.clone()))
+    }
+
+    /// The devices with a charge ceiling of their own to keep in step.
+    pub fn ceiling_holders(&self) -> impl Iterator<Item = DeviceId> + '_ {
+        self.batteries
+            .iter()
+            .filter(|(_, battery)| battery.holds_charge_ceiling())
+            .map(|(id, _)| id.clone())
     }
 
     /// The lowest id, mirroring `World::battery` so the registry and world agree

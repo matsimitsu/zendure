@@ -267,11 +267,10 @@ impl ZendureClient {
 
     /// The device's own charge ceiling (`socSet`, tenths of a percent, RW,
     /// documented range 700-1000) — distinct from `write_power_caps`, which
-    /// writes the model's rated limits. This is an operator choice
-    /// (`[tuning] max_soc`), and raising that config value alone changes
-    /// nothing: the device stops charging and sets `socLimit: 1` from
-    /// whatever `socSet` last held, regardless of what `target_mode` allows.
-    /// Written only at startup, the same policy `write_power_caps` follows.
+    /// writes the model's rated limits. The device stops charging and sets
+    /// `socLimit: 1` at whatever `socSet` last held, regardless of what
+    /// `target_mode` allows, so `ceiling::sync` rewrites it whenever the
+    /// controller's max SOC for the day changes.
     pub async fn write_soc_set(&self, max_soc: Soc) -> Result<(), ZendureError> {
         self.ensure_ram_mode().await?;
         self.write_properties(serde_json::json!({

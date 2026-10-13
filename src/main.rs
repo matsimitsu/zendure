@@ -4,6 +4,7 @@ mod announce;
 mod backpressure;
 mod battery;
 mod car_battery;
+mod ceiling;
 mod charger;
 mod cli;
 mod clock;

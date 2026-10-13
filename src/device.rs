@@ -238,6 +238,7 @@ pub(crate) struct RecordingBattery {
     id: DeviceId,
     applied: std::sync::Mutex<Vec<Command>>,
     fails_at: Option<usize>,
+    ceilings: std::sync::Mutex<Vec<Soc>>,
 }
 
 #[cfg(test)]
@@ -247,6 +248,7 @@ impl RecordingBattery {
             id: DeviceId::new(id),
             applied: std::sync::Mutex::new(Vec::new()),
             fails_at: None,
+            ceilings: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -255,11 +257,20 @@ impl RecordingBattery {
             id: DeviceId::new(id),
             applied: std::sync::Mutex::new(Vec::new()),
             fails_at: Some(index),
+            ceilings: std::sync::Mutex::new(Vec::new()),
         }
     }
 
     pub(crate) fn applied(&self) -> Vec<Command> {
         self.applied.lock().unwrap().clone()
+    }
+
+    pub(crate) fn write_charge_ceiling(&self, max: Soc) {
+        self.ceilings.lock().unwrap().push(max);
+    }
+
+    pub(crate) fn ceilings(&self) -> Vec<Soc> {
+        self.ceilings.lock().unwrap().clone()
     }
 }
 
