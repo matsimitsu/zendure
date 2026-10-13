@@ -1,0 +1,44 @@
+README.md
+  s_37980e1d12b6a9::t_92e2f520b9c537 22
+src/run.rs
+  s_37980e1d12b6a9::t_dbf152c69857e7 14,891,971-973
+  s_37980e1d12b6a9::t_9060273145aadf 29
+  s_37980e1d12b6a9::t_f9f6f56e5bfd9f 974
+src/ceiling_tests.rs
+  s_37980e1d12b6a9::t_bb94b68c541663 106-120
+  s_37980e1d12b6a9::t_92e2f520b9c537 29-32
+  s_37980e1d12b6a9::t_5714b70bc6a55e 1-28,33-105,121-124
+CLAUDE.md
+  s_37980e1d12b6a9::t_92e2f520b9c537 62
+src/registry.rs
+  s_37980e1d12b6a9::t_fac7d5b7a952cf 26,49-74,263-269
+  s_37980e1d12b6a9::t_77af40f57efad9 270
+src/device.rs
+  s_37980e1d12b6a9::t_fac7d5b7a952cf 241,268,272
+  s_37980e1d12b6a9::t_30c5909d986229 251,260,267,269-271,273-274
+src/zendure/mod.rs
+  s_37980e1d12b6a9::t_92e2f520b9c537 270-273
+src/ceiling.rs
+  s_37980e1d12b6a9::t_92e2f520b9c537 26-29
+  s_37980e1d12b6a9::t_506a78fa35fd79 1-25,30-91
+src/main.rs
+  s_37980e1d12b6a9::t_30c5909d986229 7
+src/units.rs
+  s_37980e1d12b6a9::t_30c5909d986229 769
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "089591cb440f629a3fac2038365ed930b06a3273",
+  "prompts": {},
+  "sessions": {
+    "s_37980e1d12b6a9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3ad34704-64be-47af-a7a2-4307c0988c9d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Beekman <robert@matsimitsu.nl>"
+    }
+  }
+}
