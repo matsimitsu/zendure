@@ -59,6 +59,7 @@ crossed a boundary without anyone saying what the conversion meant.
 - `src/engine.rs` — The event fold: `step(&Event) -> Step`
 - `src/controller.rs` — Control logic (charge/discharge/idle decisions)
 - `src/allocate.rs` — One objective decision turned into per-device commands: which box does it
+- `src/ceiling.rs` — The device's own charge ceiling (`socSet`) kept in step with the controller's max SOC for the day: which box needs a write, and the retry
 - `src/command.rs` — What gets sent to the device, split from the decision
 - `src/device.rs` — What a device is: rated limits and the capability traits an adapter implements
 - `src/registry.rs` — Every battery this process drives, as an enum, and the loop that reaches the right one

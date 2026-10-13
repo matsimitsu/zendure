@@ -11,6 +11,7 @@ use std::time::Duration;
 use crate::allocate::Directive;
 use crate::announce::Announcer;
 use crate::car_battery;
+use crate::ceiling::{self, CeilingSync};
 use crate::charger::{Charger, ChargerMonitor, ChargerReading};
 use crate::clock::Clock;
 use crate::config::Config;
@@ -25,7 +26,7 @@ use crate::mqtt::{self, MqttPublisher, PublisherTask};
 use crate::prediction;
 use crate::prices;
 use crate::publish::{NullPublisher, Publisher};
-use crate::registry::{self, Battery, Devices};
+use crate::registry::{self, Devices};
 use crate::scan::{self, Delivery, Failures, Inbox, TickSeq};
 use crate::source::{self, MeterSample};
 use crate::units::{Soc, Timestamp, WattHours};
@@ -586,18 +587,6 @@ pub async fn run(
     })?;
     journal.capture(reading.raw.as_ref());
 
-    // The device's own charge ceiling, from `[tuning] max_soc` — see
-    // `write_soc_set`: `prepare()`'s cap write is the model's rated limits,
-    // this is the operator's own choice, which only `run.rs` has (a
-    // `BatteryMonitor` doesn't take config, and a virtual/simulated device
-    // has no such device-side concept at all). Best-effort, the same policy
-    // `write_power_caps` follows.
-    if let Battery::Zendure(client) = primary
-        && let Err(e) = client.write_soc_set(config.max_soc).await
-    {
-        tracing::warn!("Failed to write socSet at startup: {e}");
-    }
-
     let BatteryReading {
         state: battery_state,
         telemetry: initial_telemetry,
@@ -899,6 +888,7 @@ pub async fn run(
     // the first tick, so that tick finds filled slots.
     let mut round = TickSeq::FIRST.next();
     let mut charger = ChargerTick::default();
+    let mut ceilings = CeilingSync::new(devices.ceiling_holders());
     requests.send_modify(|seq| *seq = round);
 
     loop {
@@ -977,6 +967,10 @@ pub async fn run(
                         tracing::debug!("Skipped a round: not every source answered it")
                     }
                 }
+
+                // After the decision, so a box that doesn't answer delays only
+                // the ceiling, never the setpoint.
+                ceiling::sync(&devices, &mut ceilings, limits.max, at.now).await;
 
                 // Asked for after this round's writes have landed, so every
                 // sample the next tick reads is one round old.
