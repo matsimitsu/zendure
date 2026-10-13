@@ -1,0 +1,19 @@
+.claude/skills/epiq/SKILL.md
+  s_c836ca053e8b34::t_cabb9f50ea96ff 1-37
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "df0dc63e17e7002facda0a975c21303f3f1c91fc",
+  "prompts": {},
+  "sessions": {
+    "s_c836ca053e8b34": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0f33bd24-df89-4b9f-9991-44298077bc64",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Beekman <robert@matsimitsu.nl>"
+    }
+  }
+}
