@@ -766,6 +766,7 @@ pub struct Elapsed(i64);
 impl Elapsed {
     /// The smallest step a `Timestamp` can take.
     pub const MILLISECOND: Elapsed = Elapsed(1);
+    /// Named so a span counted in minutes never appears as a bare `60_000`.
     pub const MINUTE: Elapsed = Elapsed(60_000);
     pub const HOUR: Elapsed = Elapsed(3_600_000);
 

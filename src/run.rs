@@ -203,6 +203,7 @@ impl Tick<'_> {
         &self,
         engine: &mut Engine,
         telemetry: &mut PollTelemetry,
+        ceilings: &mut CeilingSync,
         at: Clock,
         deliveries: Vec<(DeviceId, Delivery<BatteryReading>)>,
     ) -> Fleet {
@@ -223,6 +224,9 @@ impl Tick<'_> {
             };
 
             telemetry.record(&reading);
+            if let Some(soc_set) = reading.telemetry.soc_set {
+                ceilings.observe(&id, soc_set);
+            }
             let limits = engine.soc_limits(at.weekday, telemetry.min_soc);
             let figures = telemetry.publish(
                 self.publisher,
@@ -936,6 +940,7 @@ pub async fn run(
                 let fleet = tick_context.fold_devices(
                     &mut engine,
                     &mut telemetry,
+                    &mut ceilings,
                     at,
                     inbox.take_devices(round, scan_now),
                 );
@@ -968,8 +973,10 @@ pub async fn run(
                     }
                 }
 
-                // After the decision, so a box that doesn't answer delays only
-                // the ceiling, never the setpoint.
+                // After the decision, so a box that doesn't answer never delays
+                // this tick's setpoint. It still holds up the next round's
+                // request: at most one HTTP timeout a minute (CONTROL-2's
+                // pause), plus the wait for RAM mode if the box is in flash.
                 ceiling::sync(&devices, &mut ceilings, limits.max, at.now).await;
 
                 // Asked for after this round's writes have landed, so every

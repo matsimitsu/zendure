@@ -66,10 +66,7 @@ impl Battery {
             Battery::Zendure(client) => client.write_soc_set(max).await.map_err(|e| e.to_string()),
             Battery::Virtual(_) => Ok(()),
             #[cfg(test)]
-            Battery::Recording(battery) => {
-                battery.write_charge_ceiling(max);
-                Ok(())
-            }
+            Battery::Recording(battery) => battery.write_charge_ceiling(max),
         }
     }
 }
