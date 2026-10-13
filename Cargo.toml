@@ -53,3 +53,14 @@ http = "1"
 
 [build-dependencies]
 grass = { version = "0.13", default-features = false }
+
+[profile.dev]
+# Line tables keep file:line in panic backtraces. Full debuginfo multiplies the
+# per-codegen-unit object files macOS keeps beside every test binary
+# (`split-debuginfo = "unpacked"`), which is what filled `target/` and every
+# worktree's copy of it.
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+# Nobody steps through a dependency in a debugger.
+debug = false
