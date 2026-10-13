@@ -70,6 +70,9 @@ pub struct BatteryTelemetry {
     pub pack_temps: Vec<PackTemperature>,
     pub enclosure_temp: Option<DeciKelvin>,
     pub min_soc: Option<Soc>,
+    /// The device's own charge ceiling, which `ceiling::sync` keeps in step
+    /// with the controller's max rather than the engine reading it.
+    pub soc_set: Option<Soc>,
 }
 
 /// One pack as a poll found it, for display alongside the box-level figures.
@@ -239,6 +242,7 @@ pub(crate) struct RecordingBattery {
     applied: std::sync::Mutex<Vec<Command>>,
     fails_at: Option<usize>,
     ceilings: std::sync::Mutex<Vec<Soc>>,
+    ceiling_fails_at: Option<usize>,
 }
 
 #[cfg(test)]
@@ -249,15 +253,22 @@ impl RecordingBattery {
             applied: std::sync::Mutex::new(Vec::new()),
             fails_at: None,
             ceilings: std::sync::Mutex::new(Vec::new()),
+            ceiling_fails_at: None,
         }
     }
 
     pub(crate) fn failing_at(id: &str, index: usize) -> Self {
         RecordingBattery {
-            id: DeviceId::new(id),
-            applied: std::sync::Mutex::new(Vec::new()),
             fails_at: Some(index),
-            ceilings: std::sync::Mutex::new(Vec::new()),
+            ..RecordingBattery::new(id)
+        }
+    }
+
+    /// Fails the `index`th charge-ceiling write, as `failing_at` does a command.
+    pub(crate) fn failing_ceiling_at(id: &str, index: usize) -> Self {
+        RecordingBattery {
+            ceiling_fails_at: Some(index),
+            ..RecordingBattery::new(id)
         }
     }
 
@@ -265,8 +276,17 @@ impl RecordingBattery {
         self.applied.lock().unwrap().clone()
     }
 
-    pub(crate) fn write_charge_ceiling(&self, max: Soc) {
-        self.ceilings.lock().unwrap().push(max);
+    /// Records every attempt, the failed one included.
+    pub(crate) fn write_charge_ceiling(&self, max: Soc) -> Result<(), String> {
+        let index = {
+            let mut ceilings = self.ceilings.lock().unwrap();
+            ceilings.push(max);
+            ceilings.len() - 1
+        };
+        if self.ceiling_fails_at == Some(index) {
+            return Err("device unreachable".to_string());
+        }
+        Ok(())
     }
 
     pub(crate) fn ceilings(&self) -> Vec<Soc> {

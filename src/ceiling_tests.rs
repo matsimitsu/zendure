@@ -7,9 +7,10 @@ use crate::clock::Clock;
 use crate::config::{Config, SessionConfig};
 use crate::controller::Controller;
 use crate::device::RecordingBattery;
+use crate::fixtures::journey::{NOW_MS, at};
 use crate::registry::{self, Battery};
 
-const NOW_MS: i64 = 1_757_000_000_000;
+const DAY_SECS: i64 = 86_400;
 
 /// Production's tuning: kept at 95 for longevity, full on Mondays.
 fn controller() -> Controller {
@@ -39,10 +40,6 @@ fn ceilings_of(devices: &Devices, id: &str) -> Vec<Soc> {
     }
 }
 
-fn at(offset_ms: i64) -> Timestamp {
-    Timestamp::from_millis(NOW_MS + offset_ms)
-}
-
 /// The device stops at the `socSet` it holds and reports `socLimit: 1`, which
 /// the controller honours, so the balance day's 100% is reached by raising
 /// `socSet` on every pack — a restart on the balance day included.
@@ -63,9 +60,9 @@ async fn the_ceiling_is_written_once_per_target_change_not_every_tick() {
     let mut ceilings = CeilingSync::new(devices.ceiling_holders());
 
     let days = [Weekday::Sun, Weekday::Mon, Weekday::Tue];
-    for (day, weekday) in days.into_iter().enumerate() {
+    for (day, weekday) in (0..).zip(days) {
         for tick in 0..5 {
-            let now = at(day as i64 * 86_400_000 + tick * 5_000);
+            let now = at(day * DAY_SECS + tick * 5);
             sync(&devices, &mut ceilings, target(weekday), now).await;
         }
     }
@@ -84,11 +81,26 @@ fn a_failed_write_is_retried_after_a_pause_not_every_tick() {
     assert_eq!(ceilings.due(Soc::FULL, at(0)), vec![pack.clone()]);
     ceilings.record(&pack, Soc::FULL, at(0), false);
 
-    assert!(ceilings.due(Soc::FULL, at(5_000)).is_empty());
-    assert_eq!(ceilings.due(Soc::FULL, at(60_000)), vec![pack.clone()]);
+    assert!(ceilings.due(Soc::FULL, at(5)).is_empty());
+    assert_eq!(ceilings.due(Soc::FULL, at(60)), vec![pack.clone()]);
 
-    ceilings.record(&pack, Soc::FULL, at(60_000), true);
-    assert!(ceilings.due(Soc::FULL, at(600_000)).is_empty());
+    ceilings.record(&pack, Soc::FULL, at(60), true);
+    assert!(ceilings.due(Soc::FULL, at(600)).is_empty());
+}
+
+/// The same pause, through the adapter's own `Err`.
+#[tokio::test]
+async fn a_write_the_device_refuses_is_sent_again_after_the_pause() {
+    let devices = Devices::new([Battery::Recording(RecordingBattery::failing_ceiling_at(
+        "pack-a", 0,
+    ))]);
+    let mut ceilings = CeilingSync::new(devices.ceiling_holders());
+
+    for secs in (0..=600).step_by(5) {
+        sync(&devices, &mut ceilings, Soc::FULL, at(secs)).await;
+    }
+
+    assert_eq!(ceilings_of(&devices, "pack-a"), vec![Soc::FULL, Soc::FULL]);
 }
 
 /// A new target is a different write, not a retry of the one that failed.
@@ -98,7 +110,40 @@ fn a_target_change_after_a_failure_is_written_at_once() {
     let mut ceilings = CeilingSync::new([pack.clone()]);
     ceilings.record(&pack, Soc::FULL, at(0), false);
 
-    assert_eq!(ceilings.due(Soc::new(95), at(5_000)), vec![pack]);
+    assert_eq!(ceilings.due(Soc::new(95), at(5)), vec![pack]);
+}
+
+/// A pack that restarts onto its flash value no longer holds what landed, and
+/// only its own report says so. One that clamps the value keeps disagreeing,
+/// so the rewrite waits out the pause rather than following every poll.
+#[tokio::test]
+async fn a_ceiling_the_device_reverted_is_rewritten_after_the_pause() {
+    let devices = recording(&["pack-a"]);
+    let pack = DeviceId::new("pack-a");
+    let mut ceilings = CeilingSync::new(devices.ceiling_holders());
+    sync(&devices, &mut ceilings, Soc::FULL, at(0)).await;
+
+    for secs in (5..=125).step_by(5) {
+        ceilings.observe(&pack, Soc::from_tenths(950));
+        sync(&devices, &mut ceilings, Soc::FULL, at(secs)).await;
+    }
+
+    assert_eq!(ceilings_of(&devices, "pack-a"), vec![Soc::FULL; 3]);
+}
+
+#[tokio::test]
+async fn a_device_reporting_the_target_is_left_alone() {
+    let devices = recording(&["pack-a"]);
+    let pack = DeviceId::new("pack-a");
+    let mut ceilings = CeilingSync::new(devices.ceiling_holders());
+    sync(&devices, &mut ceilings, Soc::FULL, at(0)).await;
+
+    for secs in (5..=600).step_by(5) {
+        ceilings.observe(&pack, Soc::from_tenths(1000));
+        sync(&devices, &mut ceilings, Soc::FULL, at(secs)).await;
+    }
+
+    assert_eq!(ceilings_of(&devices, "pack-a"), vec![Soc::FULL]);
 }
 
 #[test]

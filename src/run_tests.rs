@@ -452,6 +452,7 @@ fn battery_reading() -> BatteryReading {
             pack_temps: Vec::new(),
             enclosure_temp: None,
             min_soc: None,
+            soc_set: None,
         },
         raw: None,
     }
@@ -492,6 +493,7 @@ async fn a_device_found_down_is_written_to_once_per_outage() {
 
     let announcer = Announcer::new();
     let mut telemetry = PollTelemetry::new(config.rte_state_path.clone(), Vec::new(), Soc::ZERO);
+    let mut ceilings = CeilingSync::new(devices.ceiling_holders());
     let mut engine = Engine::new(
         controller::Controller::from_config(&config, &Clock::now(config.timezone)),
         World::new(),
@@ -518,6 +520,7 @@ async fn a_device_found_down_is_written_to_once_per_outage() {
     let fleet = tick.fold_devices(
         &mut engine,
         &mut telemetry,
+        &mut ceilings,
         at,
         inbox.take_devices(round, Instant::now()),
     );
@@ -537,6 +540,7 @@ async fn a_device_found_down_is_written_to_once_per_outage() {
     let fleet = tick.fold_devices(
         &mut engine,
         &mut telemetry,
+        &mut ceilings,
         at,
         inbox.take_devices(round, Instant::now()),
     );

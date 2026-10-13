@@ -270,7 +270,7 @@ impl ZendureClient {
     /// writes the model's rated limits. The device stops charging and sets
     /// `socLimit: 1` at whatever `socSet` last held, regardless of what
     /// `target_mode` allows, so `ceiling::sync` rewrites it whenever the
-    /// controller's max SOC for the day changes.
+    /// controller's max SOC for the day changes or a poll finds it reverted.
     pub async fn write_soc_set(&self, max_soc: Soc) -> Result<(), ZendureError> {
         self.ensure_ram_mode().await?;
         self.write_properties(serde_json::json!({
@@ -563,6 +563,7 @@ fn reading_from_report(
             pack_temps,
             enclosure_temp: report.properties.hyper_tmp.map(DeciKelvin),
             min_soc: report.properties.min_soc.map(Soc::from_tenths),
+            soc_set: report.properties.soc_set.map(Soc::from_tenths),
         },
         raw,
     }

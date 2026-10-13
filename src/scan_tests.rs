@@ -245,6 +245,7 @@ fn battery_reading() -> BatteryReading {
             pack_temps: Vec::new(),
             enclosure_temp: None,
             min_soc: None,
+            soc_set: None,
         },
         raw: None,
     }
