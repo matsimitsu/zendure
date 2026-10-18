@@ -32,6 +32,7 @@ use reqwest::header::{
 use serde_json::Value;
 
 use super::{CarBatteryError, CarBatterySource};
+use crate::fetch::{self, Connection};
 use crate::units::Soc;
 
 const BASE_URL: &str = "https://eu-data-act.drivesomethinggreater.com";
@@ -58,6 +59,12 @@ struct RedirectResult {
     history: Vec<String>,
 }
 
+/// The login is a multi-request OIDC flow against a few hosts; keeping
+/// connections alive spares it a TLS handshake per hop.
+const CONNECTION: Connection = Connection::KeepAlive;
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub struct VwPortalClient {
     http: reqwest::Client,
     email: String,
@@ -80,9 +87,8 @@ impl VwPortalClient {
         country: String,
         language: String,
     ) -> Self {
-        let http = reqwest::Client::builder()
+        let http = fetch::client(CONNECTION, REQUEST_TIMEOUT)
             .cookie_store(true)
-            .timeout(Duration::from_secs(30))
             // `follow_redirects` below walks the `Location` chain by hand to
             // build `history` for `passed_portal_callback`; reqwest's default
             // policy would follow it first and hide every intermediate hop.
@@ -266,7 +272,7 @@ impl VwPortalClient {
             .headers(headers.clone())
             .send()
             .await
-            .map_err(|e| CarBatteryError::Request(e.to_string()))?;
+            .map_err(|e| CarBatteryError::Request(fetch::error_chain(&e)))?;
         self.follow_redirects(url.to_string(), resp, headers).await
     }
 
@@ -283,7 +289,7 @@ impl VwPortalClient {
             .form(fields)
             .send()
             .await
-            .map_err(|e| CarBatteryError::Request(e.to_string()))?;
+            .map_err(|e| CarBatteryError::Request(fetch::error_chain(&e)))?;
         self.follow_redirects(url.to_string(), resp, headers).await
     }
 
@@ -320,7 +326,7 @@ impl VwPortalClient {
                     .headers(headers.clone())
                     .send()
                     .await
-                    .map_err(|e| CarBatteryError::Request(e.to_string()))?;
+                    .map_err(|e| CarBatteryError::Request(fetch::error_chain(&e)))?;
                 continue;
             }
             let status_code = status.as_u16();
@@ -328,7 +334,7 @@ impl VwPortalClient {
             let body = resp
                 .text()
                 .await
-                .map_err(|e| CarBatteryError::Request(e.to_string()))?;
+                .map_err(|e| CarBatteryError::Request(fetch::error_chain(&e)))?;
             return Ok(RedirectResult {
                 final_url,
                 status: status_code,
@@ -353,7 +359,7 @@ impl VwPortalClient {
             .headers(headers.clone())
             .send()
             .await
-            .map_err(|e| CarBatteryError::Request(e.to_string()))?;
+            .map_err(|e| CarBatteryError::Request(fetch::error_chain(&e)))?;
         if resp.status() == StatusCode::UNAUTHORIZED || resp.status() == StatusCode::FORBIDDEN {
             self.logged_in = false;
             self.do_login().await?;
@@ -363,7 +369,7 @@ impl VwPortalClient {
                 .headers(headers)
                 .send()
                 .await
-                .map_err(|e| CarBatteryError::Request(e.to_string()));
+                .map_err(|e| CarBatteryError::Request(fetch::error_chain(&e)));
         }
         Ok(resp)
     }
@@ -437,7 +443,7 @@ impl VwPortalClient {
         resp.bytes()
             .await
             .map(|b| b.to_vec())
-            .map_err(|e| CarBatteryError::Request(e.to_string()))
+            .map_err(|e| CarBatteryError::Request(fetch::error_chain(&e)))
     }
 
     /// The metadata endpoint's `Identifier`, cached after the first call.
@@ -507,7 +513,7 @@ async fn json_body(resp: reqwest::Response) -> Result<Value, CarBatteryError> {
     let text = resp
         .text()
         .await
-        .map_err(|e| CarBatteryError::Request(e.to_string()))?;
+        .map_err(|e| CarBatteryError::Request(fetch::error_chain(&e)))?;
     serde_json::from_str(&text).map_err(|e| CarBatteryError::Parse(format!("invalid JSON: {e}")))
 }
 

@@ -9,7 +9,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::device::{PollError, RawCapture};
-use crate::scan::http_client;
+use crate::fetch::{self, Connection};
+use crate::scan::request_timeout;
 use crate::units::validating_deserialize_result;
 
 use super::{MeterObservation, MeterSample};
@@ -85,6 +86,10 @@ validating_deserialize_result!(SolarPhase, String, |s: String| SolarPhase::parse
 const RAW_KIND: &str = "shelly";
 
 /// Reads the `em:0` component over the meter's local RPC endpoint.
+/// Polled every scan period on the local network, where a handshake per
+/// request is pure overhead.
+const CONNECTION: Connection = Connection::KeepAlive;
+
 pub struct ShellyClient {
     http: reqwest::Client,
     status_url: String,
@@ -94,7 +99,9 @@ pub struct ShellyClient {
 impl ShellyClient {
     pub fn new(ip: &str, solar_phase: SolarPhase, scan_period: Duration) -> Self {
         Self {
-            http: http_client(scan_period),
+            http: fetch::client(CONNECTION, request_timeout(scan_period))
+                .build()
+                .expect("failed to create HTTP client"),
             status_url: format!("http://{ip}/rpc/EM.GetStatus?id=0"),
             solar_phase,
         }

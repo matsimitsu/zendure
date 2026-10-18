@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::{FORECAST_PERIOD, Prediction};
-use crate::fetch::{FetchError, fetch_parsed};
+use crate::fetch::{self, Connection, FetchError, fetch_parsed};
 use crate::units::{Elapsed, SolarForecastPoint, SolarPower, Timestamp};
 
 /// Deserialize-only, like `ZendureReport` — this crate never writes to
@@ -41,6 +41,12 @@ const FORECAST_HOURS: u32 = 48;
 /// Must name [`FORECAST_PERIOD`].
 const PERIOD: &str = "PT30M";
 
+/// A fresh connection per fetch: requests come hours apart, so a pooled
+/// connection would be long dead by the next one.
+const CONNECTION: Connection = Connection::PerRequest;
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
 pub struct SolcastForecaster {
     http: reqwest::Client,
     api_key: String,
@@ -50,8 +56,7 @@ pub struct SolcastForecaster {
 
 impl SolcastForecaster {
     pub fn new(api_key: String, site_east: String, site_west: String) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
+        let http = fetch::client(CONNECTION, REQUEST_TIMEOUT)
             .build()
             .expect("failed to create HTTP client");
         SolcastForecaster {

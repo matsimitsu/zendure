@@ -13,8 +13,9 @@ use crate::device::{
     AC2400_PLUS, BatteryController, BatteryMonitor, BatteryReading, BatterySpec, BatteryTelemetry,
     PackStatus, PollError, RawCapture,
 };
+use crate::fetch::{self, Connection};
 use crate::models::{PackData, StorageMode, ZendureReport, ZendureWriteRequest};
-use crate::scan::http_client;
+use crate::scan::request_timeout;
 use crate::units::{BatteryPower, DeciKelvin, PackTemperature, Soc, WattHours, Watts};
 use crate::world::DeviceId;
 
@@ -91,7 +92,9 @@ enum Wire {
 impl Wire {
     fn http(ip: &str, poll_interval: Duration) -> Self {
         Wire::Http {
-            http: http_client(poll_interval),
+            http: fetch::client(CONNECTION, request_timeout(poll_interval))
+                .build()
+                .expect("failed to create HTTP client"),
             base_url: format!("http://{ip}"),
         }
     }
@@ -165,6 +168,10 @@ impl Fake {
             .expect("test queued no post() response")
     }
 }
+
+/// Polled every interval on the local network, where a handshake per
+/// request is pure overhead.
+const CONNECTION: Connection = Connection::KeepAlive;
 
 pub struct ZendureClient {
     wire: Wire,
