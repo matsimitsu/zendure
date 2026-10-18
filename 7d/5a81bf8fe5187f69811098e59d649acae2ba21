@@ -1,0 +1,23 @@
+README.md
+  s_e15f22bbe99ee3::t_26b9dc121773c5 796-800
+src/prediction/mod.rs
+  s_e15f22bbe99ee3::t_dd149f96bb2bea 176-177,278-279
+src/schedule.rs
+  s_e15f22bbe99ee3::t_e6491ee88aa97a 165
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7d5a81bf8fe5187f69811098e59d649acae2ba21",
+  "prompts": {},
+  "sessions": {
+    "s_e15f22bbe99ee3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "468df55a-ad8f-4dbb-ab48-a6827886cdd3",
+        "model": "unknown"
+      },
+      "human_author": "Robert Beekman <robert@matsimitsu.nl>"
+    }
+  }
+}
