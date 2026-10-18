@@ -173,8 +173,8 @@ impl ForecastTracker {
     }
 
     /// Records a failed fetch for `anchor`. Persists only when the retries ran
-    /// out, because that settles the anchor; a pending retry is not persisted,
-    /// since a restart fetches any anchor that isn't settled anyway.
+    /// out, because that settles the anchor. A pending retry is not persisted:
+    /// a restart fetches the anchor again, both sites included.
     pub fn mark_failed(
         &mut self,
         now: &LocalNow,
@@ -275,7 +275,8 @@ const CHECK_INTERVAL: Duration = Duration::from_secs(60);
 /// a 06:00 hiccup would otherwise leave the morning without a forecast. Two
 /// retries 10 minutes apart ride out a network hiccup, and the per-site retry
 /// (`SolcastForecaster` keeps the site that answered and refetches only the
-/// other) keeps successful requests within the 10/day cap.
+/// other) keeps successful requests within the 10/day cap, short of a restart
+/// mid-retry, which forgets the site that answered.
 const RETRY_POLICY: RetryPolicy = RetryPolicy {
     delay: Duration::from_secs(10 * 60),
     attempts: 2,

@@ -793,10 +793,11 @@ retry fetches only the site that has not yet answered for that anchor. A
 retry is dropped when the next anchor comes due, or when it would pass
 midnight, and a warning says when the retries ran out. A 4xx (a bad key, the
 daily cap) or an undecodable answer is not retried: it warns and waits for
-the next anchor. Only a successful response spends the account's 10
-requests/day, so the budget counts successes, and the persisted anchor list
-holds the anchors that are settled: fetched, or out of retries. A failed
-fetch leaves the cache as it was. Every
+the next anchor. A failure that may clear up does not spend an anchor, so the
+persisted anchor list holds only settled anchors: fetched, refused, or out of
+retries. A pending retry is not persisted: after a restart the anchor is due
+again and both sites are asked, so a restart mid-retry can cost one request
+beyond the 10/day. A failed fetch leaves the cache as it was. Every
 successful fetch is also recorded to the journal (`solar_forecast` events),
 independent of the dashboard's own today-only cache, so forecast history
 survives past midnight for future historical views. `kind = "simulated"`

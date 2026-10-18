@@ -162,7 +162,7 @@ pub struct AnchorSchedule {
     date: NaiveDate,
     settled: BTreeSet<TimeOfDay>,
     poll_times: Vec<TimeOfDay>,
-    // Not persisted: a restart fetches any anchor that isn't settled anyway.
+    // Not persisted: a restart fetches any anchor that isn't settled.
     pending: Option<PendingRetry>,
 }
 
