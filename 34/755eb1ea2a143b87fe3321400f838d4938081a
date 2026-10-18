@@ -1,0 +1,21 @@
+Cargo.lock
+  s_e6c2bf8bedbc48::t_f62479eef44406 2460
+Cargo.toml
+  s_e6c2bf8bedbc48::t_43c0f55a14846c 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "34755eb1ea2a143b87fe3321400f838d4938081a",
+  "prompts": {},
+  "sessions": {
+    "s_e6c2bf8bedbc48": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "636cff90-f200-4538-a4cf-a3c773942e5e",
+        "model": "unknown"
+      },
+      "human_author": "Robert Beekman <robert@matsimitsu.nl>"
+    }
+  }
+}
