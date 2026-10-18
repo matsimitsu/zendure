@@ -231,6 +231,14 @@ fn ascii_decodes_high_byte_first_and_trims_padding() {
 }
 
 #[test]
+fn ascii_reads_one_character_per_register() {
+    // Registers 190+10 as an EVC04 answered them on 2026-10-18.
+    let brand = [0x56, 0x45, 0x53, 0x54, 0x45, 0x4c, 0, 0, 0, 0];
+
+    assert_eq!(decode_ascii(&brand), "VESTEL");
+}
+
+#[test]
 fn the_capture_maps_each_read_start_to_its_words() {
     let mut blocks = RegisterBlocks::default();
     blocks.insert(1000, vec![2, 1, 0, 0, 3]);

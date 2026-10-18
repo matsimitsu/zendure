@@ -136,12 +136,17 @@ pub fn total_energy(blocks: &RegisterBlocks) -> Result<WattHours, String> {
     ))
 }
 
-/// Two characters per register, high byte first, padded with NULs or spaces.
+/// High byte first, NULs dropped wherever they fall. The EVC04 on hand stores
+/// one character per register in the low byte (`\0V\0E\0S...`), where evcc's
+/// map assumed two; dropping every NUL reads both packings, and a NUL left
+/// mid-string would cut the journald line at the first character.
 pub fn decode_ascii(words: &[u16]) -> String {
-    let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_be_bytes()).collect();
-    String::from_utf8_lossy(&bytes)
-        .trim_matches(|c: char| c == '\0' || c.is_whitespace())
-        .to_string()
+    let bytes: Vec<u8> = words
+        .iter()
+        .flat_map(|word| word.to_be_bytes())
+        .filter(|&byte| byte != 0)
+        .collect();
+    String::from_utf8_lossy(&bytes).trim().to_string()
 }
 
 /// Register 1000 counts through OCPP's states in their spec order.
