@@ -25,7 +25,9 @@ use serde::{Deserialize, Serialize};
 use crate::config::PredictionConfig;
 use crate::fetch::FetchError;
 use crate::journal::Journal;
-use crate::schedule::{AnchorKey, AnchorSchedule, LocalNow, TimeOfDay};
+use crate::schedule::{
+    AnchorKey, AnchorSchedule, Failure, Fetch, LocalNow, RetryPolicy, TimeOfDay,
+};
 use crate::units::{SolarForecastPoint, Timestamp};
 use crate::web::{DashboardStateSender, ForecastSnapshot};
 
@@ -113,7 +115,10 @@ pub fn from_config(config: &PredictionConfig, timezone: Tz) -> Forecaster {
 #[derive(Debug, Serialize, Deserialize)]
 struct PersistedForecastState {
     date: String,
-    fired: Vec<TimeOfDay>,
+    // Named `fired` on disk since before retries existed; it holds the
+    // settled anchors, and renaming it would orphan every existing state file.
+    #[serde(rename = "fired")]
+    settled: Vec<TimeOfDay>,
     points: Vec<SolarForecastPoint>,
     fetched_at: Option<i64>,
 }
@@ -159,10 +164,28 @@ impl ForecastTracker {
         &self.schedule
     }
 
-    /// A failed fetch still spent the request, so this runs after both.
+    /// Settles `slot` and persists it. Runs on a successful fetch, or when a
+    /// failure is one a retry cannot fix; only a successful response spends
+    /// Solcast's daily request cap, and a settled anchor is never fetched again.
     pub fn mark_used(&mut self, now: &LocalNow, slot: TimeOfDay) {
         self.schedule.mark_used(now, slot);
         self.save();
+    }
+
+    /// Records a failed fetch for `anchor`. Persists only when the retries ran
+    /// out, because that settles the anchor; a pending retry is not persisted,
+    /// since a restart fetches any anchor that isn't settled anyway.
+    pub fn mark_failed(
+        &mut self,
+        now: &LocalNow,
+        anchor: AnchorKey,
+        policy: RetryPolicy,
+    ) -> Failure {
+        let failure = self.schedule.mark_failed(now, anchor, policy);
+        if failure == Failure::GaveUp {
+            self.save();
+        }
+        failure
     }
 
     /// Merges a fresh fetch into the cached series by timestamp — a fresh
@@ -199,7 +222,7 @@ impl ForecastTracker {
     fn save(&self) {
         let state = PersistedForecastState {
             date: self.schedule.date().format("%Y-%m-%d").to_string(),
-            fired: self.schedule.fired().collect(),
+            settled: self.schedule.settled().collect(),
             points: self.points.clone(),
             fetched_at: self.fetched_at.map(Timestamp::as_millis),
         };
@@ -237,23 +260,96 @@ impl ForecastTracker {
             tracing::warn!("Failed to parse forecast state date {:?}", state.date);
             return;
         };
-        self.schedule.resume(date, state.fired);
+        self.schedule.resume(date, state.settled);
         self.points = state.points;
         self.fetched_at = state.fetched_at.map(Timestamp::from_millis);
     }
 }
 
 /// How often the poller wakes to check whether an anchor is due — cheap (no
-/// network), and much finer than the anchors themselves. `next_due` is what
-/// actually gates a fetch.
+/// network), and much finer than the anchors themselves. The schedule's
+/// decision is what actually gates a fetch.
 const CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
+/// A failed anchor fetch is retried because the next anchor is hours away and
+/// a 06:00 hiccup would otherwise leave the morning without a forecast. Two
+/// retries 10 minutes apart ride out a network hiccup, and the per-site retry
+/// (`SolcastForecaster` keeps the site that answered and refetches only the
+/// other) keeps successful requests within the 10/day cap.
+const RETRY_POLICY: RetryPolicy = RetryPolicy {
+    delay: Duration::from_secs(10 * 60),
+    attempts: 2,
+};
+
+/// What the poller carries between anchors.
+struct Poller<P> {
+    forecaster: P,
+    timezone: Tz,
+    tracker: ForecastTracker,
+    dashboard_tx: DashboardStateSender,
+    journal: Arc<Journal>,
+}
+
+impl<P: Prediction> Poller<P> {
+    /// Fetches for an anchor that is due, or for the retry of a failed one
+    /// whose delay has elapsed. A retry passes its anchor's own key, so the
+    /// forecaster refetches only what that anchor is still missing.
+    async fn poll_at(&mut self, now: LocalNow) {
+        let (anchor, retry) = match self.tracker.schedule().decide(&now) {
+            Fetch::Nothing => return,
+            Fetch::Anchor(anchor) => (anchor, None),
+            Fetch::Retry {
+                anchor,
+                attempt,
+                of,
+            } => (anchor, Some((attempt, of))),
+        };
+        let slot = anchor.slot;
+        match retry {
+            None => tracing::info!("Fetching solar forecast ({slot} anchor)"),
+            Some((attempt, of)) => {
+                tracing::info!("Fetching solar forecast ({slot} anchor, retry {attempt}/{of})");
+            }
+        }
+        match self.forecaster.forecast(anchor).await {
+            Ok(points) => {
+                // Durable history, independent of `tracker`'s own
+                // today-only cache — the future day-per-page view
+                // reads this back, not `forecast.json`.
+                match serde_json::to_string(&points) {
+                    Ok(json) => self.journal.raw("solar_forecast", &json),
+                    Err(e) => {
+                        tracing::warn!("Cannot serialize solar forecast for the journal: {e}")
+                    }
+                }
+                self.tracker
+                    .set_forecast(points, Timestamp::from(chrono::Utc::now()));
+                self.tracker.mark_used(&now, slot);
+                self.dashboard_tx
+                    .send_modify(|s| s.forecast_tick(self.tracker.snapshot()));
+            }
+            Err(e) => {
+                tracing::warn!("Solar forecast fetch failed for {slot} anchor: {e}");
+                if let FetchError::Parse { body, .. } = &e {
+                    tracing::debug!("Undecodable forecast body: {body}");
+                }
+                if !e.is_transient() {
+                    self.tracker.mark_used(&now, slot);
+                } else if self.tracker.mark_failed(&now, anchor, RETRY_POLICY) == Failure::GaveUp {
+                    tracing::warn!("Giving up on the {slot} anchor's solar forecast");
+                }
+            }
+        }
+    }
+}
+
 /// Runs until `shutdown` resolves: seeds the dashboard from whatever's
-/// cached, then checks every [`CHECK_INTERVAL`] whether the next configured
-/// anchor is due, fetching and updating both the tracker and the dashboard
-/// when it is. Independent of `crate::event`/`crate::engine::Engine::step` —
-/// the dashboard is this poller's only consumer, so it reaches it directly
-/// rather than through the control loop's channel.
+/// cached, then checks every [`CHECK_INTERVAL`] whether the schedule has an
+/// anchor, or the retry of a failed one, to fetch, updating both the tracker
+/// and the dashboard on success. Independent of `crate::event`/
+/// `crate::engine::Engine::step` — the dashboard is this poller's only
+/// consumer, so it reaches it directly rather than through the control
+/// loop's channel.
 pub async fn run_forecast_poller(
     forecaster: Forecaster,
     timezone: Tz,
@@ -263,38 +359,27 @@ pub async fn run_forecast_poller(
     journal: Arc<Journal>,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
 ) {
-    let mut tracker = ForecastTracker::new(state_path, poll_times, timezone);
+    let tracker = ForecastTracker::new(state_path, poll_times, timezone);
     dashboard_tx.send_modify(|s| s.forecast_tick(tracker.snapshot()));
+    let mut poller = Poller {
+        forecaster,
+        timezone,
+        tracker,
+        dashboard_tx,
+        journal,
+    };
 
     let mut check = tokio::time::interval(CHECK_INTERVAL);
     loop {
         tokio::select! {
             _ = &mut shutdown => break,
             _ = check.tick() => {
-                let now = LocalNow::now(timezone);
-                let Some(slot) = tracker.schedule().next_due(&now) else { continue };
-                tracing::info!("Fetching solar forecast ({slot} anchor)");
-                let anchor = AnchorKey { date: now.date, slot };
-                match forecaster.forecast(anchor).await {
-                    Ok(points) => {
-                        // Durable history, independent of `tracker`'s own
-                        // today-only cache — the future day-per-page view
-                        // reads this back, not `forecast.json`.
-                        match serde_json::to_string(&points) {
-                            Ok(json) => journal.raw("solar_forecast", &json),
-                            Err(e) => tracing::warn!("Cannot serialize solar forecast for the journal: {e}"),
-                        }
-                        tracker.set_forecast(points, Timestamp::from(chrono::Utc::now()));
-                        tracker.mark_used(&now, slot);
-                        dashboard_tx.send_modify(|s| s.forecast_tick(tracker.snapshot()));
-                    }
-                    Err(e) => {
-                        tracing::warn!("Solar forecast fetch failed for {slot} anchor: {e}");
-                        if let FetchError::Parse { body, .. } = &e {
-                            tracing::debug!("Undecodable forecast body: {body}");
-                        }
-                        tracker.mark_used(&now, slot);
-                    }
+                let now = LocalNow::now(poller.timezone);
+                // Shutdown cancels a fetch in flight rather than waiting it out.
+                tokio::select! {
+                    biased;
+                    _ = &mut shutdown => break,
+                    () = poller.poll_at(now) => {}
                 }
             }
         }
