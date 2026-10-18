@@ -1,6 +1,15 @@
 use super::*;
 use crate::config::PredictionConfig;
 use crate::fixtures::local_now as at;
+use crate::journal::testing;
+
+/// The slot of the anchor the schedule would fetch on a fresh tick.
+fn due(tracker: &ForecastTracker, now: &LocalNow) -> Option<TimeOfDay> {
+    match tracker.schedule().decide(now) {
+        Fetch::Anchor(anchor) => Some(anchor.slot),
+        Fetch::Retry { .. } | Fetch::Nothing => None,
+    }
+}
 
 fn tracker() -> (tempfile::TempDir, ForecastTracker) {
     let dir = tempfile::tempdir().unwrap();
@@ -24,14 +33,14 @@ fn point(ms: i64, watts: f64) -> crate::units::SolarForecastPoint {
 #[test]
 fn nothing_is_due_before_the_first_anchor() {
     let (_dir, t) = tracker();
-    assert_eq!(t.schedule().next_due(&at(2026, 1, 1, 5, 59)), None);
+    assert_eq!(due(&t, &at(2026, 1, 1, 5, 59)), None);
 }
 
 #[test]
 fn the_first_anchor_is_due_once_its_time_has_passed() {
     let (_dir, t) = tracker();
     assert_eq!(
-        t.schedule().next_due(&at(2026, 1, 1, 6, 0)),
+        due(&t, &at(2026, 1, 1, 6, 0)),
         Some(TimeOfDay::new(6, 0).unwrap())
     );
 }
@@ -41,7 +50,7 @@ fn a_used_anchor_is_not_offered_again_the_same_day() {
     let (_dir, mut t) = tracker();
     let now = at(2026, 1, 1, 6, 0);
     t.mark_used(&now, TimeOfDay::new(6, 0).unwrap());
-    assert_eq!(t.schedule().next_due(&now), None);
+    assert_eq!(due(&t, &now), None);
 }
 
 /// A restart mid-day must not re-fetch anchors this process already spent
@@ -62,7 +71,7 @@ fn a_restart_mid_day_skips_anchors_already_fired() {
 
     let restarted = ForecastTracker::new(path, default_poll_times().to_vec(), chrono_tz::UTC);
     assert_eq!(
-        restarted.schedule().next_due(&now),
+        due(&restarted, &now),
         Some(TimeOfDay::new(12, 30).unwrap()),
         "the first two anchors were already spent before the restart"
     );
@@ -75,11 +84,11 @@ fn once_every_anchor_is_used_nothing_is_due_for_the_rest_of_the_day() {
     for slot in default_poll_times() {
         t.mark_used(&evening, slot);
     }
-    assert_eq!(t.schedule().next_due(&evening), None);
+    assert_eq!(due(&t, &evening), None);
 }
 
 /// A new calendar day resets the budget even though `fired` still lists
-/// yesterday's anchors — `next_due`/`mark_used` both key off `now.date`.
+/// yesterday's anchors — `decide`/`mark_used` both key off `now.date`.
 #[test]
 fn a_new_day_treats_the_budget_as_fresh() {
     let (_dir, mut t) = tracker();
@@ -90,7 +99,7 @@ fn a_new_day_treats_the_budget_as_fresh() {
 
     let today = at(2026, 1, 2, 6, 0);
     assert_eq!(
-        t.schedule().next_due(&today),
+        due(&t, &today),
         Some(TimeOfDay::new(6, 0).unwrap()),
         "a new day must not inherit yesterday's spent budget"
     );
@@ -105,12 +114,12 @@ fn a_catch_up_after_downtime_collapses_into_a_single_fetch() {
     let (_dir, mut t) = tracker();
     let now = at(2026, 1, 1, 13, 0); // past anchors 1-3 (06:00, 09:30, 12:30)
 
-    let due = t.schedule().next_due(&now);
-    assert_eq!(due, Some(TimeOfDay::new(12, 30).unwrap()));
+    let first = due(&t, &now);
+    assert_eq!(first, Some(TimeOfDay::new(12, 30).unwrap()));
 
-    t.mark_used(&now, due.unwrap());
+    t.mark_used(&now, first.unwrap());
     assert_eq!(
-        t.schedule().next_due(&now),
+        due(&t, &now),
         None,
         "the earlier anchors must not be offered after the catch-up"
     );
@@ -143,7 +152,7 @@ fn state_round_trips_through_a_restart() {
         Some(Timestamp::from_millis(1_700_000_000_000))
     );
     assert_eq!(
-        restored.schedule().next_due(&now),
+        due(&restored, &now),
         None,
         "the fired anchor survived the restart"
     );
@@ -261,7 +270,7 @@ fn the_persisted_state_wire_format_is_pinned() {
 
     let state: PersistedForecastState = serde_json::from_str(json).unwrap();
     assert_eq!(state.date, "2026-01-01");
-    assert_eq!(state.fired, vec![TimeOfDay::new(6, 0).unwrap()]);
+    assert_eq!(state.settled, vec![TimeOfDay::new(6, 0).unwrap()]);
     assert_eq!(state.points.len(), 1);
     assert_eq!(state.fetched_at, Some(1_700_000_000_000));
 
@@ -295,4 +304,156 @@ fn from_config_builds_the_matching_backend() {
         chrono_tz::UTC,
     );
     assert!(matches!(simulated, Forecaster::Simulated(_)));
+}
+
+// --- Retrying a failed anchor ----------------------------------------------------
+
+/// Fails with each scripted error in turn, then answers with one point;
+/// remembers every anchor asked for.
+struct ScriptedForecaster {
+    script: std::sync::Mutex<std::collections::VecDeque<FetchError>>,
+    anchors: std::sync::Mutex<Vec<AnchorKey>>,
+}
+
+impl ScriptedForecaster {
+    fn failing(errors: impl IntoIterator<Item = FetchError>) -> Self {
+        ScriptedForecaster {
+            script: std::sync::Mutex::new(errors.into_iter().collect()),
+            anchors: std::sync::Mutex::default(),
+        }
+    }
+
+    fn anchors(&self) -> Vec<AnchorKey> {
+        self.anchors.lock().unwrap().clone()
+    }
+}
+
+impl Prediction for ScriptedForecaster {
+    async fn forecast(&self, anchor: AnchorKey) -> Result<Vec<SolarForecastPoint>, FetchError> {
+        self.anchors.lock().unwrap().push(anchor);
+        match self.script.lock().unwrap().pop_front() {
+            Some(error) => Err(error),
+            None => Ok(vec![point(1_700_000_000_000, 100.0)]),
+        }
+    }
+}
+
+fn transient() -> FetchError {
+    FetchError::Request("timed out".into())
+}
+
+fn poller(forecaster: ScriptedForecaster, dir: &tempfile::TempDir) -> Poller<ScriptedForecaster> {
+    let (journal, _writer, _path) = testing::open(dir, &serde_json::json!({}));
+    let engine = crate::engine::EngineState {
+        world: crate::world::World::new(),
+        controller: crate::controller::Controller::test_default(
+            crate::fixtures::journey::NOW_MS,
+            crate::fixtures::journey::DAY,
+        )
+        .state(),
+        mqtt_timed_out: false,
+    };
+    let seed = crate::web::DashboardState::seed(
+        &engine,
+        vec![],
+        crate::fixtures::journey::interval_ring(),
+        Timestamp::from_millis(crate::fixtures::journey::NOW_MS),
+    );
+    let (dashboard_tx, _) = tokio::sync::watch::channel(seed);
+    Poller {
+        forecaster,
+        timezone: chrono_tz::UTC,
+        tracker: ForecastTracker::new(
+            dir.path().join("forecast.json"),
+            default_poll_times().to_vec(),
+            chrono_tz::UTC,
+        ),
+        dashboard_tx,
+        journal: Arc::new(journal),
+    }
+}
+
+/// Polls at each of `times`, returning how many fetches had been made after
+/// each poll.
+async fn poll_through(poller: &mut Poller<ScriptedForecaster>, times: &[(u32, u32)]) -> Vec<usize> {
+    let mut counts = Vec::new();
+    for (hour, minute) in times {
+        poller.poll_at(at(2026, 1, 1, *hour, *minute)).await;
+        counts.push(poller.forecaster.anchors().len());
+    }
+    counts
+}
+
+fn restarted(dir: &tempfile::TempDir) -> ForecastTracker {
+    ForecastTracker::new(
+        dir.path().join("forecast.json"),
+        default_poll_times().to_vec(),
+        chrono_tz::UTC,
+    )
+}
+
+#[tokio::test]
+async fn a_transient_failure_is_retried_with_the_same_anchor_and_success_settles_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut poller = poller(ScriptedForecaster::failing([transient()]), &dir);
+
+    let counts = poll_through(
+        &mut poller,
+        &[(6, 0), (6, 1), (6, 9), (6, 10), (6, 11), (6, 30), (9, 0)],
+    )
+    .await;
+
+    assert_eq!(counts, [1, 1, 1, 2, 2, 2, 2]);
+    let anchors = poller.forecaster.anchors();
+    assert_eq!(anchors[0], anchors[1]);
+    assert!(poller.tracker.snapshot().as_of.is_some());
+    assert_eq!(due(&poller.tracker, &at(2026, 1, 1, 6, 30)), None);
+}
+
+#[tokio::test]
+async fn a_pending_retry_is_not_persisted_so_a_restart_still_finds_the_anchor_due() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut poller = poller(ScriptedForecaster::failing([transient()]), &dir);
+
+    poll_through(&mut poller, &[(6, 0)]).await;
+
+    assert_eq!(
+        due(&restarted(&dir), &at(2026, 1, 1, 6, 1)),
+        Some(TimeOfDay::new(6, 0).unwrap())
+    );
+}
+
+#[tokio::test]
+async fn a_status_or_parse_failure_is_settled_without_a_retry() {
+    let rejected = |code| FetchError::Status(reqwest::StatusCode::from_u16(code).unwrap());
+    let garbled = || FetchError::Parse {
+        body: "<html>".into(),
+        error: "expected value".into(),
+    };
+    for error in [rejected(429), rejected(401), garbled()] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut poller = poller(ScriptedForecaster::failing([error]), &dir);
+
+        let counts = poll_through(&mut poller, &[(6, 0), (6, 10), (6, 20), (9, 0)]).await;
+
+        assert_eq!(counts, [1, 1, 1, 1]);
+        assert_eq!(due(&restarted(&dir), &at(2026, 1, 1, 6, 30)), None);
+    }
+}
+
+#[tokio::test]
+async fn giving_up_settles_the_anchor_and_persists_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let failures = ScriptedForecaster::failing(std::iter::repeat_with(transient).take(3));
+    let mut poller = poller(failures, &dir);
+
+    let counts = poll_through(
+        &mut poller,
+        &[(6, 0), (6, 10), (6, 20), (6, 30), (9, 0), (9, 30)],
+    )
+    .await;
+
+    // The anchor and its two retries, then silence until 09:30.
+    assert_eq!(counts, [1, 2, 3, 3, 3, 4]);
+    assert_eq!(due(&restarted(&dir), &at(2026, 1, 1, 6, 40)), None);
 }

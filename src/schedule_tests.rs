@@ -109,7 +109,7 @@ fn attempts_count_up_and_the_last_failure_settles_the_anchor() {
         schedule.decide(&local_now(2026, 3, 1, 15, 59)),
         Fetch::Nothing
     );
-    assert!(schedule.fired().any(|a| a == t(15, 0)));
+    assert!(schedule.settled().any(|a| a == t(15, 0)));
 }
 
 #[test]

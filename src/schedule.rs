@@ -1,5 +1,5 @@
 //! When an anchor-driven poller should fetch: the configured local
-//! times of day, the poller's own clock read, and which anchors have fired
+//! times of day, the poller's own clock read, and which anchors have settled
 //! today. Shared by `crate::prediction` and `crate::prices`.
 
 use std::collections::BTreeSet;
@@ -14,9 +14,9 @@ use serde::{Deserialize, Serialize};
 mod tests;
 
 /// A local time-of-day anchor (hour, minute) — an entry in `poll_times`, and
-/// what `fired` remembers having used today. Hand-written `"HH:MM"`
+/// what `settled` holds for today. Hand-written `"HH:MM"`
 /// `Serialize`/`Deserialize` so the TOML config and the persisted state's
-/// `fired` list share one representation. `Ord`/`Eq` derived so the scheduler
+/// `fired` list (the settled anchors) share one representation. `Ord`/`Eq` derived so the scheduler
 /// can compare anchors and a `BTreeSet` can hold them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TimeOfDay {
@@ -160,7 +160,7 @@ struct PendingRetry {
 #[derive(Debug, Clone)]
 pub struct AnchorSchedule {
     date: NaiveDate,
-    fired: BTreeSet<TimeOfDay>,
+    settled: BTreeSet<TimeOfDay>,
     poll_times: Vec<TimeOfDay>,
     // Not persisted: a restart fetches any anchor that isn't settled anyway.
     pending: Option<PendingRetry>,
@@ -171,21 +171,21 @@ impl AnchorSchedule {
         AnchorSchedule {
             // Never compared equal to a real `now`, so it reads as "fresh".
             date: NaiveDate::from_ymd_opt(1970, 1, 1).expect("1970-01-01 is a valid date"),
-            fired: BTreeSet::new(),
+            settled: BTreeSet::new(),
             poll_times,
             pending: None,
         }
     }
 
-    /// The latest anchor at-or-before `now.time` that hasn't fired today.
+    /// The latest anchor at-or-before `now.time` that hasn't settled today.
     /// Returning the *latest* rather than the earliest collapses a catch-up
     /// after downtime into a single fetch.
-    pub fn next_due(&self, now: &LocalNow) -> Option<TimeOfDay> {
+    fn next_due(&self, now: &LocalNow) -> Option<TimeOfDay> {
         let fresh_day = self.date != now.date;
         self.poll_times
             .iter()
             .rev()
-            .find(|slot| **slot <= now.time && (fresh_day || !self.fired.contains(slot)))
+            .find(|slot| **slot <= now.time && (fresh_day || !self.settled.contains(slot)))
             .copied()
     }
 
@@ -259,10 +259,10 @@ impl AnchorSchedule {
         self.pending = None;
         if self.date != now.date {
             self.date = now.date;
-            self.fired.clear();
+            self.settled.clear();
         }
         for anchor in self.poll_times.iter().copied().filter(|a| *a <= slot) {
-            self.fired.insert(anchor);
+            self.settled.insert(anchor);
         }
     }
 
@@ -272,13 +272,13 @@ impl AnchorSchedule {
     }
 
     /// The anchors settled on [`AnchorSchedule::date`], in order.
-    pub fn fired(&self) -> impl Iterator<Item = TimeOfDay> + '_ {
-        self.fired.iter().copied()
+    pub fn settled(&self) -> impl Iterator<Item = TimeOfDay> + '_ {
+        self.settled.iter().copied()
     }
 
     /// Picks up where a previous process left off on `date`.
-    pub fn resume(&mut self, date: NaiveDate, fired: impl IntoIterator<Item = TimeOfDay>) {
+    pub fn resume(&mut self, date: NaiveDate, settled: impl IntoIterator<Item = TimeOfDay>) {
         self.date = date;
-        self.fired = fired.into_iter().collect();
+        self.settled = settled.into_iter().collect();
     }
 }

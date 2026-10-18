@@ -786,8 +786,17 @@ hours nothing changes in. Solcast's response is forward-looking only, so
 each fetch is merged into the cached series by timestamp rather than
 replacing it outright — an already-elapsed slot keeps the bar an earlier
 fetch gave it instead of losing it the moment a new poll lands, while a
-timestamp both fetches cover takes the fresher estimate. A failed fetch
-simply forfeits that slot's update, leaving the cache as it was. Every
+timestamp both fetches cover takes the fresher estimate. A fetch that
+fails on a request error or an HTTP 5xx is retried up to 2 times, 10 minutes
+apart (logged as `Fetching solar forecast (06:00 anchor, retry 1/2)`), and a
+retry fetches only the site that has not yet answered for that anchor. A
+retry is dropped when the next anchor comes due, or when it would pass
+midnight, and a warning says when the retries ran out. A 4xx (a bad key, the
+daily cap) or an undecodable answer is not retried: it warns and waits for
+the next anchor. Only a successful response spends the account's 10
+requests/day, so the budget counts successes, and the persisted anchor list
+holds the anchors that are settled: fetched, or out of retries. A failed
+fetch leaves the cache as it was. Every
 successful fetch is also recorded to the journal (`solar_forecast` events),
 independent of the dashboard's own today-only cache, so forecast history
 survives past midnight for future historical views. `kind = "simulated"`
