@@ -243,7 +243,10 @@ async fn an_empty_fetch_is_not_journalled() {
     let feed = PriceFeed::Simulated(simulated::SimulatedPrices::new());
     let at = local_hour(date(2026, 3, 1), 0);
 
-    assert_eq!(fetch(&feed, at, at, &journal, "an empty range").await, None);
+    assert_eq!(
+        fetch(&feed, at, at, &journal, "an empty range").await,
+        Err(Failed { transient: false })
+    );
 
     testing::close(journal, writer).await;
     assert!(recorded_payloads(path).await.is_empty());
@@ -358,4 +361,164 @@ fn tomorrow_is_published_only_when_fully_priced() {
 
     snapshot.points = series(&whole_day(tomorrow, 24));
     assert!(snapshot.tomorrow_published(today, AMSTERDAM));
+}
+
+// --- Retrying a failed anchor ----------------------------------------------------
+
+/// Fails with each scripted error in turn, then answers with a full day;
+/// remembers every window asked.
+struct ScriptedSource {
+    script: std::sync::Mutex<std::collections::VecDeque<FetchError>>,
+    windows: std::sync::Mutex<Vec<(Timestamp, Timestamp)>>,
+}
+
+impl ScriptedSource {
+    fn failing(errors: impl IntoIterator<Item = FetchError>) -> Self {
+        ScriptedSource {
+            script: std::sync::Mutex::new(errors.into_iter().collect()),
+            windows: std::sync::Mutex::default(),
+        }
+    }
+
+    fn windows(&self) -> Vec<(Timestamp, Timestamp)> {
+        self.windows.lock().unwrap().clone()
+    }
+}
+
+impl PriceSource for ScriptedSource {
+    async fn prices(
+        &self,
+        from: Timestamp,
+        until: Timestamp,
+    ) -> Result<Vec<PricePoint>, FetchError> {
+        self.windows.lock().unwrap().push((from, until));
+        match self.script.lock().unwrap().pop_front() {
+            Some(error) => Err(error),
+            None => Ok(whole_day(date(2026, 3, 1), 24)),
+        }
+    }
+}
+
+fn transient() -> FetchError {
+    FetchError::Request("timed out".into())
+}
+
+fn at_time(hour: u32, minute: u32) -> LocalNow {
+    LocalNow {
+        date: date(2026, 3, 1),
+        time: crate::schedule::TimeOfDay::new(hour, minute).unwrap(),
+    }
+}
+
+fn poller(source: ScriptedSource, dir: &tempfile::TempDir) -> Poller<ScriptedSource> {
+    let (journal, _writer, _path) = testing::open(dir, &serde_json::json!({}));
+    let engine = crate::engine::EngineState {
+        world: crate::world::World::new(),
+        controller: crate::controller::Controller::test_default(
+            crate::fixtures::journey::NOW_MS,
+            crate::fixtures::journey::DAY,
+        )
+        .state(),
+        mqtt_timed_out: false,
+    };
+    let seed = crate::web::DashboardState::seed(
+        &engine,
+        vec![],
+        crate::fixtures::journey::interval_ring(),
+        Timestamp::from_millis(crate::fixtures::journey::NOW_MS),
+    );
+    let (dashboard_tx, _) = tokio::sync::watch::channel(seed);
+    Poller {
+        feed: source,
+        timezone: AMSTERDAM,
+        schedule: AnchorSchedule::new(vec![
+            crate::schedule::TimeOfDay::new(15, 0).unwrap(),
+            crate::schedule::TimeOfDay::new(17, 0).unwrap(),
+        ]),
+        snapshot: PriceSnapshot::default(),
+        dashboard_tx,
+        journal: Arc::new(journal),
+    }
+}
+
+/// Polls at each of `times`, returning how many fetches had been made after
+/// each poll.
+async fn poll_through(poller: &mut Poller<ScriptedSource>, times: &[(u32, u32)]) -> Vec<usize> {
+    let (_stop, mut shutdown) = tokio::sync::oneshot::channel();
+    let mut counts = Vec::new();
+    for (hour, minute) in times {
+        poller
+            .poll_at(at_time(*hour, *minute), &mut shutdown)
+            .await
+            .unwrap();
+        counts.push(poller.feed.windows().len());
+    }
+    counts
+}
+
+#[tokio::test]
+async fn a_transient_failure_is_retried_once_after_the_delay_and_success_settles_the_anchor() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut poller = poller(ScriptedSource::failing([transient()]), &dir);
+
+    let counts = poll_through(
+        &mut poller,
+        &[
+            (15, 0),
+            (15, 1),
+            (15, 9),
+            (15, 10),
+            (15, 11),
+            (15, 30),
+            (16, 0),
+        ],
+    )
+    .await;
+
+    assert_eq!(counts, [1, 1, 1, 2, 2, 2, 2]);
+    let windows = poller.feed.windows();
+    assert_eq!(windows[0], windows[1]);
+    assert!(poller.snapshot.as_of.is_some());
+}
+
+#[tokio::test]
+async fn a_status_or_parse_failure_arms_no_retry() {
+    let rejected = || FetchError::Status(reqwest::StatusCode::TOO_MANY_REQUESTS);
+    let garbled = || FetchError::Parse {
+        body: "<html>".into(),
+        error: "expected value".into(),
+    };
+    for error in [rejected(), garbled()] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut poller = poller(ScriptedSource::failing([error]), &dir);
+
+        let counts = poll_through(&mut poller, &[(15, 0), (15, 10), (15, 20), (16, 59)]).await;
+
+        assert_eq!(counts, [1, 1, 1, 1]);
+    }
+}
+
+#[tokio::test]
+async fn retries_run_out_and_the_next_anchor_still_fires() {
+    let dir = tempfile::tempdir().unwrap();
+    let failures = ScriptedSource::failing(std::iter::repeat_with(transient).take(4));
+    let mut poller = poller(failures, &dir);
+
+    let counts = poll_through(
+        &mut poller,
+        &[
+            (15, 0),
+            (15, 10),
+            (15, 20),
+            (15, 30),
+            (15, 40),
+            (16, 30),
+            (17, 0),
+        ],
+    )
+    .await;
+
+    // The anchor and its three retries, then silence until 17:00.
+    assert_eq!(counts, [1, 2, 3, 4, 4, 4, 5]);
+    assert!(poller.snapshot.as_of.is_some());
 }

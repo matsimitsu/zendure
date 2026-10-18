@@ -110,7 +110,6 @@ impl LocalNow {
 /// How a poller retries a failed anchor: `attempts` retries, each `delay`
 /// after the previous failure. The first fetch of an anchor is not a retry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), expect(dead_code))]
 pub struct RetryPolicy {
     pub delay: Duration,
     pub attempts: u8,
@@ -126,7 +125,6 @@ pub struct AnchorKey {
 
 /// What an anchor-driven poller does on this tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), expect(dead_code))]
 pub enum Fetch {
     Anchor(AnchorKey),
     Retry {
@@ -139,7 +137,6 @@ pub enum Fetch {
 
 /// What a failed fetch left behind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), expect(dead_code))]
 pub enum Failure {
     /// A retry is pending for the anchor.
     WillRetry,
@@ -194,7 +191,6 @@ impl AnchorSchedule {
 
     /// What to fetch on this tick: a newly due anchor, which supersedes any
     /// pending retry, else a retry whose delay has elapsed.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn decide(&self, now: &LocalNow) -> Fetch {
         // A failed anchor stays unsettled, so `next_due` keeps naming it; only
         // its retry timer may fetch it again.
@@ -222,7 +218,6 @@ impl AnchorSchedule {
     /// settles the anchor once `policy.attempts` retries have failed. A retry
     /// that would fall on the next local day gives up instead, because the
     /// rollover would drop it without a word.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn mark_failed(
         &mut self,
         now: &LocalNow,
