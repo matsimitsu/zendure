@@ -1,0 +1,19 @@
+README.md
+  s_57969155be2daa::t_89e316499492da 601-603
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "95c2233603400fa79e4a48034abb9e4ef432bc75",
+  "prompts": {},
+  "sessions": {
+    "s_57969155be2daa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "56720674-0917-412e-a751-2ed6861b04e3",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Beekman <robert@matsimitsu.nl>"
+    }
+  }
+}
