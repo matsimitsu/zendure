@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::PredictionConfig;
 use crate::fetch::FetchError;
 use crate::journal::Journal;
-use crate::schedule::{AnchorSchedule, LocalNow, TimeOfDay};
+use crate::schedule::{AnchorKey, AnchorSchedule, LocalNow, TimeOfDay};
 use crate::units::{SolarForecastPoint, Timestamp};
 use crate::web::{DashboardStateSender, ForecastSnapshot};
 
@@ -61,7 +61,12 @@ pub fn default_poll_times() -> [TimeOfDay; 5] {
 /// Future + Send`) and for the same reason: an unboxed future per adapter, no
 /// `dyn`.
 pub trait Prediction {
-    fn forecast(&self) -> impl Future<Output = Result<Vec<SolarForecastPoint>, FetchError>> + Send;
+    /// `anchor` names the fetch being made, so a backend that fetches in
+    /// parts can tell a repeat of the same anchor from a new one.
+    fn forecast(
+        &self,
+        anchor: AnchorKey,
+    ) -> impl Future<Output = Result<Vec<SolarForecastPoint>, FetchError>> + Send;
 }
 
 /// Whichever backend `[prediction]` selected. Mirrors `registry::Battery`:
@@ -73,10 +78,10 @@ pub enum Forecaster {
 }
 
 impl Prediction for Forecaster {
-    async fn forecast(&self) -> Result<Vec<SolarForecastPoint>, FetchError> {
+    async fn forecast(&self, anchor: AnchorKey) -> Result<Vec<SolarForecastPoint>, FetchError> {
         match self {
-            Forecaster::Solcast(f) => f.forecast().await,
-            Forecaster::Simulated(f) => f.forecast().await,
+            Forecaster::Solcast(f) => f.forecast(anchor).await,
+            Forecaster::Simulated(f) => f.forecast(anchor).await,
         }
     }
 }
@@ -269,7 +274,8 @@ pub async fn run_forecast_poller(
                 let now = LocalNow::now(timezone);
                 let Some(slot) = tracker.schedule().next_due(&now) else { continue };
                 tracing::info!("Fetching solar forecast ({slot} anchor)");
-                match forecaster.forecast().await {
+                let anchor = AnchorKey { date: now.date, slot };
+                match forecaster.forecast(anchor).await {
                     Ok(points) => {
                         // Durable history, independent of `tracker`'s own
                         // today-only cache — the future day-per-page view

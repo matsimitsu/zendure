@@ -81,3 +81,100 @@ fn a_point_is_stamped_with_the_start_of_its_period() {
     let start = chrono::DateTime::parse_from_rfc3339("2026-06-01T12:00:00Z").unwrap();
     assert_eq!(points[0].at, Timestamp::from(start));
 }
+
+mod per_site {
+    use std::sync::Mutex;
+
+    use chrono::NaiveDate;
+
+    use super::*;
+    use crate::schedule::TimeOfDay;
+
+    fn anchor(hour: u32) -> AnchorKey {
+        AnchorKey {
+            date: NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
+            slot: TimeOfDay::new(hour, 0).unwrap(),
+        }
+    }
+
+    fn forecaster() -> SolcastForecaster {
+        SolcastForecaster::new("key".into(), "east".into(), "west".into())
+    }
+
+    /// Records every site asked for; a site in `failing` answers with an error.
+    struct Stub {
+        failing: Mutex<Vec<Site>>,
+        asked: Mutex<Vec<Site>>,
+    }
+
+    impl Stub {
+        fn new(failing: &[Site]) -> Self {
+            Stub {
+                failing: Mutex::new(failing.to_vec()),
+                asked: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn heal(&self) {
+            self.failing.lock().unwrap().clear();
+        }
+
+        fn asked_sorted(&self) -> Vec<Site> {
+            let mut asked = std::mem::take(&mut *self.asked.lock().unwrap());
+            asked.sort_by_key(|site| *site == Site::West);
+            asked
+        }
+
+        async fn fetch(&self, site: Site) -> Result<Series, FetchError> {
+            self.asked.lock().unwrap().push(site);
+            if self.failing.lock().unwrap().contains(&site) {
+                return Err(FetchError::Status(reqwest::StatusCode::BAD_GATEWAY));
+            }
+            let watts = match site {
+                Site::East => 100.0,
+                Site::West => 50.0,
+            };
+            Ok(vec![point(1_000, watts)])
+        }
+    }
+
+    #[tokio::test]
+    async fn both_sites_succeeding_costs_one_request_each() {
+        let f = forecaster();
+        let stub = Stub::new(&[]);
+
+        let series = f.forecast_with(anchor(6), |s| stub.fetch(s)).await.unwrap();
+
+        assert_eq!(series[0].estimate.get(), 150.0);
+        assert_eq!(stub.asked_sorted(), vec![Site::East, Site::West]);
+    }
+
+    #[tokio::test]
+    async fn a_repeat_of_the_anchor_fetches_only_the_failed_site() {
+        let f = forecaster();
+        let stub = Stub::new(&[Site::West]);
+
+        let first = f.forecast_with(anchor(6), |s| stub.fetch(s)).await;
+        assert!(first.unwrap_err().is_transient());
+        stub.asked_sorted();
+        stub.heal();
+
+        let series = f.forecast_with(anchor(6), |s| stub.fetch(s)).await.unwrap();
+
+        assert_eq!(stub.asked_sorted(), vec![Site::West]);
+        assert_eq!(series[0].estimate.get(), 150.0);
+    }
+
+    #[tokio::test]
+    async fn a_new_anchor_drops_a_half_and_fetches_both() {
+        let f = forecaster();
+        let stub = Stub::new(&[Site::West]);
+        assert!(f.forecast_with(anchor(6), |s| stub.fetch(s)).await.is_err());
+        stub.asked_sorted();
+        stub.heal();
+
+        f.forecast_with(anchor(9), |s| stub.fetch(s)).await.unwrap();
+
+        assert_eq!(stub.asked_sorted(), vec![Site::East, Site::West]);
+    }
+}

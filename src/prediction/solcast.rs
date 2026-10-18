@@ -4,12 +4,16 @@
 //! logged rather than silently lost.
 
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::Deserialize;
 
 use super::{FORECAST_PERIOD, Prediction};
 use crate::fetch::{self, Connection, FetchError, fetch_parsed};
+use crate::schedule::AnchorKey;
+use crate::sync::guard;
 use crate::units::{Elapsed, SolarForecastPoint, SolarPower, Timestamp};
 
 /// Deserialize-only, like `ZendureReport` — this crate never writes to
@@ -52,6 +56,19 @@ pub struct SolcastForecaster {
     api_key: String,
     site_east: String,
     site_west: String,
+    kept: Mutex<Kept>,
+}
+
+type Series = Vec<SolarForecastPoint>;
+
+/// The sites that already answered for one anchor. A repeat of that anchor
+/// asks only for the rest, so a request that succeeded is never paid for twice
+/// against Solcast's daily cap.
+#[derive(Default)]
+struct Kept {
+    anchor: Option<AnchorKey>,
+    east: Option<Series>,
+    west: Option<Series>,
 }
 
 impl SolcastForecaster {
@@ -64,6 +81,7 @@ impl SolcastForecaster {
             api_key,
             site_east,
             site_west,
+            kept: Mutex::new(Kept::default()),
         }
     }
 
@@ -78,13 +96,80 @@ impl SolcastForecaster {
     }
 }
 
+impl SolcastForecaster {
+    /// `fetch` is the per-site request, so the keep-and-retry logic is
+    /// testable without a network.
+    async fn forecast_with<F, Fut>(&self, anchor: AnchorKey, fetch: F) -> Result<Series, FetchError>
+    where
+        F: Fn(Site) -> Fut,
+        Fut: Future<Output = Result<Series, FetchError>>,
+    {
+        let (need_east, need_west) = {
+            let mut kept = guard(&self.kept);
+            if kept.anchor != Some(anchor) {
+                *kept = Kept {
+                    anchor: Some(anchor),
+                    ..Kept::default()
+                };
+            }
+            (kept.east.is_none(), kept.west.is_none())
+        };
+
+        // `join!`, not `try_join!`: one site failing must not drop the
+        // other's in-flight request, whose answer is already paid for.
+        let (east, west) = tokio::join!(
+            fetch_if(need_east, Site::East, &fetch),
+            fetch_if(need_west, Site::West, &fetch),
+        );
+
+        let mut guarded = guard(&self.kept);
+        let kept = &mut *guarded;
+        let mut failure = None;
+        for (slot, result) in [(&mut kept.east, east), (&mut kept.west, west)] {
+            match result {
+                Some(Ok(series)) => *slot = Some(series),
+                Some(Err(e)) => failure = failure.or(Some(e)),
+                None => {}
+            }
+        }
+        match failure {
+            Some(e) => Err(e),
+            None => Ok(combine_series(
+                kept.east.as_deref().unwrap_or_default(),
+                kept.west.as_deref().unwrap_or_default(),
+            )),
+        }
+    }
+}
+
+async fn fetch_if<F, Fut>(needed: bool, site: Site, fetch: &F) -> Option<Result<Series, FetchError>>
+where
+    F: Fn(Site) -> Fut,
+    Fut: Future<Output = Result<Series, FetchError>>,
+{
+    if needed {
+        Some(fetch(site).await)
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Site {
+    East,
+    West,
+}
+
 impl Prediction for SolcastForecaster {
-    async fn forecast(&self) -> Result<Vec<SolarForecastPoint>, FetchError> {
-        let (east, west) = tokio::try_join!(
-            self.fetch_site(&self.site_east),
-            self.fetch_site(&self.site_west),
-        )?;
-        Ok(combine_series(&east, &west))
+    async fn forecast(&self, anchor: AnchorKey) -> Result<Vec<SolarForecastPoint>, FetchError> {
+        self.forecast_with(anchor, |site| {
+            let id = match site {
+                Site::East => &self.site_east,
+                Site::West => &self.site_west,
+            };
+            self.fetch_site(id)
+        })
+        .await
     }
 }
 
