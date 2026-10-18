@@ -183,9 +183,30 @@ fn phases(code: u16) -> Option<PhaseMode> {
 /// Why a read came back empty, and whether the connection survived it.
 struct ReadFailure {
     error: String,
+    fault: Fault,
+}
+
+enum Fault {
+    /// The charger answered with a Modbus exception; the stream is intact.
+    Refused,
+    Timeout,
+    /// The socket itself failed, typically closed by the charger.
+    Transport,
+}
+
+impl ReadFailure {
     /// A timeout or transport error leaves the stream in an unknown state —
     /// a late reply would answer the next request — so it is dropped.
-    broken: bool,
+    fn broken(&self) -> bool {
+        !matches!(self.fault, Fault::Refused)
+    }
+}
+
+/// A poll's required read that failed, and whether the socket was what
+/// failed.
+struct SpansFailure {
+    error: PollError,
+    transport: bool,
 }
 
 async fn read(
@@ -202,15 +223,15 @@ async fn read(
     {
         Err(_) => Err(ReadFailure {
             error: format!("{what}: no answer within {timeout:?}"),
-            broken: true,
+            fault: Fault::Timeout,
         }),
         Ok(Err(e)) => Err(ReadFailure {
             error: format!("{what}: {e}"),
-            broken: true,
+            fault: Fault::Transport,
         }),
         Ok(Ok(Err(exception))) => Err(ReadFailure {
             error: format!("{what}: {exception}"),
-            broken: false,
+            fault: Fault::Refused,
         }),
         Ok(Ok(Ok(words))) => Ok(words),
     }
@@ -227,6 +248,9 @@ pub struct VestelClient {
     unit: Slave,
     timeout: Duration,
     connection: tokio::sync::Mutex<Option<Context>>,
+    /// The identity line last logged: every reconnect reads it again, and
+    /// the EVC04 forces one every ~20s.
+    identity: Mutex<Option<String>>,
     last_seen: Mutex<Option<(ChargePointStatus, CableState)>>,
     /// Best-effort reads that failed last poll, so a firmware that never
     /// answers one warns once rather than every round.
@@ -242,6 +266,7 @@ impl VestelClient {
             unit: Slave(unit_id),
             timeout: scan::request_timeout(scan_period),
             connection: tokio::sync::Mutex::new(None),
+            identity: Mutex::new(None),
             last_seen: Mutex::new(None),
             missing: Mutex::new(BTreeSet::new()),
         }
@@ -272,9 +297,31 @@ impl VestelClient {
 
     async fn read_poll_spans(&self) -> Result<RegisterBlocks, PollError> {
         let mut connection = self.connection.lock().await;
+        let reused = connection.is_some();
+        match self.read_spans(&mut connection).await {
+            // The EVC04 closes every connection ~20s after opening it, polled
+            // or not, so a socket error on one already open is usually that
+            // lifetime running out: a fresh connection still gets this
+            // round's reading. A timeout is not retried, having already spent
+            // most of the round.
+            Err(failure) if reused && failure.transport => self
+                .read_spans(&mut connection)
+                .await
+                .map_err(|failure| failure.error),
+            result => result.map_err(|failure| failure.error),
+        }
+    }
+
+    async fn read_spans(
+        &self,
+        connection: &mut Option<Context>,
+    ) -> Result<RegisterBlocks, SpansFailure> {
         let context = match connection.as_mut() {
             Some(context) => context,
-            None => connection.insert(self.connect().await?),
+            None => connection.insert(self.connect().await.map_err(|error| SpansFailure {
+                error,
+                transport: false,
+            })?),
         };
 
         let mut blocks = RegisterBlocks::default();
@@ -282,12 +329,15 @@ impl VestelClient {
             match read(context, span, self.timeout).await {
                 Ok(words) => blocks.insert(span.start, words),
                 Err(failure) => {
-                    if failure.broken {
+                    if failure.broken() {
                         *connection = None;
                     }
-                    return Err(PollError {
-                        raw: (!blocks.0.is_empty()).then(|| blocks.capture()),
-                        error: format!("{}: {}", self.id, failure.error),
+                    return Err(SpansFailure {
+                        error: PollError {
+                            raw: (!blocks.0.is_empty()).then(|| blocks.capture()),
+                            error: format!("{}: {}", self.id, failure.error),
+                        },
+                        transport: matches!(failure.fault, Fault::Transport),
                     });
                 }
             }
@@ -301,7 +351,7 @@ impl VestelClient {
                     self.note_missing(span, &failure.error);
                     missing.insert(span.start);
                     // Nothing more can be asked of a connection in doubt.
-                    if failure.broken {
+                    if failure.broken() {
                         *connection = None;
                         missing.extend(BEST_EFFORT_SPANS[i..].iter().map(|span| span.start));
                         break;
@@ -359,7 +409,7 @@ impl VestelClient {
         for (field, span) in fields.iter_mut().zip([BRAND, MODEL, SERIAL, FIRMWARE]) {
             *field = match read(context, span, self.timeout).await {
                 Ok(words) => decode_ascii(&words),
-                Err(failure) if failure.broken => return Err(failure),
+                Err(failure) if failure.broken() => return Err(failure),
                 Err(failure) => {
                     tracing::warn!("{}: identity unreadable: {}", self.id, failure.error);
                     "?".to_string()
@@ -367,10 +417,15 @@ impl VestelClient {
             };
         }
         let [brand, model, serial, firmware] = fields;
-        tracing::info!(
+        let line = format!(
             "{}: connected to {brand} {model}, serial {serial}, firmware {firmware}",
             self.id
         );
+        if guard(&self.identity).replace(line.clone()).as_ref() == Some(&line) {
+            tracing::debug!("{line}");
+        } else {
+            tracing::info!("{line}");
+        }
         Ok(())
     }
 

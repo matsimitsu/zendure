@@ -247,6 +247,12 @@ fn the_capture_maps_each_read_start_to_its_words() {
 /// any of `refused` gets exception 02 (illegal data address), as firmware
 /// without that block would answer.
 async fn fake_vestel(map: BTreeMap<u16, u16>, refused: &[u16]) -> u16 {
+    fake_vestel_closing(map, refused, usize::MAX).await
+}
+
+/// [`fake_vestel`], closing each connection after `lifetime` requests, as
+/// an EVC04 closes each one ~20s after opening it.
+async fn fake_vestel_closing(map: BTreeMap<u16, u16>, refused: &[u16], lifetime: usize) -> u16 {
     let refused = refused.to_vec();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -259,7 +265,10 @@ async fn fake_vestel(map: BTreeMap<u16, u16>, refused: &[u16]) -> u16 {
             let refused = refused.clone();
             tokio::spawn(async move {
                 let mut request = [0u8; 12];
-                while stream.read_exact(&mut request).await.is_ok() {
+                for _ in 0..lifetime {
+                    if stream.read_exact(&mut request).await.is_err() {
+                        return;
+                    }
                     let start = u16::from_be_bytes([request[8], request[9]]);
                     let count = u16::from_be_bytes([request[10], request[11]]);
                     let mut response = vec![request[0], request[1], 0, 0];
@@ -307,6 +316,19 @@ async fn a_poll_reads_parses_and_captures_over_modbus_tcp() {
         assert_eq!(reading.state, parse(&blocks(&CHARGING)).unwrap());
         assert_eq!(reading.telemetry.total_energy, Some(WattHours(1_234_500.0)));
         assert_eq!(reading.raw, Some(blocks(&CHARGING).capture()));
+    }
+}
+
+#[tokio::test]
+async fn a_connection_the_charger_closed_costs_no_reading() {
+    // Four identity reads and one poll's five, then the charger hangs up.
+    let port = fake_vestel_closing(device_map(&CHARGING), &[], 9).await;
+    let client = client(port);
+
+    for _ in 0..3 {
+        let reading = client.poll().await.unwrap();
+
+        assert_eq!(reading.state, parse(&blocks(&CHARGING)).unwrap());
     }
 }
 

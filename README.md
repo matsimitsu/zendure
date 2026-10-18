@@ -314,7 +314,9 @@ To let the controller in:
 3. Keep the connection to this one client: an EVC04 often accepts only a
    single Modbus client at a time, so a second one (evcc, Home Assistant)
    will fail one or both. The controller keeps one connection open and
-   reconnects after any failure.
+   reconnects after any failure. The EVC04 closes every connection about
+   20 s after it opens, so a poll that finds its connection closed reconnects
+   and reads again in the same round.
 
 **Keep Modbus/EMS load management OFF.** With load management on, the charger
 expects its controller to write a heartbeat (register 6000) regularly, and
