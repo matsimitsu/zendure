@@ -1,0 +1,28 @@
+src/schedule_tests.rs
+  s_e15f22bbe99ee3::t_8cd519d68d4f7c 49,98,142,145-148,155-158,167-175
+  s_e15f22bbe99ee3::t_f55a49f4020530 159-166
+  s_e15f22bbe99ee3::t_a4f320759fabea 176-177
+src/schedule.rs
+  s_e15f22bbe99ee3::t_11bf876ab45945 113,129,142,197,221-225,232-237,239,243-250,255,261-262
+  s_e15f22bbe99ee3::t_f55a49f4020530 226-231
+src/source/shelly.rs
+  s_e15f22bbe99ee3::t_11bf876ab45945 92
+src/fetch.rs
+  s_e15f22bbe99ee3::t_11bf876ab45945 57-58
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f158d303933fd7c96c55a31bf26bfcd315d9d229",
+  "prompts": {},
+  "sessions": {
+    "s_e15f22bbe99ee3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "468df55a-ad8f-4dbb-ab48-a6827886cdd3",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Beekman <robert@matsimitsu.nl>"
+    }
+  }
+}
