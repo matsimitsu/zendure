@@ -61,7 +61,7 @@ pub trait ChargerMonitor {
 /// meter can share the same car, as `Battery::Virtual` does.
 pub enum Charger {
     Simulated(Arc<simulated::SimulatedCharger>),
-    Vestel(vestel::VestelClient),
+    Vestel(Box<vestel::VestelClient>),
     /// A charger that never answers, for the outage tests.
     #[cfg(test)]
     Unreachable(DeviceId),
@@ -140,13 +140,13 @@ pub fn from_config(config: &ChargerConfig, timezone: Tz, scan_period: Duration) 
             host,
             port,
             unit_id,
-        } => Charger::Vestel(vestel::VestelClient::new(
+        } => Charger::Vestel(Box::new(vestel::VestelClient::new(
             config.id.clone(),
             host.clone(),
             *port,
             *unit_id,
             scan_period,
-        )),
+        ))),
         ChargerKind::Simulated {
             plug_in,
             unplug,
