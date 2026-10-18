@@ -46,7 +46,7 @@ fn failed_at_15() -> AnchorSchedule {
     schedule.mark_used(&local_now(2026, 3, 1, 0, 5), t(0, 5));
     assert_eq!(schedule.decide(&now), Fetch::Anchor(key(1, t(15, 0))));
     assert_eq!(
-        schedule.mark_failed(&now, t(15, 0), POLICY),
+        schedule.mark_failed(&now, key(1, t(15, 0)), POLICY),
         Failure::WillRetry
     );
     schedule
@@ -95,7 +95,7 @@ fn attempts_count_up_and_the_last_failure_settles_the_anchor() {
                 of: 3
             }
         );
-        let outcome = schedule.mark_failed(&now, t(15, 0), POLICY);
+        let outcome = schedule.mark_failed(&now, key(1, t(15, 0)), POLICY);
         assert_eq!(
             outcome,
             if attempt == 3 {
@@ -139,13 +139,39 @@ fn a_date_rollover_drops_a_pending_retry() {
 }
 
 #[test]
-fn a_failure_just_before_midnight_does_not_retry_on_the_next_day() {
+fn a_retry_that_would_fall_on_the_next_day_gives_up_at_once() {
     let mut schedule = AnchorSchedule::new(vec![t(23, 55)]);
     let now = local_now(2026, 3, 1, 23, 55);
-    schedule.mark_failed(&now, t(23, 55), POLICY);
+    assert_eq!(
+        schedule.mark_failed(&now, key(1, t(23, 55)), POLICY),
+        Failure::GaveUp
+    );
     assert_eq!(
         schedule.decide(&local_now(2026, 3, 2, 0, 5)),
         Fetch::Nothing
+    );
+}
+
+#[test]
+fn a_failure_reported_after_midnight_leaves_the_new_day_alone() {
+    let mut schedule = AnchorSchedule::new(vec![t(0, 5), t(23, 50)]);
+    let late = local_now(2026, 3, 1, 23, 50);
+    schedule.mark_failed(
+        &late,
+        key(1, t(23, 50)),
+        RetryPolicy {
+            delay: Duration::from_secs(5 * 60),
+            attempts: 3,
+        },
+    );
+    let after_midnight = local_now(2026, 3, 2, 0, 1);
+    assert_eq!(
+        schedule.mark_failed(&after_midnight, key(1, t(23, 50)), POLICY),
+        Failure::GaveUp
+    );
+    assert_eq!(
+        schedule.decide(&local_now(2026, 3, 2, 0, 5)),
+        Fetch::Anchor(key(2, t(0, 5)))
     );
 }
 

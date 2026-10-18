@@ -110,7 +110,7 @@ impl LocalNow {
 /// How a poller retries a failed anchor: `attempts` retries, each `delay`
 /// after the previous failure. The first fetch of an anchor is not a retry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(test), expect(dead_code))]
 pub struct RetryPolicy {
     pub delay: Duration,
     pub attempts: u8,
@@ -119,7 +119,6 @@ pub struct RetryPolicy {
 /// One anchor on one local day: what a fetch is made for, and what a retry
 /// has to repeat exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub struct AnchorKey {
     pub date: NaiveDate,
     pub slot: TimeOfDay,
@@ -127,7 +126,7 @@ pub struct AnchorKey {
 
 /// What an anchor-driven poller does on this tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(test), expect(dead_code))]
 pub enum Fetch {
     Anchor(AnchorKey),
     Retry {
@@ -140,7 +139,7 @@ pub enum Fetch {
 
 /// What a failed fetch left behind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(test), expect(dead_code))]
 pub enum Failure {
     /// A retry is pending for the anchor.
     WillRetry,
@@ -195,7 +194,7 @@ impl AnchorSchedule {
 
     /// What to fetch on this tick: a newly due anchor, which supersedes any
     /// pending retry, else a retry whose delay has elapsed.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub fn decide(&self, now: &LocalNow) -> Fetch {
         // A failed anchor stays unsettled, so `next_due` keeps naming it; only
         // its retry timer may fetch it again.
@@ -219,37 +218,48 @@ impl AnchorSchedule {
         }
     }
 
-    /// Records that the fetch for `slot` failed. Arms the next retry, or
-    /// settles the anchor once `policy.attempts` retries have failed.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn mark_failed(&mut self, now: &LocalNow, slot: TimeOfDay, policy: RetryPolicy) -> Failure {
-        let anchor = AnchorKey {
-            date: now.date,
-            slot,
-        };
-        let attempt = match self.pending {
-            Some(p) if p.anchor == anchor => p.attempt + 1,
-            _ => 1,
-        };
-        if attempt > policy.attempts {
-            self.mark_used(now, slot);
+    /// Records that the fetch for `anchor` failed. Arms the next retry, or
+    /// settles the anchor once `policy.attempts` retries have failed. A retry
+    /// that would fall on the next local day gives up instead, because the
+    /// rollover would drop it without a word.
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub fn mark_failed(
+        &mut self,
+        now: &LocalNow,
+        anchor: AnchorKey,
+        policy: RetryPolicy,
+    ) -> Failure {
+        if anchor.date != now.date {
+            // The day rolled over mid-fetch: settling it would wipe today's
+            // anchors, and today's own schedule already supersedes it.
+            self.pending = None;
             return Failure::GaveUp;
         }
+        let attempt = match self.pending {
+            Some(p) if p.anchor == anchor => p.attempt.saturating_add(1),
+            _ => 1,
+        };
         let delay = TimeDelta::from_std(policy.delay).expect("a retry delay fits a TimeDelta");
+        let due = now
+            .naive()
+            .checked_add_signed(delay)
+            .filter(|due| due.date() == anchor.date);
+        let Some(due) = due.filter(|_| attempt <= policy.attempts) else {
+            self.mark_used(now, anchor.slot);
+            return Failure::GaveUp;
+        };
         self.pending = Some(PendingRetry {
             anchor,
             attempt,
             of: policy.attempts,
-            due: now
-                .naive()
-                .checked_add_signed(delay)
-                .expect("a retry due time fits a NaiveDateTime"),
+            due,
         });
         Failure::WillRetry
     }
 
     /// Settles `slot` and every earlier anchor today, matching `next_due`'s
-    /// catch-up collapse, and clears any pending retry. Called on success.
+    /// catch-up collapse, and clears any pending retry. A poller that retries
+    /// calls this only once a fetch has its answer, and `mark_failed` before.
     pub fn mark_used(&mut self, now: &LocalNow, slot: TimeOfDay) {
         self.pending = None;
         if self.date != now.date {

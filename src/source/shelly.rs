@@ -85,11 +85,11 @@ validating_deserialize_result!(SolarPhase, String, |s: String| SolarPhase::parse
 /// journal; `replay` and `export` select on it.
 const RAW_KIND: &str = "shelly";
 
-/// Reads the `em:0` component over the meter's local RPC endpoint.
 /// Polled every scan period on the local network, where a handshake per
 /// request is pure overhead.
 const CONNECTION: Connection = Connection::KeepAlive;
 
+/// Reads the `em:0` component over the meter's local RPC endpoint.
 pub struct ShellyClient {
     http: reqwest::Client,
     status_url: String,
