@@ -404,10 +404,7 @@ fn transient() -> FetchError {
 }
 
 fn at_time(hour: u32, minute: u32) -> LocalNow {
-    LocalNow {
-        date: date(2026, 3, 1),
-        time: crate::schedule::TimeOfDay::new(hour, minute).unwrap(),
-    }
+    crate::fixtures::local_now(2026, 3, 1, hour, minute)
 }
 
 fn poller(source: ScriptedSource, dir: &tempfile::TempDir) -> Poller<ScriptedSource> {

@@ -387,7 +387,7 @@ fn newest_fetch(rows: &[(Timestamp, String)]) -> Option<Timestamp> {
 const CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 /// A failed anchor fetch is retried because EnergyZero publishes tomorrow
-/// once a day and the next anchor is two hours away; 10 minutes rides out a
+/// once a day and the next anchor is hours away; 10 minutes rides out a
 /// network hiccup without hammering a feed that is down, and 3 retries cap a
 /// long outage at four requests per anchor.
 const RETRY_POLICY: RetryPolicy = RetryPolicy {

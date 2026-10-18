@@ -803,7 +803,14 @@ by default) the poller fetches local today and tomorrow: day-ahead prices are
 published around 14:00–15:00, so the 17:00 anchor is the retry for a late
 publication. Anchors missed while the process was down collapse into one
 fetch. A fetch that fails on a request error or an HTTP 5xx is retried
-up to 3 times, 10 minutes apart (logged as `Fetching prices (15:00 anchor, retry 2/3)`), over the same window as its anchor; a retry is dropped when the next anchor comes due, or when the next retry would pass midnight, and a warning says when the retries ran out. A 4xx or an undecodable answer is not retried: it warns and waits for the next anchor. A startup fetch is retried the same way. Every fetch that returns prices is recorded to the journal as an
+up to 3 times, 10 minutes apart (logged as
+`Fetching prices (15:00 anchor, retry 2/3)`), over the same window as its
+anchor. A retry is dropped when the next anchor comes due, or when it would
+pass midnight, and a warning says when the retries ran out. A 4xx, an
+undecodable answer or an empty one is not retried: it warns and waits for the
+next anchor. A failed startup fetch is retried the same way, counted from
+when the past-day backfill finishes. Every fetch that returns prices is
+recorded to the journal as an
 `energy_price` event whose payload is a JSON array of
 `{"from", "until", "wholesale"}` points (epoch milliseconds, ct/kWh); an
 empty answer is logged and not recorded. Each EnergyZero point lasts one

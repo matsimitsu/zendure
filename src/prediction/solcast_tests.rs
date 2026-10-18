@@ -177,4 +177,20 @@ mod per_site {
 
         assert_eq!(stub.asked_sorted(), vec![Site::East, Site::West]);
     }
+
+    #[tokio::test]
+    async fn a_refusing_site_outranks_an_outage_on_the_other() {
+        let f = forecaster();
+        let error = f
+            .forecast_with(anchor(6), |site| async move {
+                Err(FetchError::Status(match site {
+                    Site::East => reqwest::StatusCode::BAD_GATEWAY,
+                    Site::West => reqwest::StatusCode::TOO_MANY_REQUESTS,
+                }))
+            })
+            .await
+            .unwrap_err();
+
+        assert!(!error.is_transient());
+    }
 }

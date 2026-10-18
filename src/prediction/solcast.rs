@@ -124,11 +124,18 @@ impl SolcastForecaster {
 
         let mut guarded = guard(&self.kept);
         let kept = &mut *guarded;
-        let mut failure = None;
+        let mut failure: Option<FetchError> = None;
         for (slot, result) in [(&mut kept.east, east), (&mut kept.west, west)] {
             match result {
                 Some(Ok(series)) => *slot = Some(series),
-                Some(Err(e)) => failure = failure.or(Some(e)),
+                // A site that will refuse again outranks one that might
+                // answer next time, so a retry never re-asks a 4xx.
+                Some(Err(e)) => {
+                    failure = match failure {
+                        Some(kept) if !kept.is_transient() || e.is_transient() => Some(kept),
+                        _ => Some(e),
+                    }
+                }
                 None => {}
             }
         }

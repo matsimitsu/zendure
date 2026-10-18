@@ -254,7 +254,7 @@ impl AnchorSchedule {
 
     /// Settles `slot` and every earlier anchor today, matching `next_due`'s
     /// catch-up collapse, and clears any pending retry. A poller that retries
-    /// calls this only once a fetch has its answer, and `mark_failed` before.
+    /// calls `mark_failed` instead for a failure worth another try.
     pub fn mark_used(&mut self, now: &LocalNow, slot: TimeOfDay) {
         self.pending = None;
         if self.date != now.date {
