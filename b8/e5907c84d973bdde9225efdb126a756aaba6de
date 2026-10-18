@@ -1,0 +1,21 @@
+src/schedule.rs
+  s_e15f22bbe99ee3::t_68d54bf738dafa 6,8,104-163,169-170,180,196-252,254,264,269
+src/schedule_tests.rs
+  s_e15f22bbe99ee3::t_68d54bf738dafa 25-159
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b8e5907c84d973bdde9225efdb126a756aaba6de",
+  "prompts": {},
+  "sessions": {
+    "s_e15f22bbe99ee3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "468df55a-ad8f-4dbb-ab48-a6827886cdd3",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Beekman <robert@matsimitsu.nl>"
+    }
+  }
+}
