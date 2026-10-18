@@ -598,8 +598,9 @@ against real hardware, they just have nowhere to go over MQTT.
 
 An optional `[charger]` table adds an EV charger, read every scan round beside
 the battery and journalled as a `device_update` with `class: charger`. Without
-the table nothing changes. Only `kind = "simulated"` exists so far, and only
-beside the synthetic meter: a car that plugs in at `plug_in`, charges at
+the table nothing changes. `kind = "vestel"` reads a real Vestel EVC04 (see
+"Vestel EVC04"). `kind = "simulated"` runs only beside the synthetic meter: a
+car that plugs in at `plug_in`, charges at
 `current_amps` on `phases` phases until it has taken `session_target` Wh, sits
 full, and is unplugged at `unplug`. The synthetic meter adds its draw to the
 house load, spread evenly over all three phases for a three-phase car or on
