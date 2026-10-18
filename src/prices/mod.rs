@@ -24,7 +24,7 @@ use crate::clock::{local_date, local_day_bounds, local_day_start, local_midnight
 use crate::config::{PriceKind, PricesConfig};
 use crate::fetch::FetchError;
 use crate::journal::Journal;
-use crate::schedule::{AnchorSchedule, LocalNow};
+use crate::schedule::{AnchorSchedule, Failure, Fetch, LocalNow, RetryPolicy};
 use crate::units::{BackfillDays, CentsPerKwh, Elapsed, Timestamp};
 use crate::web::DashboardStateSender;
 
@@ -268,34 +268,44 @@ fn today_and_tomorrow(today: NaiveDate, tz: Tz) -> Option<(Timestamp, Timestamp)
     ))
 }
 
+/// A fetch that produced nothing to show. `transient` is what lets a poller
+/// tell a failure a retry may fix from one it cannot.
+#[derive(Debug, PartialEq, Eq)]
+struct Failed {
+    transient: bool,
+}
+
 /// One fetch, journalled when it priced anything. A failure is logged here
 /// so every caller reports it the same way; an empty answer counts as one,
-/// since it holds nothing worth recording or showing.
+/// since it holds nothing worth recording or showing, but never as a
+/// transient one: the feed answered.
 async fn fetch(
-    feed: &PriceFeed,
+    feed: &impl PriceSource,
     from: Timestamp,
     until: Timestamp,
     journal: &Journal,
     what: &str,
-) -> Option<Vec<PricePoint>> {
+) -> Result<Vec<PricePoint>, Failed> {
     match feed.prices(from, until).await {
         Ok(points) if points.is_empty() => {
             tracing::warn!("Price feed returned no prices for {what}");
-            None
+            Err(Failed { transient: false })
         }
         Ok(points) => {
             match serde_json::to_string(&points) {
                 Ok(json) => journal.raw(JOURNAL_KIND, &json),
                 Err(e) => tracing::warn!("Cannot serialize prices for the journal: {e}"),
             }
-            Some(points)
+            Ok(points)
         }
         Err(e) => {
             tracing::warn!("Price fetch failed for {what}: {e}");
             if let FetchError::Parse { body, .. } = &e {
                 tracing::debug!("Undecodable price body: {body}");
             }
-            None
+            Err(Failed {
+                transient: e.is_transient(),
+            })
         }
     }
 }
@@ -310,7 +320,7 @@ pub struct BackfillSummary {
 /// Fetches each of `days` in turn, one request per day, handing every
 /// fetched day to `on_fetched`. `None` when `shutdown` fired first.
 async fn backfill(
-    feed: &PriceFeed,
+    feed: &impl PriceSource,
     days: &[NaiveDate],
     tz: Tz,
     journal: &Journal,
@@ -328,11 +338,11 @@ async fn backfill(
             biased;
             _ = &mut *shutdown => return None,
             result = fetch(feed, from, until, journal, &what) => match result {
-                Some(points) => {
+                Ok(points) => {
                     on_fetched(&points);
                     summary.fetched += 1;
                 }
-                None => summary.failed += 1,
+                Err(_) => summary.failed += 1,
             },
         }
     }
@@ -376,6 +386,15 @@ fn newest_fetch(rows: &[(Timestamp, String)]) -> Option<Timestamp> {
 /// themselves gate the fetch.
 const CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
+/// A failed anchor fetch is retried because EnergyZero publishes tomorrow
+/// once a day and the next anchor is two hours away; 10 minutes rides out a
+/// network hiccup without hammering a feed that is down, and 3 retries cap a
+/// long outage at four requests per anchor.
+const RETRY_POLICY: RetryPolicy = RetryPolicy {
+    delay: Duration::from_secs(10 * 60),
+    attempts: 3,
+};
+
 /// Runs until `shutdown` resolves: seeds the dashboard from the journal,
 /// fetches today and tomorrow if an anchor is due, backfills missing past
 /// days, then keeps fetching at each due anchor. The dashboard is its only
@@ -400,8 +419,8 @@ pub fn run_price_poller(
 }
 
 /// What the poller carries between anchors.
-struct Poller {
-    feed: PriceFeed,
+struct Poller<S> {
+    feed: S,
     timezone: Tz,
     schedule: AnchorSchedule,
     snapshot: PriceSnapshot,
@@ -416,37 +435,65 @@ fn publish(dashboard_tx: &DashboardStateSender, snapshot: &PriceSnapshot) {
     dashboard_tx.send_modify(|s| s.prices_tick(snapshot));
 }
 
-impl Poller {
+impl<S: PriceSource> Poller<S> {
     fn publish(&self) {
         publish(&self.dashboard_tx, &self.snapshot);
     }
 
-    /// Fetches local today and tomorrow if an anchor is due. `None` when
+    /// Reads the clock once and acts on the schedule's decision. `None` when
     /// `shutdown` fired first.
     async fn poll_due_anchor(
         &mut self,
         shutdown: &mut tokio::sync::oneshot::Receiver<()>,
     ) -> Option<()> {
-        let now = LocalNow::now(self.timezone);
-        let Some(slot) = self.schedule.next_due(&now) else {
+        self.poll_at(LocalNow::now(self.timezone), shutdown).await
+    }
+
+    /// Fetches local today and tomorrow for an anchor that is due, or for the
+    /// retry of a failed one whose delay has elapsed. A retry fetches its
+    /// anchor's window, so its result is the anchor's. `None` when `shutdown`
+    /// fired first.
+    async fn poll_at(
+        &mut self,
+        now: LocalNow,
+        shutdown: &mut tokio::sync::oneshot::Receiver<()>,
+    ) -> Option<()> {
+        let (anchor, retry) = match self.schedule.decide(&now) {
+            Fetch::Nothing => return Some(()),
+            Fetch::Anchor(anchor) => (anchor, None),
+            Fetch::Retry {
+                anchor,
+                attempt,
+                of,
+            } => (anchor, Some((attempt, of))),
+        };
+        let Some((from, until)) = today_and_tomorrow(anchor.date, self.timezone) else {
+            self.schedule.mark_used(&now, anchor.slot);
             return Some(());
         };
-        // Marked before fetching: a failed fetch still used the anchor.
-        self.schedule.mark_used(&now, slot);
-        let Some((from, until)) = today_and_tomorrow(now.date, self.timezone) else {
-            return Some(());
+        let what = match retry {
+            None => format!("{} anchor", anchor.slot),
+            Some((attempt, of)) => format!("{} anchor, retry {attempt}/{of}", anchor.slot),
         };
-        tracing::info!("Fetching prices ({slot} anchor)");
-        let what = format!("{slot} anchor");
+        tracing::info!("Fetching prices ({what})");
         let fetched = tokio::select! {
             biased;
             _ = &mut *shutdown => return None,
             fetched = fetch(&self.feed, from, until, &self.journal, &what) => fetched,
         };
-        if let Some(points) = fetched {
-            self.snapshot
-                .merge(&points, Timestamp::from(chrono::Utc::now()), self.timezone);
-            self.publish();
+        match fetched {
+            Ok(points) => {
+                self.schedule.mark_used(&now, anchor.slot);
+                self.snapshot
+                    .merge(&points, Timestamp::from(chrono::Utc::now()), self.timezone);
+                self.publish();
+            }
+            Err(Failed { transient: true }) => {
+                if self.schedule.mark_failed(&now, anchor, RETRY_POLICY) == Failure::GaveUp {
+                    tracing::warn!("Giving up on the {} anchor's prices", anchor.slot);
+                }
+            }
+            Err(Failed { transient: false }) => self.schedule.mark_used(&now, anchor.slot),
         }
         Some(())
     }

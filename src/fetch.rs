@@ -56,7 +56,6 @@ impl FetchError {
     /// or a server-side outage, never a rejected request or an undecodable body.
     /// A `Request` error that no retry can fix (a malformed URL, a redirect
     /// loop) still reads as transient; the retry cap bounds what that costs.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn is_transient(&self) -> bool {
         match self {
             FetchError::Request(_) => true,
