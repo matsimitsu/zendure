@@ -1,0 +1,21 @@
+Cargo.lock
+  s_e6c2bf8bedbc48::t_b1c8faa8e3487e 64,172,174,324,326,336,379,393,395,892,894,930,932,1507,1509,1594,1599,1601,1633,1635,1756,1758,1782,1815,1875,1877,1897,2111,2113,2225,2454,2460,2489,2491,2498,2500,2524,2564,2569,2571,2590,2592
+Cargo.toml
+  s_e6c2bf8bedbc48::t_a8856eb86963b9 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "416ce9624e841c3842b1ec0395d92b310e03e1ef",
+  "prompts": {},
+  "sessions": {
+    "s_e6c2bf8bedbc48": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "636cff90-f200-4538-a4cf-a3c773942e5e",
+        "model": "unknown"
+      },
+      "human_author": "Robert Beekman <robert@matsimitsu.nl>"
+    }
+  }
+}
