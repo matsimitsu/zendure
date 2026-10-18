@@ -10,6 +10,7 @@ use chrono_tz::Tz;
 use super::{FORECAST_PERIOD, Prediction};
 use crate::clock::{local_date, local_day_start};
 use crate::fetch::FetchError;
+use crate::schedule::AnchorKey;
 use crate::units::{Elapsed, SolarForecastPoint, SolarPower, Timestamp, Watts};
 
 /// A rooftop array's rough peak output — enough to draw a plausible curve,
@@ -27,7 +28,7 @@ impl SimulatedForecaster {
 }
 
 impl Prediction for SimulatedForecaster {
-    async fn forecast(&self) -> Result<Vec<SolarForecastPoint>, FetchError> {
+    async fn forecast(&self, _anchor: AnchorKey) -> Result<Vec<SolarForecastPoint>, FetchError> {
         Ok(clear_sky_curve(Utc::now(), self.timezone, PEAK))
     }
 }
