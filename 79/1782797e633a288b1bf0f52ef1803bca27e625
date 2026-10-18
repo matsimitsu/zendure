@@ -1,0 +1,14 @@
+.epiq/events/hvk8kmv924dbnfbdqv8rcz9s06.jsonl
+  h_e9b3c810738378 570-581
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "791782797e633a288b1bf0f52ef1803bca27e625",
+  "prompts": {},
+  "humans": {
+    "h_e9b3c810738378": {
+      "author": "Robert Beekman <robert@matsimitsu.nl>"
+    }
+  }
+}
