@@ -1,0 +1,24 @@
+src/charger/vestel.rs
+  s_e6c2bf8bedbc48::t_269979f06fa11c 186-197,200-209,226,230,234,251-253,269,300-318,321-324,332,335-340,354,412,420,424-428
+README.md
+  s_e6c2bf8bedbc48::t_82d9ad6258f7e7 317-319
+src/charger/vestel_tests.rs
+  s_e6c2bf8bedbc48::t_4a9214f735b0e8 250-255,268-271,322-331,333
+  s_e6c2bf8bedbc48::t_26205ff4236b5e 332,334
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7d6bb53e25379e2aff8c254fbdcd4727be5a3fd1",
+  "prompts": {},
+  "sessions": {
+    "s_e6c2bf8bedbc48": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "636cff90-f200-4538-a4cf-a3c773942e5e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Beekman <robert@matsimitsu.nl>"
+    }
+  }
+}
