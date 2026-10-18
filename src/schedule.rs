@@ -3,8 +3,9 @@
 //! today. Shared by `crate::prediction` and `crate::prices`.
 
 use std::collections::BTreeSet;
+use std::time::Duration;
 
-use chrono::{NaiveDate, NaiveTime, Timelike};
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, Timelike};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
@@ -100,14 +101,73 @@ impl LocalNow {
     }
 }
 
-/// Which `poll_times` anchors have fired on the current local day. Shared by
-/// every anchor-driven poller; any date mismatch with `now` means the day
-/// rolled over and nothing has fired yet.
+impl LocalNow {
+    fn naive(&self) -> NaiveDateTime {
+        self.date.and_time(self.time.as_naive_time())
+    }
+}
+
+/// How a poller retries a failed anchor: `attempts` retries, each `delay`
+/// after the previous failure. The first fetch of an anchor is not a retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub struct RetryPolicy {
+    pub delay: Duration,
+    pub attempts: u8,
+}
+
+/// One anchor on one local day: what a fetch is made for, and what a retry
+/// has to repeat exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub struct AnchorKey {
+    pub date: NaiveDate,
+    pub slot: TimeOfDay,
+}
+
+/// What an anchor-driven poller does on this tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub enum Fetch {
+    Anchor(AnchorKey),
+    Retry {
+        anchor: AnchorKey,
+        attempt: u8,
+        of: u8,
+    },
+    Nothing,
+}
+
+/// What a failed fetch left behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub enum Failure {
+    /// A retry is pending for the anchor.
+    WillRetry,
+    /// The retries ran out and the anchor is settled without a result, so
+    /// the caller can warn.
+    GaveUp,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingRetry {
+    anchor: AnchorKey,
+    attempt: u8,
+    of: u8,
+    due: NaiveDateTime,
+}
+
+/// Which `poll_times` anchors have settled on the current local day, and the
+/// retry pending for a failed one. Shared by every anchor-driven poller; any
+/// date mismatch with `now` means the day rolled over and nothing has settled
+/// yet.
 #[derive(Debug, Clone)]
 pub struct AnchorSchedule {
     date: NaiveDate,
     fired: BTreeSet<TimeOfDay>,
     poll_times: Vec<TimeOfDay>,
+    // Not persisted: a restart fetches any anchor that isn't settled anyway.
+    pending: Option<PendingRetry>,
 }
 
 impl AnchorSchedule {
@@ -117,6 +177,7 @@ impl AnchorSchedule {
             date: NaiveDate::from_ymd_opt(1970, 1, 1).expect("1970-01-01 is a valid date"),
             fired: BTreeSet::new(),
             poll_times,
+            pending: None,
         }
     }
 
@@ -132,9 +193,65 @@ impl AnchorSchedule {
             .copied()
     }
 
-    /// Records `slot` and every earlier anchor as used today, matching
-    /// `next_due`'s catch-up collapse. Called after a failed fetch too.
+    /// What to fetch on this tick: a newly due anchor, which supersedes any
+    /// pending retry, else a retry whose delay has elapsed.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn decide(&self, now: &LocalNow) -> Fetch {
+        // A failed anchor stays unsettled, so `next_due` keeps naming it; only
+        // its retry timer may fetch it again.
+        let newly_due = self
+            .next_due(now)
+            .map(|slot| AnchorKey {
+                date: now.date,
+                slot,
+            })
+            .filter(|key| self.pending.is_none_or(|p| p.anchor != *key));
+        if let Some(anchor) = newly_due {
+            return Fetch::Anchor(anchor);
+        }
+        match self.pending {
+            Some(p) if p.anchor.date == now.date && now.naive() >= p.due => Fetch::Retry {
+                anchor: p.anchor,
+                attempt: p.attempt,
+                of: p.of,
+            },
+            _ => Fetch::Nothing,
+        }
+    }
+
+    /// Records that the fetch for `slot` failed. Arms the next retry, or
+    /// settles the anchor once `policy.attempts` retries have failed.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn mark_failed(&mut self, now: &LocalNow, slot: TimeOfDay, policy: RetryPolicy) -> Failure {
+        let anchor = AnchorKey {
+            date: now.date,
+            slot,
+        };
+        let attempt = match self.pending {
+            Some(p) if p.anchor == anchor => p.attempt + 1,
+            _ => 1,
+        };
+        if attempt > policy.attempts {
+            self.mark_used(now, slot);
+            return Failure::GaveUp;
+        }
+        let delay = TimeDelta::from_std(policy.delay).expect("a retry delay fits a TimeDelta");
+        self.pending = Some(PendingRetry {
+            anchor,
+            attempt,
+            of: policy.attempts,
+            due: now
+                .naive()
+                .checked_add_signed(delay)
+                .expect("a retry due time fits a NaiveDateTime"),
+        });
+        Failure::WillRetry
+    }
+
+    /// Settles `slot` and every earlier anchor today, matching `next_due`'s
+    /// catch-up collapse, and clears any pending retry. Called on success.
     pub fn mark_used(&mut self, now: &LocalNow, slot: TimeOfDay) {
+        self.pending = None;
         if self.date != now.date {
             self.date = now.date;
             self.fired.clear();
@@ -144,12 +261,12 @@ impl AnchorSchedule {
         }
     }
 
-    /// The local day the fired anchors belong to.
+    /// The local day the settled anchors belong to.
     pub fn date(&self) -> NaiveDate {
         self.date
     }
 
-    /// The anchors used on [`AnchorSchedule::date`], in order.
+    /// The anchors settled on [`AnchorSchedule::date`], in order.
     pub fn fired(&self) -> impl Iterator<Item = TimeOfDay> + '_ {
         self.fired.iter().copied()
     }
