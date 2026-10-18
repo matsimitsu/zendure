@@ -8,7 +8,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 
 use super::{PricePoint, PriceSource};
-use crate::fetch::{FetchError, fetch_parsed};
+use crate::fetch::{self, Connection, FetchError, fetch_parsed};
 use crate::units::{CentsPerKwh, Elapsed, Timestamp};
 
 const BASE_URL: &str = "https://api.energyzero.nl/v1/energyprices";
@@ -32,14 +32,20 @@ struct EnergyZeroEntry {
     price: f64,
 }
 
+/// A fresh connection per fetch: anchors are hours apart, and a pooled
+/// connection the far side silently dropped in between times out every fetch
+/// after the first.
+const CONNECTION: Connection = Connection::PerRequest;
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
 pub struct EnergyZeroPrices {
     http: reqwest::Client,
 }
 
 impl EnergyZeroPrices {
     pub fn new() -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
+        let http = fetch::client(CONNECTION, REQUEST_TIMEOUT)
             .build()
             .expect("failed to create HTTP client");
         EnergyZeroPrices { http }

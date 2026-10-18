@@ -49,15 +49,6 @@ pub(crate) fn request_timeout(scan_period: Duration) -> Duration {
     }
 }
 
-/// The HTTP client a polled source reaches its device with, timed out by
-/// [`request_timeout`] so every adapter abandons a request on the same rule.
-pub(crate) fn http_client(scan_period: Duration) -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(request_timeout(scan_period))
-        .build()
-        .expect("failed to create HTTP client")
-}
-
 /// Which round every source is being asked for. A sample is stamped with the
 /// round it answered, so a tick can tell one taken for it from one that
 /// arrived too late for the round before.
