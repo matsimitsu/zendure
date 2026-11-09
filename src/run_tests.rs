@@ -492,6 +492,7 @@ async fn a_device_found_down_is_written_to_once_per_outage() {
     ));
 
     let announcer = Announcer::new();
+    let publisher = crate::publish::RecordingPublisher::new();
     let mut telemetry = PollTelemetry::new(config.rte_state_path.clone(), Vec::new(), Soc::ZERO);
     let mut ceilings = CeilingSync::new(devices.ceiling_holders());
     let mut engine = Engine::new(
@@ -501,7 +502,7 @@ async fn a_device_found_down_is_written_to_once_per_outage() {
     );
     let tick = Tick {
         devices: &devices,
-        publisher: &NullPublisher,
+        publisher: &publisher,
         announcer: &announcer,
         journal: &journal,
         prefix: "test",
@@ -528,6 +529,10 @@ async fn a_device_found_down_is_written_to_once_per_outage() {
         matches!(fleet, Fleet::Complete),
         "the device must have answered round 1 for this test to mean anything"
     );
+    assert_eq!(
+        publisher.payload("test/battery_unreachable").as_deref(),
+        Some("OFF")
+    );
 
     // Real time passes the blind window with the source parked, answering
     // nothing further.
@@ -547,6 +552,11 @@ async fn a_device_found_down_is_written_to_once_per_outage() {
     let Fleet::Silent(down) = fleet else {
         panic!("the device must be down after the blind window");
     };
+    assert_eq!(
+        publisher.payload("test/battery_unreachable").as_deref(),
+        Some("ON"),
+        "Home Assistant hears the battery went down on the tick the loop does",
+    );
 
     // The outage's first tick still tries: a slot goes `Down` when its
     // reads stop, and the box may yet take a write.

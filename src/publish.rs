@@ -11,27 +11,32 @@ use rumqttc::QoS;
 
 /// How a message is delivered. QoS and retain always move together: telemetry
 /// is a value the next reading supersedes (QoS 0, not retained); a discovery
-/// document is retained for Home Assistant on reconnect (QoS 1, retained).
+/// document or the availability flag is retained for Home Assistant on
+/// reconnect (QoS 1, retained).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Delivery {
     /// A reading the next one supersedes. QoS 0, not retained.
     Telemetry,
     /// A Home Assistant discovery document. QoS 1, retained.
     Discovery,
+    /// The controller's own online/offline flag, the counterpart of the
+    /// broker's last will. Retained so a Home Assistant that restarts while
+    /// the controller is up still reads it as online.
+    Availability,
 }
 
 impl Delivery {
     pub fn qos(self) -> QoS {
         match self {
             Delivery::Telemetry => QoS::AtMostOnce,
-            Delivery::Discovery => QoS::AtLeastOnce,
+            Delivery::Discovery | Delivery::Availability => QoS::AtLeastOnce,
         }
     }
 
     pub fn retain(self) -> bool {
         match self {
             Delivery::Telemetry => false,
-            Delivery::Discovery => true,
+            Delivery::Discovery | Delivery::Availability => true,
         }
     }
 }
@@ -57,6 +62,14 @@ impl Message {
             topic,
             payload,
             delivery: Delivery::Discovery,
+        }
+    }
+
+    pub fn availability(topic: String, payload: String) -> Self {
+        Message {
+            topic,
+            payload,
+            delivery: Delivery::Availability,
         }
     }
 }

@@ -17,7 +17,7 @@ Smart controller for the Zendure AC 2400+ home battery. Reads net grid power fro
    - **Ramp** — the first non-zero setpoint after a mode change goes out at 75% power, to avoid overshooting
    - **SOC calibration** — idles when the battery reports SOC calibration in progress
    - **Cycle limit** — forces standby when daily mode transitions exceed a threshold
-   - **Device fault** — idles when the device reports an error (`isError`); `faultLevel` is ignored since it also goes non-zero for benign conditions like WiFi issues or firmware update checks
+   - **Device fault** — idles when the device reports an error (`is_error`, the report's one snake_case key); `faultLevel` is ignored since it also goes non-zero for benign conditions like WiFi issues or firmware update checks
    - **Power caps** — the device stores its charge (`chargeMaxLimit`, 2400W) and discharge (`inverseMaxPower`, 800W) limits as setpoints it can reset to 0, which stalls all power flow. The controller writes them **once at startup** and never mid-run. If the device zeroes a cap while running, the controller honors it (that direction stops) rather than overwriting a value the device changed for reasons we can't see — recovery is a deliberate process restart.
    - **Device charge ceiling (`socSet`)** — the device has its own charge target, separate from anything this controller commands, and stops charging (`socLimit: 1`) at whatever it last held regardless of `[tuning] max_soc`. Kept in step with the controller's max SOC for the day on every Zendure device: `max_soc` normally, 100% on `balance_weekday`. Written on the first tick after startup and again whenever that target changes (entering and leaving the balance day at local midnight), never every tick. A failed write is logged and retried a minute later until it lands. Virtual batteries have no such ceiling.
 6. **Tracks round-trip efficiency** (RTE) — measures charge vs discharge energy, persisted to disk
@@ -650,6 +650,7 @@ The controller publishes MQTT discovery config automatically. These sensors appe
 - `Zendure Controller Battery Pack N Temperature` — per-pack temperature (°C, dynamic)
 - `Zendure Controller Battery Daily Mode Transitions` — charge/discharge/idle transitions today
 - `Zendure Controller Battery Daily Cooldown Suppressions` — suppressed rapid toggles today
+- `Zendure Controller Controller Status` — `operational`; `zendure_api_error` when a command to the battery failed; `mqtt_timeout` while the fleet is stood down for want of a usable reading (meter or battery); `mqtt_timeout_api_error` when the stand-down's own idle write failed too
 
 When `[car_battery]` is configured (see Dashboard, below), one more sensor is
 published, under its own HA device ("Car Battery (via Zendure Controller)")
@@ -659,6 +660,44 @@ battery:
 
 **Binary sensors:**
 - `Zendure Controller Battery SOC Calibrating` — ON when SOC calibration is in progress
+- `Zendure Controller Battery Fault` (`problem`) — ON while the device reports `is_error`; the controller idles the battery meanwhile
+- `Zendure Controller Battery Unreachable` (`problem`) — ON once a battery has gone unanswered for longer than `[tuning] mqtt_timeout_secs` and the fleet is stood down, OFF on its next good reading
+
+**Availability.** Every entity names `<publish_prefix>/availability` as its
+availability topic. The controller publishes a retained `online` there on each
+broker connection, and registers a retained `offline` as its MQTT last will, so
+a crash, a hang the broker's keep-alive notices, or a lost network turns every
+entity `unavailable` in HA instead of leaving its last value on screen.
+
+### Alerting
+
+Everything worth waking up for reaches HA as one of the above, so one
+automation covers it. Replace the notify service with your phone's:
+
+```yaml
+alias: Zendure needs attention
+triggers:
+  - trigger: state
+    entity_id:
+      - binary_sensor.zendure_controller_battery_fault
+      - binary_sensor.zendure_controller_battery_unreachable
+    to: "on"
+    for: "00:01:00"
+  - trigger: state
+    entity_id: sensor.zendure_controller_controller_status
+    not_to: operational
+    for: "00:05:00"
+actions:
+  - action: notify.mobile_app_your_phone
+    data:
+      title: Zendure
+      message: >-
+        {{ trigger.to_state.name }} is {{ trigger.to_state.state }}
+```
+
+The status trigger also fires on `unavailable`, which is how a dead
+controller shows up. Entity ids follow HA's naming from the device and
+sensor names; check them under the "Zendure Controller" device if yours differ.
 
 When `[charger]` is configured, an "EV Charger (via Zendure Controller)" device
 is announced too, separate from the battery's. Its sensors are
