@@ -82,6 +82,20 @@ mod tests {
     use crate::models::ZendureProperties;
     use crate::units::PowerCap;
 
+    /// Trimmed from a live report taken while the app said the firmware was
+    /// too low: the device froze `packInputPower` at its last value and set
+    /// `is_error`. The wire key is snake_case, unlike its neighbours.
+    #[test]
+    fn a_live_error_report_sets_fault() {
+        let body = r#"{"sn":"HEC4NENCN490270","product":"solarFlow2400AC+","properties":{
+            "packInputPower":117,"outputPackPower":0,"outputHomePower":117,"packState":0,
+            "electricLevel":53,"socStatus":0,"socLimit":0,"faultLevel":0,"outputLimit":517,
+            "inverseMaxPower":800,"chargeMaxLimit":2400,"is_error":1}}"#;
+        let report: crate::models::ZendureReport = serde_json::from_str(body).unwrap();
+
+        assert!(BatteryState::from_properties(&report.properties, &AC2400_PLUS).fault);
+    }
+
     #[test]
     fn reported_zero_limit_is_honored() {
         // Device zeroed its own caps mid-run — honor it (stop), don't overwrite.
