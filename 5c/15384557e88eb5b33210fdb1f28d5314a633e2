@@ -1,0 +1,41 @@
+src/publish.rs
+  s_4a03092f3d914b::t_71f7c1b394ae3f 14-15,22-25,32,39,67-72
+  s_136ea35d03004f::t_8a13cb309ff052 73-74
+README.md
+  s_4a03092f3d914b::t_8edf9ea0162844 20,653,663-700
+src/mqtt/discovery.rs
+  s_4a03092f3d914b::t_cdf392406625ff 1099-1102,1147-1151
+  s_4a03092f3d914b::t_a82a3766cd29b0 20-39,153,256,262,266,271-273,289,292-314,339-343,414-429,513,607,1069-1070,1092-1098,1103-1146,1152-1167
+src/run.rs
+  s_4a03092f3d914b::t_cdf392406625ff 212,227,266-274,547,648
+src/mqtt/connection.rs
+  s_4a03092f3d914b::t_cdf392406625ff 10,16,18-21,24-29,59
+src/run_tests.rs
+  s_4a03092f3d914b::t_c2d5f6c5227ef8 495,505,532-535,555-559
+src/mqtt/mod.rs
+  s_4a03092f3d914b::t_e698ddd189b2a3 14-16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5c15384557e88eb5b33210fdb1f28d5314a633e2",
+  "prompts": {},
+  "sessions": {
+    "s_136ea35d03004f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "157e68d0-db76-45e7-ae82-bdf139e0f316",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Beekman <robert@matsimitsu.nl>"
+    },
+    "s_4a03092f3d914b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f291ebce-3cc3-4eb8-9b50-6cf6039e33ec",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Beekman <robert@matsimitsu.nl>"
+    }
+  }
+}
