@@ -209,6 +209,7 @@ impl Tick<'_> {
     ) -> Fleet {
         let mut fleet = Fleet::Complete;
         let mut silent = Vec::new();
+        let mut answered = false;
 
         for (id, delivery) in deliveries {
             let (sampled_at, reading) = match delivery {
@@ -223,6 +224,7 @@ impl Tick<'_> {
                 }
             };
 
+            answered = true;
             telemetry.record(&reading);
             if let Some(soc_set) = reading.telemetry.soc_set {
                 ceilings.observe(&id, soc_set);
@@ -259,6 +261,15 @@ impl Tick<'_> {
                     });
                 tx.send_modify(|state| state.poll_tick(&snapshot, &event, polled, figures, at.now));
             }
+        }
+
+        // For the fleet, not per box, so two batteries where one is down
+        // don't flip the sensor every tick. A round where nothing landed yet
+        // says nothing either way and leaves it as it was.
+        if !silent.is_empty() {
+            mqtt::publish_battery_unreachable(self.publisher, self.prefix, true);
+        } else if answered {
+            mqtt::publish_battery_unreachable(self.publisher, self.prefix, false);
         }
 
         if silent.is_empty() {
@@ -533,6 +544,7 @@ impl PollTelemetry {
         );
 
         mqtt::publish_soc_calibrating(publisher, prefix, reading.state.soc_calibrating);
+        mqtt::publish_battery_fault(publisher, prefix, reading.state.fault);
         mqtt::publish_battery_soc(publisher, prefix, reading.state.soc);
         mqtt::publish_battery_power(publisher, prefix, telemetry.charge, telemetry.discharge);
 
@@ -633,7 +645,7 @@ pub async fn run(
     // brokerless run skips that half of shutdown entirely.
     let (publisher, mut mqtt_drain): (Arc<dyn Publisher>, Option<MqttDrain>) = match &config.mqtt {
         Some(mqtt_cfg) => {
-            let (mqtt_client, eventloop) = mqtt::create_mqtt_client(mqtt_cfg);
+            let (mqtt_client, eventloop) = mqtt::create_mqtt_client(mqtt_cfg, &ha_prefix);
             // The sink the decision path publishes through. Its task owns
             // the only `await` against the broker; nothing below this line
             // can block on one.

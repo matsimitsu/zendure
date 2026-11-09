@@ -7,17 +7,26 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet};
+use rumqttc::{AsyncClient, Event, EventLoop, LastWill, MqttOptions, Packet, QoS};
 
 use crate::announce::Announcer;
 use crate::config::MqttConfig;
 use crate::publish::Publisher;
 
-use super::discovery::publish_ha_discovery;
+use super::discovery::{OFFLINE, announce_online, availability_topic, publish_ha_discovery};
 
-pub fn create_mqtt_client(mqtt: &MqttConfig) -> (AsyncClient, EventLoop) {
+/// `prefix` is where the last will goes: the broker publishes it for us
+/// when this process dies or drops off the network without a word, which is
+/// exactly when the controller cannot report anything itself.
+pub fn create_mqtt_client(mqtt: &MqttConfig, prefix: &str) -> (AsyncClient, EventLoop) {
     let mut opts = MqttOptions::new(&mqtt.client_id, &mqtt.host, mqtt.port);
     opts.set_keep_alive(Duration::from_secs(30));
+    opts.set_last_will(LastWill::new(
+        availability_topic(prefix),
+        OFFLINE,
+        QoS::AtLeastOnce,
+        true,
+    ));
     if let (Some(user), Some(pass)) = (&mqtt.username, &mqtt.password) {
         opts.set_credentials(user, pass);
     }
@@ -47,6 +56,7 @@ pub async fn run_connection(
             }
         }
 
+        announce_online(&*publisher, &announcer, &ha_prefix);
         publish_ha_discovery(&*publisher, &announcer, &ha_prefix);
     }
 }

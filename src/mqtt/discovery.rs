@@ -17,6 +17,26 @@ fn ha_device() -> serde_json::Value {
     })
 }
 
+/// Where the controller says whether it is running. The broker publishes
+/// [`OFFLINE`] here as the connection's last will, so a crash or a lost
+/// network shows in Home Assistant as every entity going unavailable rather
+/// than as the last values frozen in place.
+pub fn availability_topic(prefix: &str) -> String {
+    format!("{prefix}/availability")
+}
+
+pub const ONLINE: &str = "online";
+pub const OFFLINE: &str = "offline";
+
+/// Announced like a discovery document, once per connection until it sticks:
+/// the broker may have published the last will of the connection this one
+/// replaced, and only this message turns the entities back on.
+pub fn announce_online(publisher: &dyn Publisher, announcer: &Announcer, prefix: &str) {
+    announcer.announce(publisher, "availability", || {
+        Message::availability(availability_topic(prefix), ONLINE.to_string())
+    });
+}
+
 /// One sensor, and the only place its id is spelled: needed both in the
 /// discovery document (which topic to watch) and the publish (which topic
 /// gets the value), and the announce-once map keys on the same string — a
@@ -130,6 +150,7 @@ fn sensor_config(
         "name": name,
         "state_topic": format!("{prefix}/{id}"),
         "unique_id": format!("zendure_{id}"),
+        "availability_topic": availability_topic(prefix),
         "device": device,
     });
 
@@ -232,19 +253,24 @@ const SENSORS: &[Sensor] = &[
 struct BinarySensor {
     id: &'static str,
     name: &'static str,
+    device_class: Option<&'static str>,
 }
 
 impl BinarySensor {
     fn discovery_on(&self, prefix: &str, device: serde_json::Value) -> Message {
         let id = self.id;
-        let config = serde_json::json!({
+        let mut config = serde_json::json!({
             "name": self.name,
             "state_topic": format!("{prefix}/{id}"),
             "unique_id": format!("zendure_{id}"),
+            "availability_topic": availability_topic(prefix),
             "payload_on": "ON",
             "payload_off": "OFF",
             "device": device,
         });
+        if let Some(dc) = self.device_class {
+            config["device_class"] = serde_json::json!(dc);
+        }
         Message::discovery(
             format!("homeassistant/binary_sensor/zendure_{id}/config"),
             config.to_string(),
@@ -260,7 +286,31 @@ impl BinarySensor {
 const SOC_CALIBRATING: BinarySensor = BinarySensor {
     id: "soc_calibrating",
     name: "Battery SOC Calibrating",
+    device_class: None,
 };
+
+/// `problem`, so Home Assistant files these under "needs attention" and an
+/// automation can alert on any of them by device class alone.
+const PROBLEM: Option<&str> = Some("problem");
+
+/// The device's own error flag (`is_error`). The controller idles while it is
+/// on, so this is the one place an operator learns why.
+const BATTERY_FAULT: BinarySensor = BinarySensor {
+    id: "battery_fault",
+    name: "Battery Fault",
+    device_class: PROBLEM,
+};
+
+/// A battery the loop has stood down for, having gone unanswered for longer
+/// than it may decide blind. The blind window is the debounce: a single
+/// failed read never turns this on.
+const BATTERY_UNREACHABLE: BinarySensor = BinarySensor {
+    id: "battery_unreachable",
+    name: "Battery Unreachable",
+    device_class: PROBLEM,
+};
+
+const BINARY_SENSORS: &[BinarySensor] = &[SOC_CALIBRATING, BATTERY_FAULT, BATTERY_UNREACHABLE];
 
 /// The car's own HA device — separate from `ha_device()`'s "Zendure
 /// Controller", since this reading describes a different physical thing
@@ -286,9 +336,11 @@ pub fn publish_ha_discovery(publisher: &dyn Publisher, announcer: &Announcer, pr
         announcer.announce(publisher, sensor.id, || sensor.discovery(prefix));
     }
 
-    announcer.announce(publisher, SOC_CALIBRATING.id, || {
-        SOC_CALIBRATING.discovery_on(prefix, ha_device())
-    });
+    for sensor in BINARY_SENSORS {
+        announcer.announce(publisher, sensor.id, || {
+            sensor.discovery_on(prefix, ha_device())
+        });
+    }
 }
 
 /// Publish one value per id, all under the same prefix.
@@ -356,6 +408,22 @@ pub fn publish_soc_calibrating(publisher: &dyn Publisher, prefix: &str, calibrat
         publisher,
         prefix,
         vec![(SOC_CALIBRATING.id, BinarySensor::payload(calibrating))],
+    );
+}
+
+pub fn publish_battery_fault(publisher: &dyn Publisher, prefix: &str, fault: bool) {
+    publish_values(
+        publisher,
+        prefix,
+        vec![(BATTERY_FAULT.id, BinarySensor::payload(fault))],
+    );
+}
+
+pub fn publish_battery_unreachable(publisher: &dyn Publisher, prefix: &str, unreachable: bool) {
+    publish_values(
+        publisher,
+        prefix,
+        vec![(BATTERY_UNREACHABLE.id, BinarySensor::payload(unreachable))],
     );
 }
 
@@ -442,6 +510,7 @@ pub fn publish_car_battery_soc(
             "name": CAR_BATTERY_SOC.name,
             "state_topic": format!("{prefix}/{}", CAR_BATTERY_SOC.id),
             "unique_id": format!("zendure_{}", CAR_BATTERY_SOC.id),
+            "availability_topic": availability_topic(prefix),
             "device": car_ha_device(),
             "unit_of_measurement": CAR_BATTERY_SOC.unit,
             "device_class": "battery",
@@ -535,6 +604,7 @@ const CHARGER_PHASES: Sensor = Sensor::new("ev_charger_phases", "EV Charger Phas
 const CHARGER_DISCHARGE_HOLD: BinarySensor = BinarySensor {
     id: "ev_charger_discharge_hold",
     name: "EV Charger Discharge Hold",
+    device_class: None,
 };
 
 /// Announced and published together from the scan round that read the
@@ -996,6 +1066,8 @@ mod tests {
         );
         publish_rte(&p, "zendure", None, KiloWattHours(0.0), KiloWattHours(0.0));
         publish_soc_calibrating(&p, "zendure", false);
+        publish_battery_fault(&p, "zendure", false);
+        publish_battery_unreachable(&p, "zendure", false);
         publish_battery_power(&p, "zendure", Watts::ZERO, Watts::ZERO);
         publish_status(&p, "zendure", "operational");
         publish_battery_soc(&p, "zendure", Soc::ZERO);
@@ -1016,5 +1088,81 @@ mod tests {
             .collect();
 
         assert_eq!(announced, published);
+    }
+
+    #[test]
+    fn problem_sensors_announce_as_problems_and_publish_on_and_off() {
+        let p = RecordingPublisher::new();
+        publish_ha_discovery(&p, &Announcer::new(), "zendure");
+
+        for id in ["battery_fault", "battery_unreachable"] {
+            let doc = config_of(
+                &p,
+                &format!("homeassistant/binary_sensor/zendure_{id}/config"),
+            );
+            assert_eq!(doc["device_class"], "problem", "{id}");
+            assert_eq!(doc["device"]["identifiers"][0], "zendure_controller");
+        }
+
+        publish_battery_fault(&p, "zendure", true);
+        publish_battery_unreachable(&p, "zendure", false);
+        assert_eq!(p.payload("zendure/battery_fault").unwrap(), "ON");
+        assert_eq!(p.payload("zendure/battery_unreachable").unwrap(), "OFF");
+    }
+
+    /// Every entity names the topic the last will lands on: one that doesn't
+    /// keeps showing its last value after the controller has died.
+    #[test]
+    fn every_entity_follows_the_controllers_availability() {
+        let p = RecordingPublisher::new();
+        let announcer = Announcer::new();
+        publish_ha_discovery(&p, &announcer, "zendure");
+        publish_car_battery_soc(&p, &announcer, "zendure", Soc::new(50));
+        publish_charger(
+            &p,
+            &announcer,
+            "zendure",
+            &ChargerState::test_sample(),
+            false,
+        );
+        publish_temperatures(
+            &p,
+            &announcer,
+            "zendure",
+            None,
+            &[PackTemperature {
+                index: 0,
+                temp: DeciKelvin(2981),
+            }],
+        );
+
+        let docs: Vec<_> = p
+            .sent()
+            .into_iter()
+            .filter(|m| m.delivery == Delivery::Discovery)
+            .collect();
+        assert!(docs.len() > 20);
+        for m in docs {
+            let doc: serde_json::Value = serde_json::from_str(&m.payload).unwrap();
+            assert_eq!(
+                doc["availability_topic"], "zendure/availability",
+                "{}",
+                m.topic
+            );
+        }
+    }
+
+    #[test]
+    fn online_is_retained_on_the_topic_the_last_will_uses() {
+        let p = RecordingPublisher::new();
+        let announcer = Announcer::new();
+        announce_online(&p, &announcer, "zendure");
+        announce_online(&p, &announcer, "zendure");
+
+        let sent = p.sent();
+        assert_eq!(sent.len(), 1, "once per connection");
+        assert_eq!(sent[0].topic, availability_topic("zendure"));
+        assert_eq!(sent[0].payload, ONLINE);
+        assert!(sent[0].delivery.retain());
     }
 }
