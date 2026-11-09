@@ -103,7 +103,10 @@ pub struct ZendureProperties {
     /// non-zero for benign conditions like WiFi hiccups or firmware update
     /// checks. See `BatteryState::fault`.
     pub fault_level: Option<u32>,
-    /// Error flag: 0=no error, 1=error
+    /// Error flag: 0=no error, 1=error. The one snake_case key in an
+    /// otherwise camelCase report, so `rename_all` alone would look for
+    /// `isError`, never match, and leave the fault guard blind.
+    #[serde(rename = "is_error")]
     pub is_error: Option<u32>,
     /// Off-grid output power (W)
     pub grid_off_power: Option<u32>,
