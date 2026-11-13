@@ -1,0 +1,19 @@
+Cargo.toml
+  s_78561fda2fee59::t_6dd1fe96026dad 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "79c6ba6c57ee3eba2848e77b2270fced656684f4",
+  "prompts": {},
+  "sessions": {
+    "s_78561fda2fee59": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "337726ac-fbcf-4b43-b318-2a11e2ce1fd2",
+        "model": "unknown"
+      },
+      "human_author": "Robert Beekman <robert@matsimitsu.nl>"
+    }
+  }
+}
