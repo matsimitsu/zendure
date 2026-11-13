@@ -47,6 +47,14 @@ impl Default for SocLimits {
 /// implementations follow.
 const RAMP_FACTOR: RampFactor = RampFactor::new(75);
 
+/// How long the grid must keep importing before a charging battery gives up.
+/// A hob or kettle element duty-cycling every few seconds swings the meter
+/// between export and a kilowatt of import; leaving charge on the first
+/// import tick turned each swing into two mode transitions, re-armed the
+/// ramp so the battery never actually charged, and spent the daily cycle
+/// budget within two hours. Export that returns inside the window resets it.
+const CHARGE_EXIT_HOLD: Duration = Duration::from_secs(45);
+
 /// The knobs [`car_charging`] reads, so the controller, the dashboard and Home
 /// Assistant all hold discharge on the same rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +146,12 @@ pub struct ControllerState {
     /// from anyway.
     #[serde(default)]
     pub commanded_power: Watts,
+    /// While charging: when the grid started importing without a break, so
+    /// [`CHARGE_EXIT_HOLD`] can tell a sustained import from a load blip.
+    /// `None` when not charging or still exporting. Defaulted so older rows
+    /// still read.
+    #[serde(default)]
+    pub charge_import_since: Option<Timestamp>,
 }
 
 /// Reactive self-consumption control. Deliberately free of clock reads: every
@@ -204,6 +218,7 @@ impl Controller {
                 last_cycle_reset_day: clock.day_ordinal,
                 ramp_pending: false,
                 commanded_power: Watts::ZERO,
+                charge_import_since: None,
             },
             min_mode_duration,
             min_decision_interval,
@@ -325,12 +340,24 @@ impl Controller {
             };
         }
 
+        self.track_charge_import(world, clock);
         let target = self.target(world, battery, clock);
 
         let power = self.target_power(target.mode, grid_power, battery);
 
         // 3. Apply guards (cooldown, ramp, standby timeout)
         self.apply_guards(target, power, grid_power, clock)
+    }
+
+    /// Starts, keeps or clears the import timer [`CHARGE_EXIT_HOLD`] reads.
+    fn track_charge_import(&mut self, world: &World, clock: &Clock) {
+        let importing = self.state.last_mode == ControlMode::Charge
+            && world.underlying_grid() >= GridPower::ZERO;
+        self.state.charge_import_since = if importing {
+            self.state.charge_import_since.or(Some(clock.now))
+        } else {
+            None
+        };
     }
 
     /// Drop to idle without going through the guards — used by the overrides
@@ -381,19 +408,23 @@ impl Controller {
         // the battery's consumption (charging) or production (discharging).
         let underlying_grid = world.underlying_grid();
 
-        // Hysteresis: once charging, keep going as long as we're still exporting (<
-        // 0W).
-        // Only require the full start threshold to *begin* charging.
-        let charge_threshold = if self.state.last_mode == ControlMode::Charge {
-            GridPower::ZERO
+        // Hysteresis: once charging, keep going until the grid has imported for
+        // a whole [`CHARGE_EXIT_HOLD`] (the setpoint law already backs the power
+        // off meanwhile). Only require the full start threshold to *begin*.
+        let charging = self.state.last_mode == ControlMode::Charge;
+        let import_outlasted = self
+            .state
+            .charge_import_since
+            .is_some_and(|since| clock.now - since >= CHARGE_EXIT_HOLD);
+        let charge_wanted = if charging {
+            !import_outlasted
         } else {
-            self.charge_start_threshold
+            underlying_grid < self.charge_start_threshold
         };
 
-        // Exporting to grid, battery below max SOC, and battery accepts charge → charge
+        // Battery below max SOC and accepts charge, and the grid says so → charge
         let max_soc = self.effective_max_soc(clock.weekday);
-        if battery.soc < max_soc && !battery.soc_limit_reached && underlying_grid < charge_threshold
-        {
+        if battery.soc < max_soc && !battery.soc_limit_reached && charge_wanted {
             return ControlMode::Charge;
         }
 

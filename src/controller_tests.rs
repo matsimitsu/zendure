@@ -17,6 +17,7 @@ fn distinctive_state() -> ControllerState {
         last_cycle_reset_day: 66,
         ramp_pending: true,
         commanded_power: Watts(77),
+        charge_import_since: Some(Timestamp::from_millis(88)),
     }
 }
 
@@ -171,6 +172,13 @@ fn controller_no_cooldown() -> Controller {
 
 /// Controller that has been in `mode` for the given duration. Takes a
 /// `Duration` so the call sites read the same as they always have.
+/// Marks the grid as having imported for longer than the charge exit hold,
+/// the state a sustained import (not a load blip) leaves behind.
+fn sustained_import(ctrl: &mut Controller) {
+    ctrl.state.charge_import_since =
+        Some(Timestamp::from_millis(NOW_MS) - Elapsed::of(CHARGE_EXIT_HOLD * 2));
+}
+
 fn controller_in_mode(mode: ControlMode, elapsed: Duration) -> Controller {
     let mode_change = Timestamp::from_millis(NOW_MS) - Elapsed::of(elapsed);
     let base = default_controller();
@@ -685,6 +693,7 @@ fn decision_allowed_after_interval() {
 fn charge_to_discharge_blocked_by_idle_duration() {
     // In Charge mode → target_mode returns Idle (no idle time for discharge)
     let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(5));
+    sustained_import(&mut ctrl);
     let decision = decide_at(
         &mut ctrl,
         &world(GridPower(300.0), SolarPower::new(0.0), &battery(50)),
@@ -742,6 +751,7 @@ fn idle_to_discharge_allowed_after_idle_duration() {
 #[test]
 fn charge_to_idle_always_allowed() {
     let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(1));
+    sustained_import(&mut ctrl);
     let decision = decide_at(
         &mut ctrl,
         &world(GridPower(20.0), SolarPower::new(0.0), &battery(50)),
@@ -764,6 +774,7 @@ fn rapid_oscillation_stays_idle() {
     assert_eq!(d1.mode, ControlMode::Charge);
 
     // After charging, idle duration not met → stays idle (not discharge)
+    sustained_import(&mut ctrl);
     let d2 = decide_at(
         &mut ctrl,
         &world(GridPower(200.0), SolarPower::new(0.0), &bat),
@@ -778,6 +789,7 @@ fn rapid_oscillation_stays_idle() {
     );
     assert_eq!(d3.mode, ControlMode::Charge);
 
+    sustained_import(&mut ctrl);
     let d4 = decide_at(
         &mut ctrl,
         &world(GridPower(200.0), SolarPower::new(0.0), &bat),
@@ -845,7 +857,8 @@ fn transition_increments_daily_cycles() {
     );
     assert_eq!(ctrl.state.daily_transitions, 1);
 
-    // Charge → Idle (within deadband)
+    // Charge → Idle (after a sustained import)
+    sustained_import(&mut ctrl);
     decide_at(
         &mut ctrl,
         &world(GridPower(20.0), SolarPower::new(0.0), &battery(50)),
@@ -906,6 +919,7 @@ fn cycle_limit_forces_standby() {
         &world(GridPower(-200.0), SolarPower::new(0.0), &battery(50)),
         &clock(12),
     );
+    sustained_import(&mut ctrl);
     decide_at(
         &mut ctrl,
         &world(GridPower(20.0), SolarPower::new(0.0), &battery(50)),
@@ -1092,6 +1106,7 @@ fn charge_hysteresis_stops_when_importing() {
     // Wait, let's use a simpler case: battery idle, grid +10W → underlying = +10 >=
     // 0.
     let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(60));
+    sustained_import(&mut ctrl);
     let decision = decide_at(
         &mut ctrl,
         &world(GridPower(10.0), SolarPower::new(0.0), &battery(50)),
@@ -1104,12 +1119,65 @@ fn charge_hysteresis_stops_when_importing() {
 fn charge_hysteresis_boundary_at_zero() {
     // Already charging, underlying_grid = 0.0 exactly → 0.0 < 0.0 is false → stops.
     let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(60));
+    sustained_import(&mut ctrl);
     let decision = decide_at(
         &mut ctrl,
         &world(GridPower(0.0), SolarPower::new(0.0), &battery(50)),
         &clock(12),
     );
     assert_eq!(decision.mode, ControlMode::Idle);
+}
+
+/// The stove incident (Nov 12-13): a hob element duty-cycling every ~6 s swung
+/// the meter between -180 W and +1100 W and flipped idle↔charge each tick,
+/// spending the 200-transition daily budget in under two hours.
+#[test]
+fn a_load_cycling_every_few_seconds_does_not_flap_charge() {
+    let mut ctrl = controller_in_mode(ControlMode::Idle, Duration::from_secs(60));
+    ctrl.min_decision_interval = Duration::ZERO;
+    let bat = battery(50);
+    let mut at = |ctrl: &mut Controller, secs: i64, grid: f64| {
+        let clock = Clock {
+            now: Timestamp::from_millis(NOW_MS + secs * 1000),
+            ..clock(12)
+        };
+        decide_at(
+            ctrl,
+            &world(GridPower(grid), SolarPower::new(300.0), &bat),
+            &clock,
+        )
+    };
+
+    assert_eq!(at(&mut ctrl, 0, -180.0).mode, ControlMode::Charge);
+    for tick in 1..=20 {
+        let grid = if tick % 2 == 0 { -180.0 } else { 1100.0 };
+        let decision = at(&mut ctrl, tick * 3, grid);
+        assert_eq!(decision.mode, ControlMode::Charge, "tick {tick}");
+    }
+    assert_eq!(ctrl.state.daily_transitions, 1, "only the entry counts");
+}
+
+#[test]
+fn sustained_import_still_ends_charge() {
+    let mut ctrl = controller_in_mode(ControlMode::Charge, Duration::from_secs(60));
+    ctrl.min_decision_interval = Duration::ZERO;
+    let bat = battery(50);
+    let mut mode_at = |secs: i64| {
+        let clock = Clock {
+            now: Timestamp::from_millis(NOW_MS + secs * 1000),
+            ..clock(12)
+        };
+        decide_at(
+            &mut ctrl,
+            &world(GridPower(300.0), SolarPower::new(0.0), &bat),
+            &clock,
+        )
+        .mode
+    };
+
+    assert_eq!(mode_at(0), ControlMode::Charge);
+    assert_eq!(mode_at(30), ControlMode::Charge);
+    assert_eq!(mode_at(46), ControlMode::Idle);
 }
 
 // --- Discharge hysteresis tests ---
