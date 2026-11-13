@@ -1,0 +1,26 @@
+src/controller.rs
+  s_78561fda2fee59::t_2ae6083147a516 50-57,149-154,221,343,352-362,411-420,422,425,427
+src/controller_tests.rs
+  s_78561fda2fee59::t_44c632e423b431 175-181,696,754,1109,1122
+  s_78561fda2fee59::t_8bae24196a4c44 777,792,860-861,922,1131-1181
+  s_78561fda2fee59::t_2ae6083147a516 20
+  s_78561fda2fee59::t_ae5272af17aa7a 1182
+README.md
+  s_78561fda2fee59::t_6e190ad62b6d68 17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2bdc093106b8a265e5df9f5007c64fa2cd85bdb1",
+  "prompts": {},
+  "sessions": {
+    "s_78561fda2fee59": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "337726ac-fbcf-4b43-b318-2a11e2ce1fd2",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Robert Beekman <robert@matsimitsu.nl>"
+    }
+  }
+}
